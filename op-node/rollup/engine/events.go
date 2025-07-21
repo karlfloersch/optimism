@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
+	"github.com/ethereum-optimism/optimism/op-node/p2p"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -312,27 +313,36 @@ func (ev ELSyncStartedEvent) String() string {
 	return "el-sync-started"
 }
 
+type L2Chain interface {
+	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
+}
+
 type EngDeriver struct {
 	metrics Metrics
 
 	log     log.Logger
 	cfg     *rollup.Config
 	ec      *EngineController
+	l2      L2Chain // Added L2 chain access for payload fetching
 	ctx     context.Context
 	emitter event.Emitter
+	mode    string // Node operation mode: normal, prover, follower
 }
 
 var _ event.Deriver = (*EngDeriver)(nil)
 
 func NewEngDeriver(log log.Logger, ctx context.Context, cfg *rollup.Config,
-	metrics Metrics, ec *EngineController,
+	metrics Metrics, ec *EngineController, l2 L2Chain, mode string,
 ) *EngDeriver {
 	return &EngDeriver{
 		log:     log,
 		cfg:     cfg,
 		ec:      ec,
+		l2:      l2,
 		ctx:     ctx,
 		metrics: metrics,
+		emitter: nil, // set later via AttachEmitter
+		mode:    mode,
 	}
 }
 
@@ -503,6 +513,18 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			CrossSafe: d.ec.SafeL2Head(),
 			LocalSafe: d.ec.LocalSafeL2Head(),
 		})
+
+		// If in prover mode, gossip the safe head to other nodes
+		if d.mode == "prover" {
+			envelope, err := d.l2.PayloadByNumber(ctx, x.Ref.Number)
+			if err != nil {
+				d.log.Warn("Failed to fetch execution payload for safe head gossip", "ref", x.Ref, "err", err)
+			} else {
+				d.log.Debug("Gossiping safe head in prover mode", "ref", x.Ref, "hash", envelope.ExecutionPayload.BlockHash)
+				d.emitter.Emit(ctx, p2p.GossipSafeHeadEvent{Envelope: envelope})
+			}
+		}
+
 		if x.Ref.Number > d.ec.crossUnsafeHead.Number {
 			d.log.Debug("Cross Unsafe Head is stale, updating to match cross safe", "cross_unsafe", d.ec.crossUnsafeHead, "cross_safe", x.Ref)
 			d.ec.SetCrossUnsafeHead(x.Ref)

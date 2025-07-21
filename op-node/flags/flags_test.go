@@ -142,3 +142,23 @@ func TestEnvVarFormat(t *testing.T) {
 		})
 	}
 }
+
+// TestModeFlag tests that the mode flag is properly defined and has correct defaults
+func TestModeFlag(t *testing.T) {
+	// Test that the Mode flag exists in optional flags
+	found := false
+	for _, flag := range optionalFlags {
+		if flag.Names()[0] == "mode" {
+			found = true
+			if stringFlag, ok := flag.(*cli.StringFlag); ok {
+				require.Equal(t, "normal", stringFlag.Value, "Mode flag should default to 'normal'")
+				require.Contains(t, stringFlag.EnvVars, "OP_NODE_MODE", "Mode flag should have correct env var")
+				require.Equal(t, MiscCategory, stringFlag.Category, "Mode flag should be in MiscCategory")
+			} else {
+				t.Error("Mode flag should be a StringFlag")
+			}
+			break
+		}
+	}
+	require.True(t, found, "Mode flag should be in optionalFlags")
+}

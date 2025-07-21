@@ -26,3 +26,10 @@ func (f *FilterSelf) OnUnsafeL2Payload(ctx context.Context, from peer.ID, msg *e
 	}
 	return f.inner.OnUnsafeL2Payload(ctx, from, msg)
 }
+
+func (f *FilterSelf) OnSafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error {
+	if f.self == from {
+		return nil // ignore safe heads that we published ourselves
+	}
+	return f.inner.OnSafeL2Payload(ctx, from, msg)
+}

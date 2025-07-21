@@ -87,6 +87,9 @@ type Config struct {
 
 	// Experimental. Enables new opstack RPC namespace. Used by op-test-sequencer.
 	ExperimentalOPStackAPI bool
+
+	// Node operation mode: normal, prover (signs and gossips safe heads), or follower (accepts gossiped safe heads)
+	Mode string
 }
 
 // ConductorRPCFunc retrieves the endpoint. The RPC may not immediately be available.
@@ -160,6 +163,9 @@ func (cfg *Config) Check() error {
 	}
 	if !(cfg.RollupHalt == "" || cfg.RollupHalt == "major" || cfg.RollupHalt == "minor" || cfg.RollupHalt == "patch") {
 		return fmt.Errorf("invalid rollup halting option: %q", cfg.RollupHalt)
+	}
+	if !(cfg.Mode == "" || cfg.Mode == "normal" || cfg.Mode == "prover" || cfg.Mode == "follower") {
+		return fmt.Errorf("invalid mode option: %q (must be 'normal', 'prover', or 'follower')", cfg.Mode)
 	}
 	if cfg.ConductorEnabled {
 		if state, _ := cfg.ConfigPersistence.SequencerState(); state != StateUnset {

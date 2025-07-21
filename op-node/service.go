@@ -121,6 +121,8 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
 		ExperimentalOPStackAPI: ctx.Bool(flags.ExperimentalOPStackAPI.Name),
+
+		Mode: ctx.String(flags.Mode.Name),
 	}
 
 	if err := cfg.LoadPersisted(log); err != nil {
@@ -200,6 +202,7 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		SequencerStopped:    ctx.Bool(flags.SequencerStoppedFlag.Name),
 		SequencerMaxSafeLag: ctx.Uint64(flags.SequencerMaxSafeLagFlag.Name),
 		RecoverMode:         ctx.Bool(flags.SequencerRecoverMode.Name),
+		Mode:                ctx.String(flags.Mode.Name),
 	}
 }
 

@@ -74,11 +74,19 @@ func TestP2PSimple(t *testing.T) {
 
 type mockGossipIn struct {
 	OnUnsafeL2PayloadFn func(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
+	OnSafeL2PayloadFn   func(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
 }
 
 func (m *mockGossipIn) OnUnsafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error {
 	if m.OnUnsafeL2PayloadFn != nil {
 		return m.OnUnsafeL2PayloadFn(ctx, from, msg)
+	}
+	return nil
+}
+
+func (m *mockGossipIn) OnSafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error {
+	if m.OnSafeL2PayloadFn != nil {
+		return m.OnSafeL2PayloadFn(ctx, from, msg)
 	}
 	return nil
 }

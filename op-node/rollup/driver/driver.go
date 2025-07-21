@@ -8,6 +8,7 @@ import (
 
 	altda "github.com/ethereum-optimism/optimism/op-alt-da"
 	"github.com/ethereum-optimism/optimism/op-node/metrics/metered"
+	"github.com/ethereum-optimism/optimism/op-node/p2p"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/async"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/attributes"
@@ -124,6 +125,8 @@ type SyncStatusTracker interface {
 type Network interface {
 	// SignAndPublishL2Payload is called by the driver whenever there is a new payload to publish, synchronously with the driver main loop.
 	SignAndPublishL2Payload(ctx context.Context, payload *eth.ExecutionPayloadEnvelope) error
+	// SignAndPublishSafeHead is called by the driver whenever there is a new safe head to publish (prover mode).
+	SignAndPublishSafeHead(ctx context.Context, payload *eth.ExecutionPayloadEnvelope) error
 }
 
 type AltSync interface {
@@ -207,10 +210,19 @@ func NewDriver(
 	sys.Register("attributes-handler",
 		attributes.NewAttributesHandler(log, cfg, driverCtx, l2))
 
-	derivationPipeline := derive.NewDerivationPipeline(log, cfg, depSet, verifConfDepth, l1Blobs, altDA, l2, metrics, indexingMode)
-
-	sys.Register("pipeline",
-		derive.NewPipelineDeriver(driverCtx, derivationPipeline))
+	// Only create derivation pipeline if not in follower mode
+	var derivationPipeline DerivationPipeline
+	if driverCfg.Mode != "follower" {
+		concretePipeline := derive.NewDerivationPipeline(log, cfg, depSet, verifConfDepth, l1Blobs, altDA, l2, metrics, indexingMode)
+		derivationPipeline = concretePipeline
+		sys.Register("pipeline",
+			derive.NewPipelineDeriver(driverCtx, concretePipeline))
+		log.Info("Derivation pipeline enabled", "mode", driverCfg.Mode)
+	} else {
+		log.Info("Derivation pipeline disabled in follower mode")
+		// Use a no-op pipeline for follower mode
+		derivationPipeline = &NoOpDerivationPipeline{}
+	}
 
 	syncDeriver := &SyncDeriver{
 		Derivation:          derivationPipeline,
@@ -227,7 +239,19 @@ func NewDriver(
 	}
 	sys.Register("sync", syncDeriver)
 
-	sys.Register("engine", engine.NewEngDeriver(log, driverCtx, cfg, metrics, ec))
+	sys.Register("engine", engine.NewEngDeriver(log, driverCtx, cfg, metrics, ec, l2, driverCfg.Mode))
+
+	// Register safe head gossip publisher if in prover mode
+	if driverCfg.Mode == "prover" {
+		safeHeadGossiper := p2p.NewSafeHeadGossipPublisher(log.New("component", "safe-head-gossiper"), network)
+		sys.Register("safe-head-gossip", safeHeadGossiper)
+	}
+
+	// Register follower mode deriver if in follower mode
+	if driverCfg.Mode == "follower" {
+		followerDeriver := NewFollowerModeDeriver(log.New("component", "follower-mode"), cfg, ec)
+		sys.Register("follower-mode", followerDeriver)
+	}
 
 	schedDeriv := NewStepSchedulingDeriver(log)
 	sys.Register("step-scheduler", schedDeriv)

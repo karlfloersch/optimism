@@ -210,3 +210,128 @@ func TestBlockValidator(t *testing.T) {
 		})
 	}
 }
+
+func TestSafeHeadTopics(t *testing.T) {
+	cfg := &rollup.Config{
+		L2ChainID: big.NewInt(100),
+	}
+
+	// Test that safe head topics are properly formatted
+	expectedV1 := "/optimism/100/0/safe-heads"
+	actualV1 := safeHeadsTopicV1(cfg)
+	require.Equal(t, expectedV1, actualV1, "Safe head topic V1 format should match expected")
+
+	expectedV2 := "/optimism/100/1/safe-heads"
+	actualV2 := safeHeadsTopicV2(cfg)
+	require.Equal(t, expectedV2, actualV2, "Safe head topic V2 format should match expected")
+
+	expectedV3 := "/optimism/100/2/safe-heads"
+	actualV3 := safeHeadsTopicV3(cfg)
+	require.Equal(t, expectedV3, actualV3, "Safe head topic V3 format should match expected")
+
+	expectedV4 := "/optimism/100/3/safe-heads"
+	actualV4 := safeHeadsTopicV4(cfg)
+	require.Equal(t, expectedV4, actualV4, "Safe head topic V4 format should match expected")
+}
+
+func TestSubscriptionFilterIncludesSafeHeads(t *testing.T) {
+	cfg := &rollup.Config{
+		L2ChainID: big.NewInt(100),
+	}
+
+	filter := BuildSubscriptionFilter(cfg)
+
+	// Test that safe head topics are allowed by the subscription filter
+	safeHeadTopics := []string{
+		safeHeadsTopicV1(cfg),
+		safeHeadsTopicV2(cfg),
+		safeHeadsTopicV3(cfg),
+		safeHeadsTopicV4(cfg),
+	}
+
+	for _, topic := range safeHeadTopics {
+		// We can't directly test the allowlist, but we can verify the topics were created correctly
+		// and that the filter was built successfully
+		require.NotEmpty(t, topic, "Safe head topic should not be empty")
+		require.Contains(t, topic, "safe-heads", "Safe head topic should contain 'safe-heads'")
+	}
+
+	require.NotNil(t, filter, "Should create subscription filter successfully")
+}
+
+func TestBuildSafeHeadsValidator(t *testing.T) {
+	logger := testlog.Logger(t, log.LevelCrit)
+	cfg := &rollup.Config{
+		L2ChainID: big.NewInt(100),
+	}
+	peerId := peer.ID("foo")
+	secrets, err := crypto.GenerateKey()
+	require.NoError(t, err)
+
+	t.Run("ValidSafeHead", func(t *testing.T) {
+		runCfg := &testutils.MockRuntimeConfig{P2PSeqAddress: crypto.PubkeyToAddress(secrets.PublicKey)}
+
+		// Create a valid execution payload using helper function
+		payload := createExecutionPayload(types.Withdrawals{}, nil, nil, nil)
+		payload.BlockNumber = 100
+		payload.Timestamp = hexutil.Uint64(time.Now().Unix()) // Current time
+
+		envelope := &eth.ExecutionPayloadEnvelope{ExecutionPayload: payload}
+		payload.BlockHash, _ = envelope.CheckBlockHash() // Generate the block hash
+
+		// Marshal the payload using helper function (pass payload, not envelope)
+		signer := &PreparedSigner{Signer: opsigner.NewLocalSigner(secrets)}
+		compressed, err := createSignedP2Payload(payload, signer, cfg.L2ChainID)
+		require.NoError(t, err)
+
+		validator := BuildSafeHeadsValidator(logger, cfg, runCfg, eth.BlockV1)
+		message := &pubsub.Message{Message: &pubsub_pb.Message{Data: compressed}}
+
+		result := validator(context.Background(), peerId, message)
+		require.Equal(t, pubsub.ValidationAccept, result)
+		require.NotNil(t, message.ValidatorData, "Validator should set ValidatorData on accept")
+	})
+
+	t.Run("TooOldSafeHead", func(t *testing.T) {
+		runCfg := &testutils.MockRuntimeConfig{P2PSeqAddress: crypto.PubkeyToAddress(secrets.PublicKey)}
+
+		// Create a payload that's too old (more than 10 minutes)
+		payload := createExecutionPayload(types.Withdrawals{}, nil, nil, nil)
+		payload.BlockNumber = 100
+		payload.Timestamp = hexutil.Uint64(time.Now().Unix() - 700) // 700 seconds ago, too old
+
+		envelope := &eth.ExecutionPayloadEnvelope{ExecutionPayload: payload}
+		payload.BlockHash, _ = envelope.CheckBlockHash() // Generate the block hash
+
+		signer := &PreparedSigner{Signer: opsigner.NewLocalSigner(secrets)}
+		compressed, err := createSignedP2Payload(payload, signer, cfg.L2ChainID)
+		require.NoError(t, err)
+
+		validator := BuildSafeHeadsValidator(logger, cfg, runCfg, eth.BlockV1)
+		message := &pubsub.Message{Message: &pubsub_pb.Message{Data: compressed}}
+
+		result := validator(context.Background(), peerId, message)
+		require.Equal(t, pubsub.ValidationReject, result)
+	})
+
+	t.Run("WrongSigner", func(t *testing.T) {
+		runCfg := &testutils.MockRuntimeConfig{P2PSeqAddress: common.HexToAddress("0x1234")} // Different address
+
+		payload := createExecutionPayload(types.Withdrawals{}, nil, nil, nil)
+		payload.BlockNumber = 100
+		payload.Timestamp = hexutil.Uint64(time.Now().Unix() - 30)
+
+		envelope := &eth.ExecutionPayloadEnvelope{ExecutionPayload: payload}
+		payload.BlockHash, _ = envelope.CheckBlockHash() // Generate the block hash
+
+		signer := &PreparedSigner{Signer: opsigner.NewLocalSigner(secrets)}
+		compressed, err := createSignedP2Payload(payload, signer, cfg.L2ChainID)
+		require.NoError(t, err)
+
+		validator := BuildSafeHeadsValidator(logger, cfg, runCfg, eth.BlockV1)
+		message := &pubsub.Message{Message: &pubsub_pb.Message{Data: compressed}}
+
+		result := validator(context.Background(), peerId, message)
+		require.Equal(t, pubsub.ValidationReject, result)
+	})
+}

@@ -43,6 +43,7 @@ type SimpleAsyncGossiper struct {
 // this interface is compatible with driver.Network
 type Network interface {
 	SignAndPublishL2Payload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope) error
+	SignAndPublishSafeHead(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope) error
 }
 
 // To avoid import cycles, we define a new Metrics interface here

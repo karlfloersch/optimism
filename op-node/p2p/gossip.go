@@ -82,6 +82,22 @@ func blocksTopicV4(cfg *rollup.Config) string {
 	return fmt.Sprintf("/optimism/%s/3/blocks", cfg.L2ChainID.String())
 }
 
+func safeHeadsTopicV1(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/0/safe-heads", cfg.L2ChainID.String())
+}
+
+func safeHeadsTopicV2(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/1/safe-heads", cfg.L2ChainID.String())
+}
+
+func safeHeadsTopicV3(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/2/safe-heads", cfg.L2ChainID.String())
+}
+
+func safeHeadsTopicV4(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/3/safe-heads", cfg.L2ChainID.String())
+}
+
 // BuildSubscriptionFilter builds a simple subscription filter,
 // to help protect against peers spamming useless subscriptions.
 func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
@@ -90,6 +106,10 @@ func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
 		blocksTopicV2(cfg),
 		blocksTopicV3(cfg),
 		blocksTopicV4(cfg), // add more topics here in the future, if any.
+		safeHeadsTopicV1(cfg),
+		safeHeadsTopicV2(cfg),
+		safeHeadsTopicV3(cfg),
+		safeHeadsTopicV4(cfg),
 	)
 }
 
@@ -447,8 +467,146 @@ func verifyBlockSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRunti
 	return pubsub.ValidationAccept
 }
 
+func BuildSafeHeadsValidator(log log.Logger, cfg *rollup.Config, runCfg GossipRuntimeConfig, blockVersion eth.BlockVersion) pubsub.ValidatorEx {
+	// Seen safe head hashes per block height
+	// uint64 -> *seenBlocks
+	safeHeadHeightLRU, err := lru.New[uint64, *seenBlocks](1000)
+	if err != nil {
+		panic(fmt.Errorf("failed to set up safe head height LRU cache: %w", err))
+	}
+
+	return func(ctx context.Context, id peer.ID, message *pubsub.Message) pubsub.ValidationResult {
+		// [REJECT] if the compression is not valid
+		outLen, err := snappy.DecodedLen(message.Data)
+		if err != nil {
+			log.Warn("invalid snappy compression length data", "err", err, "peer", id)
+			return pubsub.ValidationReject
+		}
+		if outLen > maxGossipSize {
+			log.Warn("possible snappy zip bomb, decoded length is too large", "decoded_length", outLen, "peer", id)
+			return pubsub.ValidationReject
+		}
+		if outLen < minGossipSize {
+			log.Warn("rejecting undersized gossip payload")
+			return pubsub.ValidationReject
+		}
+
+		res := msgBufPool.Get().(*[]byte)
+		defer msgBufPool.Put(res)
+		data, err := snappy.Decode((*res)[:cap(*res)], message.Data)
+		if err != nil {
+			log.Warn("invalid snappy compression", "err", err, "peer", id)
+			return pubsub.ValidationReject
+		}
+		// if we ended up growing the slice capacity, fine, keep the larger one.
+		if cap(data) > cap(*res) {
+			*res = data[:cap(data)]
+		}
+
+		// message starts with compact-encoding secp256k1 encoded signature
+		signature := eth.Bytes65(data[:65])
+		payloadBytes := data[65:]
+
+		// [REJECT] if the signature by the prover is not valid
+		result := verifySafeHeadSignature(log, cfg, runCfg, id, signature, payloadBytes)
+		if result != pubsub.ValidationAccept {
+			return result
+		}
+
+		var envelope eth.ExecutionPayloadEnvelope
+
+		// [REJECT] if the safe head encoding is not valid
+		if blockVersion.HasParentBeaconBlockRoot() {
+			if err := envelope.UnmarshalSSZ(blockVersion, uint32(len(payloadBytes)), bytes.NewReader(payloadBytes)); err != nil {
+				log.Warn("invalid envelope payload", "err", err, "peer", id)
+				return pubsub.ValidationReject
+			}
+		} else {
+			var payload eth.ExecutionPayload
+			if err := payload.UnmarshalSSZ(blockVersion, uint32(len(payloadBytes)), bytes.NewReader(payloadBytes)); err != nil {
+				log.Warn("invalid execution payload", "err", err, "peer", id)
+				return pubsub.ValidationReject
+			}
+			envelope = eth.ExecutionPayloadEnvelope{ExecutionPayload: &payload}
+		}
+
+		payload := envelope.ExecutionPayload
+
+		// rounding down to seconds is fine here.
+		now := uint64(time.Now().Unix())
+
+		// [REJECT] if the safe head timestamp is more than 10 minutes old
+		// Safe heads can be older than unsafe blocks, but not too old
+		if uint64(payload.Timestamp) < now-600 {
+			log.Warn("safe head payload is too old", "timestamp", uint64(payload.Timestamp))
+			return pubsub.ValidationReject
+		}
+
+		// [REJECT] if the safe head timestamp is more than 5 seconds into the future
+		if uint64(payload.Timestamp) > now+5 {
+			log.Warn("safe head payload is too new", "timestamp", uint64(payload.Timestamp))
+			return pubsub.ValidationReject
+		}
+
+		// [REJECT] if the `block_hash` in the `payload` is not valid
+		if actual, ok := envelope.CheckBlockHash(); !ok {
+			log.Warn("safe head payload has bad block hash", "bad_hash", payload.BlockHash.String(), "actual", actual.String())
+			return pubsub.ValidationReject
+		}
+
+		seen, ok := safeHeadHeightLRU.Get(uint64(payload.BlockNumber))
+		if !ok {
+			seen = new(seenBlocks)
+			safeHeadHeightLRU.Add(uint64(payload.BlockNumber), seen)
+		}
+
+		if count, hasSeen := seen.hasSeen(payload.BlockHash); count > 5 {
+			// [REJECT] if more than 5 safe heads have been seen with the same block height
+			log.Warn("seen too many different safe heads at same height", "height", payload.BlockNumber)
+			return pubsub.ValidationReject
+		} else if hasSeen {
+			// [IGNORE] if the safe head has already been seen
+			log.Warn("validated already seen safe head message again")
+			return pubsub.ValidationIgnore
+		}
+
+		// mark it as seen. (note: with concurrent validation more than 5 blocks may be marked as seen still,
+		// but validator concurrency is limited anyway)
+		seen.markSeen(payload.BlockHash)
+
+		// remember the decoded payload for later usage in topic subscriber.
+		message.ValidatorData = &envelope
+		return pubsub.ValidationAccept
+	}
+}
+
+func verifySafeHeadSignature(log log.Logger, cfg *rollup.Config, runCfg GossipRuntimeConfig, id peer.ID, signature eth.Bytes65, payloadBytes []byte) pubsub.ValidationResult {
+	authCtx := &opsigner.OPStackP2PBlockAuthV1{
+		Allowed: runCfg.P2PSequencerAddress(), // For now, use the same signer as unsafe blocks
+		Chain:   eth.ChainIDFromBig(cfg.L2ChainID),
+	}
+	if authCtx.Allowed == (common.Address{}) {
+		log.Warn("no configured p2p sequencer address, ignoring gossiped safe head", "peer", id, "addr", authCtx.Allowed)
+		return pubsub.ValidationIgnore
+	}
+	block := opsigner.SignedP2PBlock{
+		Raw:       payloadBytes,
+		Signature: signature,
+	}
+	if err := block.VerifySignature(authCtx); err != nil {
+		log.Warn("invalid safe head signature", "err", err, "peer", id)
+		return pubsub.ValidationReject
+	}
+	return pubsub.ValidationAccept
+}
+
 type GossipIn interface {
 	OnUnsafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
+	OnSafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
+}
+
+type SafeHeadGossipIn interface {
+	OnSafeL2Payload(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error
 }
 
 type GossipTopicInfo interface {
@@ -462,6 +620,7 @@ type GossipTopicInfo interface {
 type GossipOut interface {
 	GossipTopicInfo
 	SignAndPublishL2Payload(ctx context.Context, msg *eth.ExecutionPayloadEnvelope, signer Signer) error
+	SignAndPublishSafeHead(ctx context.Context, msg *eth.ExecutionPayloadEnvelope, signer Signer) error
 	PublishSignedL2Payload(ctx context.Context, signedEnvelope *opsigner.SignedExecutionPayloadEnvelope) error
 	Close() error
 }
@@ -494,6 +653,11 @@ type publisher struct {
 	blocksV2 *blockTopic
 	blocksV3 *blockTopic
 	blocksV4 *blockTopic
+
+	safeHeadsV1 *blockTopic
+	safeHeadsV2 *blockTopic
+	safeHeadsV3 *blockTopic
+	safeHeadsV4 *blockTopic
 
 	runCfg GossipRuntimeConfig
 }
@@ -596,6 +760,37 @@ func (p *publisher) SignAndPublishL2Payload(ctx context.Context, envelope *eth.E
 	return p.publishRawSignedPayload(ctx, uint64(envelope.ExecutionPayload.Timestamp), data)
 }
 
+func (p *publisher) SignAndPublishSafeHead(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, signer Signer) error {
+	res := msgBufPool.Get().(*[]byte)
+	buf := bytes.NewBuffer((*res)[:0])
+	defer func() {
+		*res = buf.Bytes()
+		defer msgBufPool.Put(res)
+	}()
+
+	buf.Write(make([]byte, 65))
+
+	if envelope.ParentBeaconBlockRoot != nil {
+		if _, err := envelope.MarshalSSZ(buf); err != nil {
+			return fmt.Errorf("failed to encoded execution payload envelope to publish: %w", err)
+		}
+	} else {
+		if _, err := envelope.ExecutionPayload.MarshalSSZ(buf); err != nil {
+			return fmt.Errorf("failed to encoded execution payload to publish: %w", err)
+		}
+	}
+	data := buf.Bytes()
+	payloadData := data[65:]
+	payloadHash := opsigner.PayloadHash(payloadData)
+	chainID := eth.ChainIDFromBig(p.cfg.L2ChainID)
+	sig, err := signer.SignBlockV1(ctx, chainID, payloadHash)
+	if err != nil {
+		return fmt.Errorf("failed to sign execution payload with signer: %w", err)
+	}
+	copy(data[:65], sig[:])
+	return p.publishRawSignedSafeHead(ctx, uint64(envelope.ExecutionPayload.Timestamp), data)
+}
+
 func (p *publisher) publishRawSignedPayload(ctx context.Context, timestamp uint64, data []byte) error {
 	// compress the full message
 	// This also copies the data, freeing up the original buffer to go back into the pool
@@ -609,6 +804,22 @@ func (p *publisher) publishRawSignedPayload(ctx context.Context, timestamp uint6
 		return p.blocksV2.topic.Publish(ctx, out)
 	} else {
 		return p.blocksV1.topic.Publish(ctx, out)
+	}
+}
+
+func (p *publisher) publishRawSignedSafeHead(ctx context.Context, timestamp uint64, data []byte) error {
+	// compress the full message
+	// This also copies the data, freeing up the original buffer to go back into the pool
+	out := snappy.Encode(nil, data)
+
+	if p.cfg.IsIsthmus(timestamp) {
+		return p.safeHeadsV4.topic.Publish(ctx, out)
+	} else if p.cfg.IsEcotone(timestamp) {
+		return p.safeHeadsV3.topic.Publish(ctx, out)
+	} else if p.cfg.IsCanyon(timestamp) {
+		return p.safeHeadsV2.topic.Publish(ctx, out)
+	} else {
+		return p.safeHeadsV1.topic.Publish(ctx, out)
 	}
 }
 
@@ -654,15 +865,52 @@ func JoinGossip(self peer.ID, ps *pubsub.PubSub, log log.Logger, cfg *rollup.Con
 		return nil, fmt.Errorf("failed to setup blocks v4 p2p: %w", err)
 	}
 
+	// Initialize safe head topics
+	sh1Logger := log.New("topic", "safeHeadsV1")
+	safeHeadsV1Validator := guardGossipValidator(log, logValidationResult(self, "validated safe-headv1", sh1Logger, BuildSafeHeadsValidator(sh1Logger, cfg, runCfg, eth.BlockV1)))
+	safeHeadsV1, err := newSafeHeadTopic(p2pCtx, safeHeadsTopicV1(cfg), ps, sh1Logger, gossipIn, safeHeadsV1Validator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup safe heads v1 p2p: %w", err)
+	}
+
+	sh2Logger := log.New("topic", "safeHeadsV2")
+	safeHeadsV2Validator := guardGossipValidator(log, logValidationResult(self, "validated safe-headv2", sh2Logger, BuildSafeHeadsValidator(sh2Logger, cfg, runCfg, eth.BlockV2)))
+	safeHeadsV2, err := newSafeHeadTopic(p2pCtx, safeHeadsTopicV2(cfg), ps, sh2Logger, gossipIn, safeHeadsV2Validator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup safe heads v2 p2p: %w", err)
+	}
+
+	sh3Logger := log.New("topic", "safeHeadsV3")
+	safeHeadsV3Validator := guardGossipValidator(log, logValidationResult(self, "validated safe-headv3", sh3Logger, BuildSafeHeadsValidator(sh3Logger, cfg, runCfg, eth.BlockV3)))
+	safeHeadsV3, err := newSafeHeadTopic(p2pCtx, safeHeadsTopicV3(cfg), ps, sh3Logger, gossipIn, safeHeadsV3Validator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup safe heads v3 p2p: %w", err)
+	}
+
+	sh4Logger := log.New("topic", "safeHeadsV4")
+	safeHeadsV4Validator := guardGossipValidator(log, logValidationResult(self, "validated safe-headv4", sh4Logger, BuildSafeHeadsValidator(sh4Logger, cfg, runCfg, eth.BlockV4)))
+	safeHeadsV4, err := newSafeHeadTopic(p2pCtx, safeHeadsTopicV4(cfg), ps, sh4Logger, gossipIn, safeHeadsV4Validator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup safe heads v4 p2p: %w", err)
+	}
+
 	return &publisher{
-		log:       log,
-		cfg:       cfg,
-		p2pCancel: p2pCancel,
-		blocksV1:  blocksV1,
-		blocksV2:  blocksV2,
-		blocksV3:  blocksV3,
-		blocksV4:  blocksV4,
-		runCfg:    runCfg,
+		log:         log,
+		cfg:         cfg,
+		p2pCancel:   p2pCancel,
+		blocksV1:    blocksV1,
+		blocksV2:    blocksV2,
+		blocksV3:    blocksV3,
+		blocksV4:    blocksV4,
+		safeHeadsV1: safeHeadsV1,
+		safeHeadsV2: safeHeadsV2,
+		safeHeadsV3: safeHeadsV3,
+		safeHeadsV4: safeHeadsV4,
+		runCfg:      runCfg,
 	}, nil
 }
 
@@ -704,6 +952,44 @@ func newBlockTopic(ctx context.Context, topicId string, ps *pubsub.PubSub, log l
 	}, nil
 }
 
+func newSafeHeadTopic(ctx context.Context, topicId string, ps *pubsub.PubSub, log log.Logger, gossipIn GossipIn, validator pubsub.ValidatorEx) (*blockTopic, error) {
+	err := ps.RegisterTopicValidator(topicId,
+		validator,
+		pubsub.WithValidatorTimeout(3*time.Second),
+		pubsub.WithValidatorConcurrency(4))
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to register safe head gossip topic: %w", err)
+	}
+
+	safeHeadTopic, err := ps.Join(topicId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to join safe head gossip topic: %w", err)
+	}
+
+	safeHeadTopicEvents, err := safeHeadTopic.EventHandler()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create safe head gossip topic handler: %w", err)
+	}
+
+	go LogTopicEvents(ctx, log, safeHeadTopicEvents)
+
+	subscription, err := safeHeadTopic.Subscribe()
+	if err != nil {
+		err = errors.Join(err, safeHeadTopic.Close())
+		return nil, fmt.Errorf("failed to subscribe to safe head gossip topic: %w", err)
+	}
+
+	subscriber := MakeSubscriber(log, SafeHeadsHandler(gossipIn.OnSafeL2Payload))
+	go subscriber(ctx, subscription)
+
+	return &blockTopic{
+		topic:  safeHeadTopic,
+		events: safeHeadTopicEvents,
+		sub:    subscription,
+	}, nil
+}
+
 type TopicSubscriber func(ctx context.Context, sub *pubsub.Subscription)
 type MessageHandler func(ctx context.Context, from peer.ID, msg any) error
 
@@ -714,6 +1000,16 @@ func BlocksHandler(onBlock func(ctx context.Context, from peer.ID, msg *eth.Exec
 			return fmt.Errorf("expected topic validator to parse and validate data into execution payload, but got %T", msg)
 		}
 		return onBlock(ctx, from, payload)
+	}
+}
+
+func SafeHeadsHandler(onSafeHead func(ctx context.Context, from peer.ID, msg *eth.ExecutionPayloadEnvelope) error) MessageHandler {
+	return func(ctx context.Context, from peer.ID, msg any) error {
+		payload, ok := msg.(*eth.ExecutionPayloadEnvelope)
+		if !ok {
+			return fmt.Errorf("expected topic validator to parse and validate data into execution payload, but got %T", msg)
+		}
+		return onSafeHead(ctx, from, payload)
 	}
 }
 

@@ -24,4 +24,7 @@ type Config struct {
 	// RecoverMode forces the sequencer to select the next L1 Origin exactly, and create an empty block,
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
+
+	// Mode defines the node operation mode: normal, prover (signs and gossips safe heads), or follower (accepts gossiped safe heads)
+	Mode string `json:"mode"`
 }

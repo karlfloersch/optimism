@@ -299,6 +299,13 @@ var (
 		EnvVars:  prefixEnvVars("ROLLUP_LOAD_PROTOCOL_VERSIONS"),
 		Category: RollupCategory,
 	}
+	Mode = &cli.StringFlag{
+		Name:     "mode",
+		Usage:    "Node operation mode: 'normal' (default), 'prover' (signs and gossips safe heads), 'follower' (accepts gossiped safe heads, disables derivation)",
+		Value:    "normal",
+		EnvVars:  prefixEnvVars("MODE"),
+		Category: MiscCategory,
+	}
 	SafeDBPath = &cli.StringFlag{
 		Name:     "safedb.path",
 		Usage:    "File path used to persist safe head update data. Disabled if not set.",
@@ -452,6 +459,7 @@ var optionalFlags = []cli.Flag{
 	HeartbeatURLFlag,
 	RollupHalt,
 	RollupLoadProtocolVersions,
+	Mode,
 	ConductorEnabledFlag,
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,

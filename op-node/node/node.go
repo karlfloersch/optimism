@@ -610,6 +610,20 @@ func (n *OpNode) SignAndPublishL2Payload(ctx context.Context, envelope *eth.Exec
 	return nil
 }
 
+func (n *OpNode) SignAndPublishSafeHead(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope) error {
+	n.apiEmitter.Emit(ctx, tracer.TracePublishBlockEvent{Envelope: envelope})
+	// publish safe head to p2p, if we are running p2p at all
+	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil {
+		if n.p2pSigner == nil {
+			return fmt.Errorf("node has no p2p signer, safe head %s cannot be published", envelope.ID())
+		}
+		n.log.Info("Publishing signed safe head on p2p", "id", envelope.ID())
+		return p2pNode.GossipOut().SignAndPublishSafeHead(ctx, envelope, n.p2pSigner)
+	}
+	// if p2p is not enabled then we just don't publish the safe head
+	return nil
+}
+
 func (n *OpNode) RequestL2Range(ctx context.Context, start, end eth.L2BlockRef) error {
 	if p2pNode := n.getP2PNodeIfEnabled(); p2pNode != nil && p2pNode.AltSyncEnabled() {
 		if unixTimeStale(start.Time, 12*time.Hour) {
