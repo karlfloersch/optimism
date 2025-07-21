@@ -219,7 +219,7 @@ func NewDriver(
 			derive.NewPipelineDeriver(driverCtx, concretePipeline))
 		log.Info("Derivation pipeline enabled", "mode", driverCfg.Mode)
 	} else {
-		log.Info("Derivation pipeline disabled in follower mode")
+		log.Info("FOLLOWER MODE: Derivation pipeline disabled", "mode", driverCfg.Mode)
 		// Use a no-op pipeline for follower mode
 		derivationPipeline = &NoOpDerivationPipeline{}
 	}

@@ -164,10 +164,12 @@ var _ DerivationPipeline = (*NoOpDerivationPipeline)(nil)
 
 func (n *NoOpDerivationPipeline) Reset() {
 	// No-op: follower mode doesn't use derivation pipeline
+	log.Info("FOLLOWER MODE: NoOpDerivationPipeline.Reset() called")
 }
 
 func (n *NoOpDerivationPipeline) Step(ctx context.Context, pendingSafeHead eth.L2BlockRef) (*derive.AttributesWithParent, error) {
 	// No-op: follower mode doesn't derive from L1
+	log.Info("FOLLOWER MODE: NoOpDerivationPipeline.Step() called", "pendingSafeHead", pendingSafeHead.Number)
 	return nil, nil
 }
 

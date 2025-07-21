@@ -58,19 +58,17 @@ func WithFollowerMode() stack.CommonOption {
 	return stack.Combine(
 		// Use the multi-supervisor interop system as base (gives us 2 L2CLs with P2P)
 		stack.MakeCommon(sysgo.MultiSupervisorInteropSystem(&sysgo.MultiSupervisorInteropSystemIDs{})),
-		// Configure the first L2CL (sequencer) as prover mode
+		// Configure all sequencers as prover mode
 		stack.MakeCommon(sysgo.WithL2CLOption(func(p devtest.P, id stack.L2CLNodeID, cfg *config.Config) {
-			// Configure the main sequencer as prover
-			if id.String() == "sequencer-901" { // DefaultL2AID chain sequencer
-				p.Logger().Info("Configuring sequencer node in prover mode", "id", id)
+			// Configure all sequencers as provers
+			if id.String() == "L2CLNode-sequencer-901" || id.String() == "L2CLNode-sequencer-902" {
 				cfg.Driver.Mode = "prover"
 			}
 		})),
-		// Configure the second L2CL (verifier) as follower mode
+		// Configure all verifiers as follower mode
 		stack.MakeCommon(sysgo.WithL2CLOption(func(p devtest.P, id stack.L2CLNodeID, cfg *config.Config) {
-			// Configure the verifier as follower
-			if id.String() == "verifier-901" { // DefaultL2AID chain verifier
-				p.Logger().Info("Configuring verifier node in follower mode", "id", id)
+			// Configure all verifiers as followers
+			if id.String() == "L2CLNode-verifier-901" || id.String() == "L2CLNode-verifier-902" {
 				cfg.Driver.Mode = "follower"
 			}
 		})),
