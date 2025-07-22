@@ -87,6 +87,75 @@ func TestSafeHeadSync(t *testing.T) {
 	t.Log("✅ SUCCESS: Safe head gossip test completed!")
 }
 
+// TestExecutionEngineStateConsistency validates that rollup nodes have consistent safe heads
+// This ensures our safe head gossip is working correctly
+func TestExecutionEngineStateConsistency(t *testing.T) {
+	dp := devtest.SerialT(t)
+	system := presets.NewFollowerMode(dp)
+
+	t.Log("🔍 Testing rollup node safe head consistency...")
+
+	// Create some L2 activity
+	alice := system.FunderL2.NewFundedEOA(eth.OneHundredthEther)
+	bob := system.Wallet.NewEOA(system.L2EL)
+
+	for i := 0; i < 3; i++ {
+		alice.Transfer(bob.Address(), eth.GWei(500))
+	}
+
+	// Wait for gossip and processing
+	system.AdvanceTime(8 * time.Second)
+	time.Sleep(3 * time.Second)
+
+	// Get rollup node safe head views
+	proverSafeHead := system.ProverCL.SafeL2BlockRef()
+	followerSafeHead := system.FollowerCL.SafeL2BlockRef()
+
+	t.Logf("📊 Rollup Node Safe Heads:")
+	t.Logf("   Prover:   #%d %s", proverSafeHead.Number, proverSafeHead.Hash.Hex()[:10])
+	t.Logf("   Follower: #%d %s", followerSafeHead.Number, followerSafeHead.Hash.Hex()[:10])
+
+	// Validation: Rollup nodes should have synchronized safe heads
+	if proverSafeHead.Number != followerSafeHead.Number {
+		t.Errorf("❌ Safe head numbers don't match: prover=%d, follower=%d",
+			proverSafeHead.Number, followerSafeHead.Number)
+	}
+
+	if proverSafeHead.Hash != followerSafeHead.Hash {
+		t.Errorf("❌ Safe head hashes don't match: prover=%s, follower=%s",
+			proverSafeHead.Hash.Hex(), followerSafeHead.Hash.Hex())
+	}
+
+	// Additional validation: Check that safe heads are progressing beyond genesis
+	if proverSafeHead.Number == 0 {
+		t.Errorf("❌ Prover safe head is still at genesis (block 0)")
+	}
+
+	if followerSafeHead.Number == 0 {
+		t.Errorf("❌ Follower safe head is still at genesis (block 0)")
+	}
+
+	// Success validation
+	if proverSafeHead.Number == followerSafeHead.Number &&
+		proverSafeHead.Hash == followerSafeHead.Hash &&
+		proverSafeHead.Number > 0 {
+		t.Log("✅ SUCCESS: Rollup nodes are properly synchronized!")
+		t.Logf("   Both nodes have safe head #%d %s", proverSafeHead.Number, proverSafeHead.Hash.Hex()[:10])
+
+		// Log sync status for verification
+		proverSync := system.ProverCL.SyncStatus()
+		followerSync := system.FollowerCL.SyncStatus()
+
+		t.Logf("📊 Sync Status Details:")
+		t.Logf("   Prover   - Unsafe: #%d, Safe: #%d, Finalized: #%d",
+			proverSync.UnsafeL2.Number, proverSync.SafeL2.Number, proverSync.FinalizedL2.Number)
+		t.Logf("   Follower - Unsafe: #%d, Safe: #%d, Finalized: #%d",
+			followerSync.UnsafeL2.Number, followerSync.SafeL2.Number, followerSync.FinalizedL2.Number)
+	} else {
+		t.Error("❌ FAILURE: Rollup node safe head synchronization failed")
+	}
+}
+
 // TestSafeHeadSyncWithL2Reorg tests safe head gossip behavior during L2 reorgs
 // This test verifies that both prover and follower nodes correctly handle L2 reorgs
 // and maintain consistent safe head state after the reorg
