@@ -249,7 +249,8 @@ func NewDriver(
 
 	// Register follower mode deriver if in follower mode
 	if driverCfg.Mode == "follower" {
-		followerDeriver := NewFollowerModeDeriver(log.New("component", "follower-mode"), cfg, ec)
+		followerMetrics := &NoOpFollowerModeMetrics{} // TODO: Use real metrics when available
+		followerDeriver := NewFollowerModeDeriver(log.New("component", "follower-mode"), cfg, ec, followerMetrics)
 		sys.Register("follower-mode", followerDeriver)
 	}
 

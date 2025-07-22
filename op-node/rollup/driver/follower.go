@@ -2,6 +2,8 @@ package driver
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 
@@ -14,21 +16,53 @@ import (
 )
 
 // FollowerModeDeriver processes received safe heads from P2P gossip
-// and applies them to the engine controller in follower mode
+// and applies them to the engine controller in follower mode with reorg support
 type FollowerModeDeriver struct {
 	log     log.Logger
 	cfg     *rollup.Config
 	engine  EngineController
 	emitter event.Emitter
+	metrics FollowerModeMetrics
+
+	// Reorg handling state
+	lastValidSafeHead eth.L2BlockRef // Last known good safe head for rollback
+	reorgDepth        uint64         // Maximum reorg depth to handle
+	gossipTimeout     time.Duration  // Timeout for gossip reception
+	lastGossipTime    time.Time      // Last time we received valid gossip
+	fallbackMode      bool           // Whether to fallback to normal derivation
+}
+
+// FollowerModeMetrics defines metrics for follower mode monitoring
+type FollowerModeMetrics interface {
+	// Safe head gossip metrics
+	RecordSafeHeadGossipReceived()
+	RecordSafeHeadApplied(blockNumber uint64)
+	RecordSafeHeadIgnored(reason string)
+
+	// Reorg metrics
+	RecordSafeHeadReorg(reorgDepth uint64)
+	RecordReorgFailure()
+
+	// Gap and timeout metrics
+	RecordGapDetected(gapSize uint64)
+	RecordGossipTimeout()
+	RecordFallbackActivated(reason string)
+
+	// Performance metrics
+	RecordSafeHeadProcessingTime(duration time.Duration)
 }
 
 var _ event.Deriver = (*FollowerModeDeriver)(nil)
 
-func NewFollowerModeDeriver(log log.Logger, cfg *rollup.Config, engine EngineController) *FollowerModeDeriver {
+func NewFollowerModeDeriver(log log.Logger, cfg *rollup.Config, engine EngineController, metrics FollowerModeMetrics) *FollowerModeDeriver {
 	return &FollowerModeDeriver{
-		log:    log,
-		cfg:    cfg,
-		engine: engine,
+		log:            log,
+		cfg:            cfg,
+		engine:         engine,
+		metrics:        metrics,
+		reorgDepth:     10,               // Handle reorgs up to 10 blocks deep
+		gossipTimeout:  60 * time.Second, // Fallback after 60s without gossip
+		lastGossipTime: time.Now(),
 	}
 }
 
@@ -40,14 +74,30 @@ func (f *FollowerModeDeriver) OnEvent(ctx context.Context, ev event.Event) bool 
 	switch x := ev.(type) {
 	case p2p.ReceivedSafeHeadEvent:
 		return f.processSafeHead(ctx, x)
+	case FollowerModeTimeoutEvent:
+		return f.handleTimeout(ctx)
 	default:
 		return false
 	}
 }
 
-// processSafeHead validates and applies a received safe head to the engine
+// FollowerModeTimeoutEvent is emitted when follower mode times out without gossip
+type FollowerModeTimeoutEvent struct{}
+
+func (ev FollowerModeTimeoutEvent) String() string {
+	return "follower-mode-timeout"
+}
+
+// processSafeHead validates and applies a received safe head to the engine with reorg support
 func (f *FollowerModeDeriver) processSafeHead(ctx context.Context, ev p2p.ReceivedSafeHeadEvent) bool {
+	startTime := time.Now()
+	defer func() {
+		f.metrics.RecordSafeHeadProcessingTime(time.Since(startTime))
+	}()
+
 	payload := ev.Envelope.ExecutionPayload
+	f.lastGossipTime = time.Now()
+	f.metrics.RecordSafeHeadGossipReceived()
 
 	f.log.Info("Follower mode: received safe head from P2P",
 		"hash", payload.BlockHash,
@@ -58,25 +108,307 @@ func (f *FollowerModeDeriver) processSafeHead(ctx context.Context, ev p2p.Receiv
 	ref, err := f.payloadToBlockRef(payload)
 	if err != nil {
 		f.log.Warn("Failed to convert payload to block ref", "hash", payload.BlockHash, "err", err)
+		f.metrics.RecordSafeHeadIgnored("conversion_failed")
 		return true
 	}
 
-	// Validate that this safe head builds on our current safe head
+	// Validate and handle the safe head with reorg support
+	action, err := f.validateSafeHeadWithReorg(ref)
+	if err != nil {
+		f.log.Warn("Safe head validation failed", "ref", ref.ID(), "err", err)
+		f.metrics.RecordSafeHeadIgnored("validation_failed")
+		return true
+	}
+
+	switch action {
+	case SafeHeadActionApply:
+		return f.applySafeHead(ctx, ref)
+	case SafeHeadActionReorg:
+		return f.handleSafeHeadReorg(ctx, ref)
+	case SafeHeadActionIgnore:
+		f.log.Debug("Ignoring safe head", "ref", ref.ID())
+		f.metrics.RecordSafeHeadIgnored("duplicate_or_old")
+		return true
+	case SafeHeadActionRequest:
+		return f.requestMissingSafeHeads(ctx, ref)
+	default:
+		f.log.Warn("Unknown safe head action", "action", action)
+		f.metrics.RecordSafeHeadIgnored("unknown_action")
+		return true
+	}
+}
+
+// SafeHeadAction defines what to do with a received safe head
+type SafeHeadAction int
+
+const (
+	SafeHeadActionApply   SafeHeadAction = iota // Apply the safe head normally
+	SafeHeadActionReorg                         // Handle a reorg situation
+	SafeHeadActionIgnore                        // Ignore (duplicate/old)
+	SafeHeadActionRequest                       // Request missing blocks
+)
+
+// validateSafeHeadWithReorg determines the appropriate action for a received safe head
+func (f *FollowerModeDeriver) validateSafeHeadWithReorg(received eth.L2BlockRef) (SafeHeadAction, error) {
 	currentSafe := f.engine.SafeL2Head()
-	if !f.validateSafeHeadProgression(ref, currentSafe) {
-		f.log.Warn("Invalid safe head progression, ignoring",
-			"received", ref.ID(),
-			"currentSafe", currentSafe.ID())
-		return true
+
+	// If we have no current safe head, accept any valid block as the first safe head
+	if currentSafe == (eth.L2BlockRef{}) {
+		f.log.Info("No current safe head, accepting first safe head", "hash", received.Hash)
+		f.lastValidSafeHead = received
+		return SafeHeadActionApply, nil
 	}
 
-	// Apply the safe head to the engine
+	// Case 1: Next sequential block - normal progression
+	if received.Number == currentSafe.Number+1 {
+		if received.ParentHash != currentSafe.Hash {
+			f.log.Warn("Safe head parent hash mismatch - potential reorg",
+				"received_parent", received.ParentHash,
+				"current_safe", currentSafe.Hash,
+				"received", received.ID(),
+				"current", currentSafe.ID())
+			return SafeHeadActionReorg, nil
+		}
+		f.lastValidSafeHead = received
+		return SafeHeadActionApply, nil
+	}
+
+	// Case 2: Same block number - reorg or duplicate
+	if received.Number == currentSafe.Number {
+		if received.Hash == currentSafe.Hash {
+			f.log.Debug("Received duplicate safe head, ignoring", "hash", received.Hash)
+			return SafeHeadActionIgnore, nil
+		} else {
+			f.log.Warn("Safe head reorg detected at same height",
+				"received", received.ID(),
+				"current", currentSafe.ID())
+			return SafeHeadActionReorg, nil
+		}
+	}
+
+	// Case 3: Old block - could be late reorg notification
+	if received.Number < currentSafe.Number {
+		reorgDepth := currentSafe.Number - received.Number
+		if reorgDepth <= f.reorgDepth {
+			f.log.Warn("Potential deep reorg detected",
+				"received", received.ID(),
+				"current", currentSafe.ID(),
+				"reorg_depth", reorgDepth)
+			return SafeHeadActionReorg, nil
+		} else {
+			f.log.Debug("Received old safe head beyond reorg depth, ignoring",
+				"received_number", received.Number,
+				"current_safe_number", currentSafe.Number,
+				"reorg_depth", reorgDepth)
+			return SafeHeadActionIgnore, nil
+		}
+	}
+
+	// Case 4: Future block - gap in progression
+	gap := received.Number - currentSafe.Number
+	if gap <= 5 { // Allow small gaps for catch-up
+		f.log.Info("Gap in safe head progression, requesting missing blocks",
+			"received_number", received.Number,
+			"current_safe_number", currentSafe.Number,
+			"gap", gap)
+		return SafeHeadActionRequest, nil
+	} else {
+		f.log.Warn("Large gap in safe head progression",
+			"received_number", received.Number,
+			"current_safe_number", currentSafe.Number,
+			"gap", gap)
+		return SafeHeadActionIgnore, fmt.Errorf("gap too large: %d blocks", gap)
+	}
+}
+
+// applySafeHead applies a safe head to the engine normally
+func (f *FollowerModeDeriver) applySafeHead(ctx context.Context, ref eth.L2BlockRef) bool {
 	f.log.Info("Follower mode: applying safe head to engine",
 		"hash", ref.Hash,
 		"number", ref.Number)
 
 	f.engine.SetSafeHead(ref)
+	f.emitSafeHeadEvents(ctx, ref)
+	f.metrics.RecordSafeHeadApplied(ref.Number)
+	return true
+}
 
+// handleSafeHeadReorg handles reorg situations in follower mode
+func (f *FollowerModeDeriver) handleSafeHeadReorg(ctx context.Context, newRef eth.L2BlockRef) bool {
+	currentSafe := f.engine.SafeL2Head()
+
+	f.log.Warn("Follower mode: handling safe head reorg",
+		"old_safe", currentSafe.ID(),
+		"new_safe", newRef.ID())
+
+	// Step 1: Attempt to rollback to a common ancestor
+	rollbackRef, err := f.findCommonAncestor(ctx, currentSafe, newRef)
+	if err != nil {
+		f.log.Error("Failed to find common ancestor for reorg", "err", err)
+		return f.handleReorgFailure(ctx, err)
+	}
+
+	// Step 2: Rollback the safe head to the common ancestor
+	if rollbackRef.Number < currentSafe.Number {
+		f.log.Info("Rolling back safe head for reorg",
+			"from", currentSafe.ID(),
+			"to", rollbackRef.ID(),
+			"rollback_depth", currentSafe.Number-rollbackRef.Number)
+
+		f.engine.SetSafeHead(rollbackRef)
+		f.emitSafeHeadEvents(ctx, rollbackRef)
+	}
+
+	// Step 3: Apply the new safe head
+	f.log.Info("Applying new safe head after reorg",
+		"new_safe", newRef.ID())
+
+	f.engine.SetSafeHead(newRef)
+	f.emitSafeHeadEvents(ctx, newRef)
+	f.lastValidSafeHead = newRef
+
+	// Step 4: Emit reorg event for monitoring and record metrics
+	reorgDepth := currentSafe.Number - rollbackRef.Number
+	f.emitter.Emit(ctx, FollowerModeReorgEvent{
+		OldSafe:    currentSafe,
+		NewSafe:    newRef,
+		RollbackTo: rollbackRef,
+		ReorgDepth: reorgDepth,
+	})
+	f.metrics.RecordSafeHeadReorg(reorgDepth)
+
+	return true
+}
+
+// FollowerModeReorgEvent is emitted when a reorg is handled in follower mode
+type FollowerModeReorgEvent struct {
+	OldSafe    eth.L2BlockRef
+	NewSafe    eth.L2BlockRef
+	RollbackTo eth.L2BlockRef
+	ReorgDepth uint64
+}
+
+func (ev FollowerModeReorgEvent) String() string {
+	return "follower-mode-reorg"
+}
+
+// findCommonAncestor finds the common ancestor between two block refs
+func (f *FollowerModeDeriver) findCommonAncestor(ctx context.Context, oldRef, newRef eth.L2BlockRef) (eth.L2BlockRef, error) {
+	// For simplicity, rollback to the last known good safe head
+	// In production, you might want to query the engine for the actual common ancestor
+	if f.lastValidSafeHead != (eth.L2BlockRef{}) && f.lastValidSafeHead.Number < oldRef.Number {
+		f.log.Info("Using last valid safe head as rollback point",
+			"last_valid", f.lastValidSafeHead.ID())
+		return f.lastValidSafeHead, nil
+	}
+
+	// If no last valid safe head, rollback to finalized head as safe fallback
+	finalized := f.engine.Finalized()
+	f.log.Info("Using finalized head as rollback point",
+		"finalized", finalized.ID())
+	return finalized, nil
+}
+
+// handleReorgFailure handles situations where reorg recovery fails
+func (f *FollowerModeDeriver) handleReorgFailure(ctx context.Context, err error) bool {
+	f.log.Error("Follower mode: reorg handling failed, considering fallback", "err", err)
+
+	// Record failure metrics and emit event for monitoring
+	f.metrics.RecordReorgFailure()
+	f.emitter.Emit(ctx, FollowerModeReorgFailureEvent{
+		Err: err,
+	})
+
+	// Consider enabling fallback mode
+	if !f.fallbackMode {
+		f.log.Warn("Enabling fallback mode due to reorg failure")
+		f.fallbackMode = true
+		f.metrics.RecordFallbackActivated("reorg_failure")
+		f.emitter.Emit(ctx, FollowerModeFallbackEvent{
+			Reason: fmt.Sprintf("reorg failure: %v", err),
+		})
+	}
+
+	return true
+}
+
+// FollowerModeReorgFailureEvent is emitted when reorg handling fails
+type FollowerModeReorgFailureEvent struct {
+	Err error
+}
+
+func (ev FollowerModeReorgFailureEvent) String() string {
+	return "follower-mode-reorg-failure"
+}
+
+// FollowerModeFallbackEvent is emitted when follower mode enables fallback
+type FollowerModeFallbackEvent struct {
+	Reason string
+}
+
+func (ev FollowerModeFallbackEvent) String() string {
+	return "follower-mode-fallback"
+}
+
+// requestMissingSafeHeads handles gaps in safe head progression
+func (f *FollowerModeDeriver) requestMissingSafeHeads(ctx context.Context, targetRef eth.L2BlockRef) bool {
+	currentSafe := f.engine.SafeL2Head()
+	gap := targetRef.Number - currentSafe.Number
+
+	f.log.Info("Follower mode: requesting missing safe heads",
+		"current", currentSafe.ID(),
+		"target", targetRef.ID(),
+		"gap", gap)
+
+	// Record gap metrics and emit event for monitoring
+	f.metrics.RecordGapDetected(gap)
+	f.emitter.Emit(ctx, FollowerModeGapDetectedEvent{
+		CurrentSafe: currentSafe,
+		TargetSafe:  targetRef,
+		Gap:         gap,
+	})
+
+	return true
+}
+
+// FollowerModeGapDetectedEvent is emitted when gaps are detected in safe head progression
+type FollowerModeGapDetectedEvent struct {
+	CurrentSafe eth.L2BlockRef
+	TargetSafe  eth.L2BlockRef
+	Gap         uint64
+}
+
+func (ev FollowerModeGapDetectedEvent) String() string {
+	return "follower-mode-gap-detected"
+}
+
+// handleTimeout handles gossip timeout in follower mode
+func (f *FollowerModeDeriver) handleTimeout(ctx context.Context) bool {
+	timeSinceLastGossip := time.Since(f.lastGossipTime)
+
+	if timeSinceLastGossip > f.gossipTimeout {
+		f.log.Warn("Follower mode: gossip timeout exceeded",
+			"timeout", f.gossipTimeout,
+			"since_last_gossip", timeSinceLastGossip)
+
+		// Record timeout metrics
+		f.metrics.RecordGossipTimeout()
+
+		if !f.fallbackMode {
+			f.log.Warn("Enabling fallback mode due to gossip timeout")
+			f.fallbackMode = true
+			f.metrics.RecordFallbackActivated("gossip_timeout")
+			f.emitter.Emit(ctx, FollowerModeFallbackEvent{
+				Reason: fmt.Sprintf("gossip timeout: %v", timeSinceLastGossip),
+			})
+		}
+	}
+
+	return true
+}
+
+// emitSafeHeadEvents emits standard safe head events after changes
+func (f *FollowerModeDeriver) emitSafeHeadEvents(ctx context.Context, ref eth.L2BlockRef) {
 	// Emit events to notify other components
 	f.emitter.Emit(ctx, engine.SafeDerivedEvent{
 		Safe:   ref,
@@ -84,62 +416,25 @@ func (f *FollowerModeDeriver) processSafeHead(ctx context.Context, ev p2p.Receiv
 	})
 
 	f.emitter.Emit(ctx, engine.CrossSafeUpdateEvent{
-		CrossSafe: f.engine.SafeL2Head(),
-		LocalSafe: f.engine.SafeL2Head(), // Use SafeL2Head for both since we don't have separate local/cross in follower mode
+		CrossSafe: ref,
+		LocalSafe: ref, // In follower mode, local and cross safe are the same
 	})
-
-	return true
 }
 
-// validateSafeHeadProgression ensures the received safe head builds properly on current safe head
-func (f *FollowerModeDeriver) validateSafeHeadProgression(received eth.L2BlockRef, currentSafe eth.L2BlockRef) bool {
-	// If we have no current safe head, accept any valid block as the first safe head
-	if currentSafe == (eth.L2BlockRef{}) {
-		f.log.Info("No current safe head, accepting first safe head", "hash", received.Hash)
-		return true
-	}
+// NoOpFollowerModeMetrics provides a no-op implementation of FollowerModeMetrics
+type NoOpFollowerModeMetrics struct{}
 
-	// The received safe head should either:
-	// 1. Be the next block (currentSafe.Number + 1)
-	// 2. Or be the same block (reorg/duplicate)
-	if received.Number == currentSafe.Number+1 {
-		// Next block - validate parent hash
-		if received.ParentHash != currentSafe.Hash {
-			f.log.Warn("Safe head parent hash mismatch",
-				"received_parent", received.ParentHash,
-				"current_safe", currentSafe.Hash)
-			return false
-		}
-		return true
-	} else if received.Number == currentSafe.Number {
-		// Same block number - could be reorg or duplicate
-		if received.Hash == currentSafe.Hash {
-			f.log.Debug("Received duplicate safe head, ignoring", "hash", received.Hash)
-			return false // Don't process duplicates
-		} else {
-			f.log.Warn("Potential reorg: received different safe head at same height",
-				"received", received.ID(),
-				"current", currentSafe.ID())
-			// For now, reject reorgs in follower mode to keep it simple
-			// In production, you might want more sophisticated reorg handling
-			return false
-		}
-	} else if received.Number <= currentSafe.Number {
-		// Old block - reject
-		f.log.Debug("Received old safe head, ignoring",
-			"received_number", received.Number,
-			"current_safe_number", currentSafe.Number)
-		return false
-	} else {
-		// Gap in blocks - this could be valid if we're catching up
-		// but for simplicity, require sequential progression
-		f.log.Warn("Gap in safe head progression",
-			"received_number", received.Number,
-			"current_safe_number", currentSafe.Number,
-			"gap", received.Number-currentSafe.Number)
-		return false
-	}
-}
+var _ FollowerModeMetrics = (*NoOpFollowerModeMetrics)(nil)
+
+func (m *NoOpFollowerModeMetrics) RecordSafeHeadGossipReceived()                       {}
+func (m *NoOpFollowerModeMetrics) RecordSafeHeadApplied(blockNumber uint64)            {}
+func (m *NoOpFollowerModeMetrics) RecordSafeHeadIgnored(reason string)                 {}
+func (m *NoOpFollowerModeMetrics) RecordSafeHeadReorg(reorgDepth uint64)               {}
+func (m *NoOpFollowerModeMetrics) RecordReorgFailure()                                 {}
+func (m *NoOpFollowerModeMetrics) RecordGapDetected(gapSize uint64)                    {}
+func (m *NoOpFollowerModeMetrics) RecordGossipTimeout()                                {}
+func (m *NoOpFollowerModeMetrics) RecordFallbackActivated(reason string)               {}
+func (m *NoOpFollowerModeMetrics) RecordSafeHeadProcessingTime(duration time.Duration) {}
 
 // payloadToBlockRef converts an execution payload to an L2 block reference
 func (f *FollowerModeDeriver) payloadToBlockRef(payload *eth.ExecutionPayload) (eth.L2BlockRef, error) {
