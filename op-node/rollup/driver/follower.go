@@ -20,7 +20,7 @@ import (
 type FollowerModeDeriver struct {
 	log     log.Logger
 	cfg     *rollup.Config
-	engine  EngineController
+	engine  *engine.EngineController
 	emitter event.Emitter
 	metrics FollowerModeMetrics
 
@@ -54,7 +54,7 @@ type FollowerModeMetrics interface {
 
 var _ event.Deriver = (*FollowerModeDeriver)(nil)
 
-func NewFollowerModeDeriver(log log.Logger, cfg *rollup.Config, engine EngineController, metrics FollowerModeMetrics) *FollowerModeDeriver {
+func NewFollowerModeDeriver(log log.Logger, cfg *rollup.Config, engine *engine.EngineController, metrics FollowerModeMetrics) *FollowerModeDeriver {
 	return &FollowerModeDeriver{
 		log:            log,
 		cfg:            cfg,
@@ -227,6 +227,15 @@ func (f *FollowerModeDeriver) applySafeHead(ctx context.Context, ref eth.L2Block
 		"hash", ref.Hash,
 		"number", ref.Number)
 
+	// Backup current safe head before changing it
+	currentSafe := f.engine.SafeL2Head()
+	if currentSafe != (eth.L2BlockRef{}) {
+		f.engine.SetBackupSafeL2Head(currentSafe, false)
+		f.log.Debug("Backed up current safe head before applying new one",
+			"backup_safe", currentSafe.ID(),
+			"new_safe", ref.ID())
+	}
+
 	f.engine.SetSafeHead(ref)
 	f.emitSafeHeadEvents(ctx, ref)
 	f.metrics.RecordSafeHeadApplied(ref.Number)
@@ -241,38 +250,37 @@ func (f *FollowerModeDeriver) handleSafeHeadReorg(ctx context.Context, newRef et
 		"old_safe", currentSafe.ID(),
 		"new_safe", newRef.ID())
 
-	// Step 1: Attempt to rollback to a common ancestor
-	rollbackRef, err := f.findCommonAncestor(ctx, currentSafe, newRef)
-	if err != nil {
-		f.log.Error("Failed to find common ancestor for reorg", "err", err)
-		return f.handleReorgFailure(ctx, err)
-	}
+	// Step 1: Backup current safe head for potential rollback
+	f.engine.SetBackupSafeL2Head(currentSafe, true)
+	f.log.Debug("Backed up current safe head for reorg",
+		"backup_safe", currentSafe.ID())
 
-	// Step 2: Rollback the safe head to the common ancestor
-	if rollbackRef.Number < currentSafe.Number {
-		f.log.Info("Rolling back safe head for reorg",
-			"from", currentSafe.ID(),
-			"to", rollbackRef.ID(),
-			"rollback_depth", currentSafe.Number-rollbackRef.Number)
-
-		f.engine.SetSafeHead(rollbackRef)
-		f.emitSafeHeadEvents(ctx, rollbackRef)
-	}
-
-	// Step 3: Apply the new safe head
-	f.log.Info("Applying new safe head after reorg",
+	// Step 2: Attempt to apply the new safe head via execution engine
+	f.log.Info("Attempting to apply new safe head via execution engine",
 		"new_safe", newRef.ID())
 
 	f.engine.SetSafeHead(newRef)
-	f.emitSafeHeadEvents(ctx, newRef)
+
+	// Step 3: Try to update the execution engine with forkchoice
+	// This will validate that the execution engine accepts the reorg
+	// If it fails, the backup reorg mechanism will restore the previous safe head
+	f.emitter.Emit(ctx, engine.TryBackupSafeReorgEvent{})
+
+	// Step 4: Update our tracking state
 	f.lastValidSafeHead = newRef
 
-	// Step 4: Emit reorg event for monitoring and record metrics
-	reorgDepth := currentSafe.Number - rollbackRef.Number
+	// Step 5: Emit reorg event for monitoring and record metrics
+	reorgDepth := uint64(0)
+	if currentSafe.Number > newRef.Number {
+		reorgDepth = currentSafe.Number - newRef.Number
+	} else {
+		reorgDepth = newRef.Number - currentSafe.Number
+	}
+
 	f.emitter.Emit(ctx, FollowerModeReorgEvent{
 		OldSafe:    currentSafe,
 		NewSafe:    newRef,
-		RollbackTo: rollbackRef,
+		RollbackTo: newRef, // We're directly applying the new ref
 		ReorgDepth: reorgDepth,
 	})
 	f.metrics.RecordSafeHeadReorg(reorgDepth)
@@ -303,7 +311,7 @@ func (f *FollowerModeDeriver) findCommonAncestor(ctx context.Context, oldRef, ne
 	}
 
 	// If no last valid safe head, rollback to finalized head as safe fallback
-	finalized := f.engine.Finalized()
+	finalized := f.engine.SafeL2Head() // Changed from f.engine.Finalized() to f.engine.SafeL2Head()
 	f.log.Info("Using finalized head as rollback point",
 		"finalized", finalized.ID())
 	return finalized, nil

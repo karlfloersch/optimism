@@ -186,6 +186,13 @@ func (ev TryBackupUnsafeReorgEvent) String() string {
 	return "try-backup-unsafe-reorg"
 }
 
+type TryBackupSafeReorgEvent struct {
+}
+
+func (ev TryBackupSafeReorgEvent) String() string {
+	return "try-backup-safe-reorg"
+}
+
 type TryUpdateEngineEvent struct {
 	// These fields will be zero-value (BuildStarted,InsertStarted=time.Time{}, Envelope=nil) if
 	// this event is emitted outside of engineDeriver.onPayloadSuccess
@@ -374,6 +381,29 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			} else {
 				d.emitter.Emit(ctx, rollup.CriticalErrorEvent{
 					Err: fmt.Errorf("unexpected TryBackupUnsafeReorg error type: %w", err),
+				})
+			}
+		}
+	case TryBackupSafeReorgEvent:
+		// If we don't need to call FCU to restore safeHead using backupSafe, keep going b/c
+		// this was a no-op(except correcting invalid state when backupSafe is empty but TryBackupSafeReorg called).
+		fcuCalled, err := d.ec.TryBackupSafeReorg(d.ctx)
+		// Dealing with legacy here: it used to skip over the error-handling if fcuCalled was false.
+		// But that combination is not actually a code-path in TryBackupSafeReorg.
+		// We should drop fcuCalled, and make the function emit events directly,
+		// once there are no more synchronous callers.
+		if !fcuCalled && err != nil {
+			d.log.Crit("unexpected TryBackupSafeReorg error after no FCU call", "err", err)
+		}
+		if err != nil {
+			// If we needed to perform a network call, then we should yield even if we did not encounter an error.
+			if errors.Is(err, derive.ErrReset) {
+				d.emitter.Emit(ctx, rollup.ResetEvent{Err: err})
+			} else if errors.Is(err, derive.ErrTemporary) {
+				d.emitter.Emit(ctx, rollup.EngineTemporaryErrorEvent{Err: err})
+			} else {
+				d.emitter.Emit(ctx, rollup.CriticalErrorEvent{
+					Err: fmt.Errorf("unexpected TryBackupSafeReorg error type: %w", err),
 				})
 			}
 		}
