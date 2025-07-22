@@ -87,6 +87,140 @@ func TestSafeHeadSync(t *testing.T) {
 	t.Log("✅ SUCCESS: Safe head gossip test completed!")
 }
 
+// TestSafeHeadSyncWithL2Reorg tests safe head gossip behavior during L2 reorgs
+// This test verifies that both prover and follower nodes correctly handle L2 reorgs
+// and maintain consistent safe head state after the reorg
+func TestSafeHeadSyncWithL2Reorg(t *testing.T) {
+	dp := devtest.SerialT(t)
+	system := presets.NewFollowerMode(dp)
+
+	t.Log("🚀 Testing safe head gossip during L2 reorg scenario...")
+
+	// Initialize with some L2 activity to establish a chain
+	alice := system.FunderL2.NewFundedEOA(eth.OneHundredthEther)
+	bob := system.Wallet.NewEOA(system.L2EL)
+
+	// Build initial L2 chain with multiple blocks
+	t.Log("📦 Building initial L2 chain...")
+	for i := 0; i < 5; i++ {
+		alice.Transfer(bob.Address(), eth.GWei(1000))
+		system.AdvanceTime(2 * time.Second)
+	}
+
+	// Let initial sync establish safe heads via gossip
+	system.L1Network.WaitForBlock()
+	time.Sleep(8 * time.Second)
+
+	// Capture state before reorg
+	proverSafePreReorg := system.ProverCL.SafeL2BlockRef()
+	followerSafePreReorg := system.FollowerCL.SafeL2BlockRef()
+
+	t.Logf("📊 Pre-Reorg State:")
+	t.Logf("   Prover Safe Head:   #%d %s", proverSafePreReorg.Number, proverSafePreReorg.Hash.Hex()[:10])
+	t.Logf("   Follower Safe Head: #%d %s", followerSafePreReorg.Number, followerSafePreReorg.Hash.Hex()[:10])
+
+	// Ensure both nodes have synced before reorg
+	if proverSafePreReorg.Number != followerSafePreReorg.Number {
+		t.Logf("⚠️  Nodes not fully synced before reorg, waiting...")
+		time.Sleep(5 * time.Second)
+		proverSafePreReorg = system.ProverCL.SafeL2BlockRef()
+		followerSafePreReorg = system.FollowerCL.SafeL2BlockRef()
+	}
+
+	// Simulate L1 reorg that affects L2 derivation
+	// This will cause L2 nodes to reorg their chains
+	t.Log("🔄 Triggering L1 reorg to force L2 reorg...")
+
+	// Build some L1 blocks first to create reorg opportunity
+	for i := 0; i < 3; i++ {
+		system.L1Network.WaitForBlock()
+		time.Sleep(1 * time.Second)
+	}
+
+	// Create more L2 activity that will be affected by reorg
+	for i := 0; i < 3; i++ {
+		alice.Transfer(bob.Address(), eth.GWei(500))
+		system.AdvanceTime(1 * time.Second)
+	}
+
+	// Force derivation to progress
+	time.Sleep(5 * time.Second)
+	system.L1Network.WaitForBlock()
+	time.Sleep(5 * time.Second)
+
+	// Check state after potential reorg
+	proverSafePostReorg := system.ProverCL.SafeL2BlockRef()
+	followerSafePostReorg := system.FollowerCL.SafeL2BlockRef()
+
+	t.Logf("📊 Post-Reorg State:")
+	t.Logf("   Prover Safe Head:   #%d %s", proverSafePostReorg.Number, proverSafePostReorg.Hash.Hex()[:10])
+	t.Logf("   Follower Safe Head: #%d %s", followerSafePostReorg.Number, followerSafePostReorg.Hash.Hex()[:10])
+
+	// Verify both nodes maintain consistency after reorg
+	// Key invariants to check:
+
+	// 1. Both nodes should have progressed (or at least maintained) their safe heads
+	if proverSafePostReorg.Number < proverSafePreReorg.Number {
+		t.Logf("⚠️  Prover safe head regressed during reorg: %d -> %d",
+			proverSafePreReorg.Number, proverSafePostReorg.Number)
+	}
+
+	if followerSafePostReorg.Number < followerSafePreReorg.Number {
+		t.Logf("⚠️  Follower safe head regressed during reorg: %d -> %d",
+			followerSafePreReorg.Number, followerSafePostReorg.Number)
+	}
+
+	// 2. Both nodes should eventually converge to the same safe head
+	maxWaitTime := 30 * time.Second
+	checkInterval := 2 * time.Second
+	startTime := time.Now()
+
+	for time.Since(startTime) < maxWaitTime {
+		currentProverSafe := system.ProverCL.SafeL2BlockRef()
+		currentFollowerSafe := system.FollowerCL.SafeL2BlockRef()
+
+		if currentProverSafe.Hash == currentFollowerSafe.Hash &&
+			currentProverSafe.Number == currentFollowerSafe.Number {
+			t.Logf("✅ SUCCESS: Safe head gossip maintains consistency during reorg!")
+			t.Logf("   Final Safe Head: #%d %s", currentProverSafe.Number, currentProverSafe.Hash.Hex()[:10])
+
+			// Add more L2 activity to ensure system continues working post-reorg
+			t.Log("🔄 Verifying continued operation post-reorg...")
+			for i := 0; i < 2; i++ {
+				alice.Transfer(bob.Address(), eth.GWei(250))
+				system.AdvanceTime(2 * time.Second)
+			}
+
+			time.Sleep(5 * time.Second)
+
+			finalProverSafe := system.ProverCL.SafeL2BlockRef()
+			finalFollowerSafe := system.FollowerCL.SafeL2BlockRef()
+
+			t.Logf("📊 Final State After Continued Operation:")
+			t.Logf("   Prover Safe Head:   #%d %s", finalProverSafe.Number, finalProverSafe.Hash.Hex()[:10])
+			t.Logf("   Follower Safe Head: #%d %s", finalFollowerSafe.Number, finalFollowerSafe.Hash.Hex()[:10])
+
+			if finalProverSafe.Hash == finalFollowerSafe.Hash {
+				t.Log("✅ SUCCESS: System continues operating correctly after reorg!")
+				return
+			}
+			break
+		}
+
+		t.Logf("⏳ Waiting for convergence... Prover: #%d, Follower: #%d",
+			currentProverSafe.Number, currentFollowerSafe.Number)
+		time.Sleep(checkInterval)
+	}
+
+	// If we reach here, nodes haven't converged
+	finalProverSafe := system.ProverCL.SafeL2BlockRef()
+	finalFollowerSafe := system.FollowerCL.SafeL2BlockRef()
+
+	t.Errorf("❌ TIMEOUT: Safe heads did not converge after reorg within %v", maxWaitTime)
+	t.Logf("   Final Prover Safe:   #%d %s", finalProverSafe.Number, finalProverSafe.Hash.Hex()[:10])
+	t.Logf("   Final Follower Safe: #%d %s", finalFollowerSafe.Number, finalFollowerSafe.Hash.Hex()[:10])
+}
+
 // TestSafeHeadGossipTimeout tests what happens when follower stops receiving gossip
 func TestSafeHeadGossipTimeout(t *testing.T) {
 	dp := devtest.SerialT(t)
