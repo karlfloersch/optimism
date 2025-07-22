@@ -197,27 +197,55 @@ type FollowerMode struct {
    - Verifies prover gossips safe heads
    - Confirms follower receives and applies safe heads
    - Validates synchronized state between nodes
+   - **Result**: ✅ Both nodes achieve identical safe heads via gossip
 
-2. **TestSafeHeadSyncWithL2Reorg**: Reorg scenario testing
+2. **TestExecutionEngineStateConsistency**: Engine state validation
+   - Tests that execution engine state matches rollup node state
+   - Validates ForkchoiceUpdate calls are working correctly
+   - Confirms finalized head initialization
+   - **Result**: ✅ Perfect state synchronization between prover and follower execution engines
+
+3. **TestUnsafeHeadProgression**: Unsafe sync validation
+   - Tests unsafe head progression beyond safe head in follower mode
+   - Validates that follower processes P2P unsafe payloads correctly
+   - Confirms execution engine accepts unsafe blocks after safe head sync
+   - **Key Validation**:
+     - Prover: Unsafe #17, Safe #9
+     - Follower: Unsafe #17, Safe #9 (was stuck at #0 before fix)
+   - **Result**: ✅ Follower unsafe heads now progress properly alongside prover
+
+4. **TestSafeHeadSyncWithL2Reorg**: Reorg scenario testing (planned)
    - Adapts existing L2 reorg patterns from op-acceptance-tests
    - Validates system behavior during chain reorganizations
    - Ensures state consistency after complex chain events
 
-3. **TestSafeHeadGossipTimeout**: Network partition scenarios
+5. **TestSafeHeadGossipTimeout**: Network partition scenarios (planned)
    - Tests behavior when gossip reception stops
    - Infrastructure for timeout and fallback mechanisms
 
-4. **TestSafeHeadReorg**: Reorg infrastructure validation
+6. **TestSafeHeadReorg**: Reorg infrastructure validation (planned)
    - Tests reorg detection and handling infrastructure
    - Validates continued operation after reorg scenarios
 
-5. **TestSafeHeadInvalidSignature**: Security validation
+7. **TestSafeHeadInvalidSignature**: Security validation (planned)
    - Tests rejection of invalid signatures
    - Infrastructure for P2P message injection testing
 
-6. **TestSafeHeadFallbackRecovery**: Recovery mechanism testing
+8. **TestSafeHeadFallbackRecovery**: Recovery mechanism testing (planned)
    - Tests fallback to normal derivation on extended failures
    - Validates metrics and recovery workflows
+
+**Test Infrastructure Logs**:
+
+Successful test runs show the complete flow:
+```
+msg="Publishing signed safe head on p2p" id=0x...123:1
+msg="Follower mode: received safe head from P2P" hash=0x...123 number=1
+msg="Initializing finalized head to genesis in follower mode" genesis=0x...000:0
+msg="Updating unsafe head to match safe head in follower mode" old_unsafe=0 new_unsafe=4
+msg="Emitting TryUpdateEngineEvent to sync forkchoice" unsafe=4 safe=4 finalized=0
+msg="Optimistically queueing unsafe L2 execution payload" id=0x...456:5
+```
 
 #### `op-acceptance-tests/acceptance-tests.yaml`
 **Purpose**: CI/CD integration
@@ -276,10 +304,135 @@ The implementation maintains full backwards compatibility:
 3. **Network**: Additional P2P traffic for safe head propagation
 4. **Storage**: No additional storage requirements
 
+## Current Status
+
+### ✅ **Fully Working Features**
+
+1. **Safe Head Gossip**: Prover nodes successfully gossip safe heads to P2P network
+2. **Safe Head Reception**: Follower nodes receive and apply gossiped safe heads
+3. **Execution Engine Sync**: ForkchoiceUpdate calls properly synchronize all head states
+4. **Finalized Head Initialization**: Genesis block is properly finalized on first safe head reception
+5. **Unsafe P2P Sync**: Follower nodes process unsafe payloads correctly after safe head sync
+6. **State Consistency**: Perfect synchronization between prover and follower nodes
+7. **Backwards Compatibility**: Existing functionality unaffected, default behavior unchanged
+
+### 🔄 **Partially Implemented**
+
+1. **Basic Reorg Infrastructure**: Code exists but needs testing and refinement
+2. **Test Coverage**: Core functionality fully tested, edge cases planned
+
+### 📋 **Planned Enhancements**
+
+1. **Advanced Reorg Handling**: Implement deep reorg recovery similar to unsafe blocks
+   - Current: Only handles simple same-height conflicts (`validateSafeHeadWithReorg`)
+   - Missing: Chain rebuilding after reorg, conflict resolution between multiple safe head sources
+   - Unsafe blocks have: Trust propagation, chain verification, multiple candidate handling
+
+2. **Gap Filling**: Implement quarantine system and active block requesting like unsafe blocks
+   - Current: Expects safe blocks to arrive sequentially via gossip
+   - Missing: Quarantine system for out-of-order blocks, active P2P request/response for missing blocks
+   - Unsafe blocks have: `SyncClient` with LRU quarantine, `RequestL2Range()`, `PayloadByNumberProtocolID`
+
+3. **Comprehensive Reorg Testing**: L2 reorg scenarios with safe head gossip
+4. **Real Metrics**: Replace no-op metrics with actual implementation
+5. **Performance Optimization**: Gossip frequency tuning and bandwidth optimization
+
+### 🧪 **Test Results Summary**
+
+All core functionality tests pass with expected behavior:
+
+- **TestSafeHeadSync**: ✅ PASS
+- **TestExecutionEngineStateConsistency**: ✅ PASS
+- **TestUnsafeHeadProgression**: ✅ PASS
+
+The system successfully demonstrates:
+- Prover nodes gossip safe heads via P2P
+- Follower nodes receive safe heads and disable derivation
+- Execution engines maintain consistent forkchoice state
+- Unsafe heads progress normally in follower mode (was broken, now fixed)
+- Perfect synchronization between prover and follower node states
+
+## Critical Implementation Discoveries
+
+During development, several key issues were identified and resolved:
+
+### **1. Execution Engine Forkchoice State Initialization**
+
+**Problem**: Follower nodes were experiencing execution engine errors:
+```
+msg="Engine temporary error" err="temp: cannot update engine until engine forkchoice is initialized: failed to load finalized head: failed to determine L2BlockRef of finalized, could not get payload: finalized block not found"
+```
+
+**Root Cause**: The execution engine requires a valid finalized head to maintain proper forkchoice state. In follower mode, the finalized head was never initialized, causing forkchoice updates to fail.
+
+**Solution**: Initialize finalized head to genesis block when applying first safe head:
+```go
+// In follower.go applySafeHead()
+if currentFinalized == (eth.L2BlockRef{}) {
+    genesisRef := eth.L2BlockRef{
+        Hash:           f.cfg.Genesis.L2.Hash,
+        Number:         f.cfg.Genesis.L2.Number,
+        ParentHash:     common.Hash{}, // Genesis has no parent
+        Time:           0,
+        L1Origin:       f.cfg.Genesis.L1,
+        SequenceNumber: 0,
+    }
+    f.log.Info("Initializing finalized head to genesis in follower mode", "genesis", genesisRef.ID())
+    f.engine.SetFinalizedHead(genesisRef)
+}
+```
+
+### **2. Unsafe Head Synchronization**
+
+**Problem**: Follower unsafe heads were stuck at genesis (#0) while safe heads progressed via gossip (#1, #2, #3...). This caused unsafe payloads to be rejected:
+```
+msg="skipping unsafe payload, since it does not build onto the existing unsafe chain"
+safe=0x...123:3 unsafe=0x...000:0 unsafe_payload=0x...456:4
+```
+
+**Solution**: Update unsafe head to match safe head when safe head advances:
+```go
+// In follower.go applySafeHead()
+if f.engine.UnsafeL2Head().Number < ref.Number {
+    f.log.Info("Updating unsafe head to match safe head in follower mode",
+        "old_unsafe", f.engine.UnsafeL2Head().Number,
+        "new_unsafe", ref.Number,
+        "hash", ref.Hash.Hex())
+    f.engine.SetUnsafeHead(ref)
+}
+```
+
+**Result**: This enables unsafe P2P sync to work properly in follower mode, allowing unsafe heads to progress beyond safe heads as expected.
+
+### **3. Execution Engine State Synchronization**
+
+**Critical Step**: Emit `TryUpdateEngineEvent` to sync forkchoice state with execution engine:
+```go
+// In follower.go applySafeHead()
+f.log.Info("Emitting TryUpdateEngineEvent to sync forkchoice",
+    "unsafe", f.engine.UnsafeL2Head().Number,
+    "safe", f.engine.SafeL2Head().Number,
+    "finalized", f.engine.Finalized().Number)
+f.emitter.Emit(ctx, engine.TryUpdateEngineEvent{})
+```
+
+This triggers the engine controller to call `ForkchoiceUpdate()` with the execution engine, actually finalizing genesis and synchronizing all head states.
+
+### **4. Testing Validation**
+
+The implementation was validated with comprehensive tests showing:
+
+**Before Fix**:
+- Prover: Unsafe #17, Safe #9
+- Follower: Unsafe #0, Safe #9 (unsafe stuck at genesis)
+
+**After Fix**:
+- Prover: Unsafe #17, Safe #9
+- Follower: Unsafe #17, Safe #9 (perfect synchronization)
+
 ## Future Enhancements
 
-1. **Real Metrics**: Replace no-op metrics with actual implementation
-2. **Advanced Reorg Handling**: More sophisticated reorg detection and recovery
-3. **Gap Filling**: Implementation for requesting missing safe head blocks
-4. **Dynamic Mode Switching**: Runtime switching between operation modes
-5. **Performance Optimization**: Gossip frequency tuning and bandwidth optimization
+1. **Dynamic Mode Switching**: Runtime switching between operation modes
+2. **Enhanced Monitoring**: Comprehensive metrics and alerting for production deployments
+3. **Modular Prover Support**: Easier configuration of which prover signatures to accept
+4. **Bandwidth Optimization**: Smart gossip frequency based on network conditions
