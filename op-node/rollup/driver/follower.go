@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/p2p"
@@ -227,18 +228,65 @@ func (f *FollowerModeDeriver) applySafeHead(ctx context.Context, ref eth.L2Block
 		"hash", ref.Hash,
 		"number", ref.Number)
 
-	// Backup current safe head before changing it
+	// Get current heads before updating
+	currentUnsafe := f.engine.UnsafeL2Head()
 	currentSafe := f.engine.SafeL2Head()
+	currentFinalized := f.engine.Finalized()
+	f.log.Info("Current heads before update",
+		"current_unsafe", currentUnsafe.Number,
+		"current_safe", currentSafe.Number,
+		"current_finalized", currentFinalized.Number,
+		"new_safe", ref.Number)
+
+	// Initialize finalized head to genesis if not set
+	// This is crucial for execution engine forkchoice state consistency
+	if currentFinalized == (eth.L2BlockRef{}) {
+		// Create genesis ref with available info
+		// The exact genesis details aren't critical, just need a valid finalized head
+		genesisRef := eth.L2BlockRef{
+			Hash:           f.cfg.Genesis.L2.Hash,
+			Number:         f.cfg.Genesis.L2.Number,
+			ParentHash:     common.Hash{}, // Genesis has no parent
+			Time:           0,             // Execution engine will handle this
+			L1Origin:       f.cfg.Genesis.L1,
+			SequenceNumber: 0,
+		}
+		f.log.Info("Initializing finalized head to genesis in follower mode", "genesis", genesisRef.ID())
+		f.engine.SetFinalizedHead(genesisRef)
+	}
+
+	// Backup current safe head before changing it
 	if currentSafe != (eth.L2BlockRef{}) {
 		f.engine.SetBackupSafeL2Head(currentSafe, false)
 		f.log.Debug("Backed up current safe head before applying new one",
-			"backup_safe", currentSafe.ID(),
-			"new_safe", ref.ID())
+			"backup_safe", currentSafe.ID())
 	}
 
+	// Update the safe head in the engine controller
 	f.engine.SetSafeHead(ref)
-	f.emitSafeHeadEvents(ctx, ref)
+
+	// In follower mode, also update the unsafe head to match the safe head
+	// This allows subsequent unsafe payloads to build properly on the current chain
+	if f.engine.UnsafeL2Head().Number < ref.Number {
+		f.log.Info("Updating unsafe head to match safe head in follower mode",
+			"old_unsafe", f.engine.UnsafeL2Head().Number,
+			"new_unsafe", ref.Number,
+			"hash", ref.Hash.Hex())
+
+		f.engine.SetUnsafeHead(ref)
+	}
+
+	// Update local safe head tracking
+	f.lastValidSafeHead = ref
 	f.metrics.RecordSafeHeadApplied(ref.Number)
+
+	// Trigger a forkchoice update to sync the execution engine with our updated heads
+	f.log.Info("Emitting TryUpdateEngineEvent to sync forkchoice",
+		"unsafe", f.engine.UnsafeL2Head().Number,
+		"safe", f.engine.SafeL2Head().Number,
+		"finalized", f.engine.Finalized().Number)
+	f.emitter.Emit(ctx, engine.TryUpdateEngineEvent{})
+
 	return true
 }
 
@@ -427,6 +475,55 @@ func (f *FollowerModeDeriver) emitSafeHeadEvents(ctx context.Context, ref eth.L2
 		CrossSafe: ref,
 		LocalSafe: ref, // In follower mode, local and cross safe are the same
 	})
+}
+
+// applySafeHeadToEngine applies a safe head to the engine controller
+func (f *FollowerModeDeriver) applySafeHeadToEngine(ctx context.Context, safeHead eth.L2BlockRef) error {
+	f.log.Info("🚨 ENTERING applySafeHeadToEngine function")
+	f.log.Info("Follower mode: applying safe head to engine", "component", "follower-mode", "hash", safeHead.Hash.Hex(), "number", safeHead.Number)
+
+	f.log.Info("DEBUG: About to get current heads")
+	// Get current heads before updating
+	currentUnsafe := f.engine.UnsafeL2Head()
+	currentSafe := f.engine.SafeL2Head()
+	f.log.Info("Current heads before update",
+		"current_unsafe", currentUnsafe.Number,
+		"current_safe", currentSafe.Number,
+		"new_safe", safeHead.Number)
+
+	f.log.Info("DEBUG: About to set safe head")
+	// Update the safe head in the engine controller
+	f.engine.SetSafeHead(safeHead)
+
+	f.log.Info("DEBUG: About to check unsafe head")
+	// In follower mode, also update the unsafe head to match the safe head
+	// This allows subsequent unsafe payloads to build properly on the current chain
+	if f.engine.UnsafeL2Head().Number < safeHead.Number {
+		f.log.Info("Updating unsafe head to match safe head in follower mode",
+			"old_unsafe", f.engine.UnsafeL2Head().Number,
+			"new_unsafe", safeHead.Number,
+			"hash", safeHead.Hash.Hex())
+		f.engine.SetUnsafeHead(safeHead)
+	}
+
+	f.log.Info("DEBUG: About to set local safe head")
+	// Update local safe head to match cross safe head (they're the same in follower mode)
+	f.engine.SetLocalSafeHead(safeHead)
+
+	f.log.Info("DEBUG: About to emit TryUpdateEngineEvent")
+	// Trigger a forkchoice update to sync the execution engine with our updated heads
+	f.log.Info("Emitting TryUpdateEngineEvent to sync forkchoice",
+		"unsafe", f.engine.UnsafeL2Head().Number,
+		"safe", f.engine.SafeL2Head().Number)
+	f.emitter.Emit(ctx, engine.TryUpdateEngineEvent{})
+
+	f.log.Info("DEBUG: About to record metrics")
+	// Track successful safe head application
+	f.metrics.RecordSafeHeadApplied(safeHead.Number)
+	f.lastValidSafeHead = safeHead
+
+	f.log.Info("DEBUG: Function completed successfully")
+	return nil
 }
 
 // NoOpFollowerModeMetrics provides a no-op implementation of FollowerModeMetrics

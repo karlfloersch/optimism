@@ -87,8 +87,102 @@ func TestSafeHeadSync(t *testing.T) {
 	t.Log("✅ SUCCESS: Safe head gossip test completed!")
 }
 
-// TestExecutionEngineStateConsistency validates that rollup nodes have consistent safe heads
-// This ensures our safe head gossip is working correctly
+// TestUnsafeHeadProgression validates that unsafe heads progress properly in follower mode
+// This test ensures unsafe heads advance both with and beyond safe heads
+func TestUnsafeHeadProgression(t *testing.T) {
+	dp := devtest.SerialT(t)
+	system := presets.NewFollowerMode(dp)
+
+	t.Log("🚀 Testing unsafe head progression in follower mode...")
+
+	// Wait for initial gossip to establish baseline
+	time.Sleep(2 * time.Second)
+
+	// Create L2 activity to generate blocks
+	alice := system.FunderL2.NewFundedEOA(eth.OneHundredthEther)
+	bob := system.Wallet.NewEOA(system.L2EL)
+
+	// Phase 1: Generate blocks and verify safe/unsafe head progression together
+	t.Log("📈 Phase 1: Creating blocks and waiting for safe head gossip...")
+
+	for i := 0; i < 3; i++ {
+		alice.Transfer(bob.Address(), eth.GWei(500))
+		time.Sleep(500 * time.Millisecond) // Allow time for block creation
+	}
+
+	// Wait for gossip to propagate safe heads
+	t.Log("⏳ Waiting for safe head gossip...")
+	system.AdvanceTime(6 * time.Second)
+	time.Sleep(3 * time.Second)
+
+	// Check initial progression
+	proverUnsafe1 := system.ProverCL.SyncStatus().UnsafeL2
+	proverSafe1 := system.ProverCL.SafeL2BlockRef()
+	followerUnsafe1 := system.FollowerCL.SyncStatus().UnsafeL2
+	followerSafe1 := system.FollowerCL.SafeL2BlockRef()
+
+	t.Logf("📊 Phase 1 Results:")
+	t.Logf("   Prover   - Unsafe: #%d, Safe: #%d", proverUnsafe1.Number, proverSafe1.Number)
+	t.Logf("   Follower - Unsafe: #%d, Safe: #%d", followerUnsafe1.Number, followerSafe1.Number)
+
+	// Validate safe heads are synchronized
+	if proverSafe1.Hash != followerSafe1.Hash {
+		t.Errorf("❌ Safe heads don't match after Phase 1: prover=%s, follower=%s",
+			proverSafe1.Hash.Hex()[:10], followerSafe1.Hash.Hex()[:10])
+	}
+
+	// Phase 2: Continue creating blocks without waiting for safe head updates
+	t.Log("📈 Phase 2: Creating more blocks to test unsafe head progression...")
+
+	baselineUnsafe := proverUnsafe1.Number
+	for i := 0; i < 4; i++ {
+		alice.Transfer(bob.Address(), eth.GWei(500))
+		time.Sleep(300 * time.Millisecond) // Shorter delay to build up unsafe backlog
+	}
+
+	// Wait a bit for unsafe block propagation (not safe head gossip)
+	time.Sleep(2 * time.Second)
+
+	// Check unsafe progression without safe head advancement
+	proverUnsafe2 := system.ProverCL.SyncStatus().UnsafeL2
+	followerUnsafe2 := system.FollowerCL.SyncStatus().UnsafeL2
+	proverSafe2 := system.ProverCL.SafeL2BlockRef()
+	followerSafe2 := system.FollowerCL.SafeL2BlockRef()
+
+	t.Logf("📊 Phase 2 Results:")
+	t.Logf("   Prover   - Unsafe: #%d, Safe: #%d", proverUnsafe2.Number, proverSafe2.Number)
+	t.Logf("   Follower - Unsafe: #%d, Safe: #%d", followerUnsafe2.Number, followerSafe2.Number)
+
+	// Validate unsafe heads progressed beyond the baseline
+	if proverUnsafe2.Number <= baselineUnsafe {
+		t.Errorf("❌ Prover unsafe head did not progress: baseline=%d, current=%d",
+			baselineUnsafe, proverUnsafe2.Number)
+	}
+
+	if followerUnsafe2.Number <= baselineUnsafe {
+		t.Errorf("❌ Follower unsafe head did not progress: baseline=%d, current=%d",
+			baselineUnsafe, followerUnsafe2.Number)
+	}
+
+	// The key test: follower unsafe should progress even when safe heads don't advance
+	unsafeGap := proverUnsafe2.Number - followerUnsafe2.Number
+	if unsafeGap > 2 {
+		t.Errorf("❌ Follower unsafe head is too far behind prover: gap=%d blocks", unsafeGap)
+	}
+
+	// Validate unsafe heads are close to each other (within 1-2 blocks is acceptable)
+	if followerUnsafe2.Number < followerSafe2.Number {
+		t.Errorf("❌ Follower unsafe head (%d) is behind safe head (%d)",
+			followerUnsafe2.Number, followerSafe2.Number)
+	}
+
+	t.Log("✅ SUCCESS: Unsafe head progression test completed!")
+	t.Logf("   ✓ Safe heads synchronized: #%d", followerSafe2.Number)
+	t.Logf("   ✓ Unsafe heads progressing: Prover #%d, Follower #%d",
+		proverUnsafe2.Number, followerUnsafe2.Number)
+}
+
+// TestExecutionEngineStateConsistency validates that execution engine state matches between prover/follower
 func TestExecutionEngineStateConsistency(t *testing.T) {
 	dp := devtest.SerialT(t)
 	system := presets.NewFollowerMode(dp)
