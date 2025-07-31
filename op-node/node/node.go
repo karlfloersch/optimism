@@ -179,14 +179,14 @@ func (n *OpNode) initEventSystem() {
 	executor := event.NewGlobalSynchronous(n.resourcesCtx).WithMetrics(n.metrics)
 	sys := event.NewSystem(n.log, executor)
 	sys.AddTracer(event.NewMetricsTracer(n.metrics))
-	
+
 	// Enable flow tracing for refactoring analysis
 	if os.Getenv("OP_NODE_FLOW_TRACING") == "true" {
 		flowTracer := flow.NewFlowTracer()
 		sys.AddTracer(flowTracer)
 		n.log.Info("Flow tracing enabled - capturing events for AST generation")
 	}
-	
+
 	sys.Register("node", event.DeriverFunc(n.onEvent))
 	n.eventSys = sys
 	n.eventDrain = executor
