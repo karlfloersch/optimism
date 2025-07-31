@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	gosync "sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	altda "github.com/ethereum-optimism/optimism/op-alt-da"
 	"github.com/ethereum-optimism/optimism/op-node/config"
+	"github.com/ethereum-optimism/optimism/op-node/flow"
 	"github.com/ethereum-optimism/optimism/op-node/metrics"
 	"github.com/ethereum-optimism/optimism/op-node/node/runcfg"
 	"github.com/ethereum-optimism/optimism/op-node/node/safedb"
@@ -177,6 +179,14 @@ func (n *OpNode) initEventSystem() {
 	executor := event.NewGlobalSynchronous(n.resourcesCtx).WithMetrics(n.metrics)
 	sys := event.NewSystem(n.log, executor)
 	sys.AddTracer(event.NewMetricsTracer(n.metrics))
+	
+	// Enable flow tracing for refactoring analysis
+	if os.Getenv("OP_NODE_FLOW_TRACING") == "true" {
+		flowTracer := flow.NewFlowTracer()
+		sys.AddTracer(flowTracer)
+		n.log.Info("Flow tracing enabled - capturing events for AST generation")
+	}
+	
 	sys.Register("node", event.DeriverFunc(n.onEvent))
 	n.eventSys = sys
 	n.eventDrain = executor
