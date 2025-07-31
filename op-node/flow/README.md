@@ -30,13 +30,14 @@ op-node/flow/
 
 ## 🎯 Current Status
 
-**Phase 1 (Complete)**: Basic event capture infrastructure
+**Phase 1 (✅ COMPLETE)**: Basic event capture infrastructure
 - ✅ Flow tracer that implements `event.Tracer` interface
 - ✅ Event capture with timing and correlation tracking
 - ✅ AST data structures for flow representation
 - ✅ Unit test framework for validation
 - ✅ **Environment variable integration**: `OP_NODE_FLOW_TRACING=true`
-- 🚧 **Next**: Run devstack tests with flow tracing enabled
+- ✅ **Devstack integration working**: Successfully captures events during real interop tests
+- 🚧 **Next**: Add file output and analysis tools (Phase 2)
 
 ## 📖 Usage
 
