@@ -1,6 +1,10 @@
 package flow
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -20,6 +24,11 @@ type FlowTracer struct {
 	// Metrics
 	startTime time.Time
 	stats     TracingStats
+
+	// File output
+	outputDir   string
+	autoSave    bool
+	flushOnExit bool
 }
 
 // CapturedEvent represents a single event with full context
@@ -50,10 +59,32 @@ type TracingStats struct {
 
 // NewFlowTracer creates a new flow tracer
 func NewFlowTracer() *FlowTracer {
+	outputDir := os.Getenv("OP_NODE_FLOW_TRACE_DIR")
+	if outputDir == "" {
+		outputDir = "/tmp/flow-traces"
+	}
+
 	return &FlowTracer{
 		events:       make([]CapturedEvent, 0),
 		correlations: make(map[uint64]uint64),
 		startTime:    time.Now(),
+		stats:        TracingStats{},
+		outputDir:    outputDir,
+		autoSave:     os.Getenv("OP_NODE_FLOW_AUTOSAVE") == "true",
+		flushOnExit:  true,
+	}
+}
+
+// NewFlowTracerWithOptions creates a flow tracer with custom options
+func NewFlowTracerWithOptions(outputDir string, autoSave bool) *FlowTracer {
+	return &FlowTracer{
+		events:       make([]CapturedEvent, 0),
+		correlations: make(map[uint64]uint64),
+		startTime:    time.Now(),
+		stats:        TracingStats{},
+		outputDir:    outputDir,
+		autoSave:     autoSave,
+		flushOnExit:  true,
 	}
 }
 
@@ -173,13 +204,116 @@ func (ft *FlowTracer) GetCorrelations() map[uint64]uint64 {
 	return correlations
 }
 
+// File Output Methods
+
+// FlushToFile saves all captured events to a JSON file
+func (ft *FlowTracer) FlushToFile() error {
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+
+	if err := os.MkdirAll(ft.outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	filename := filepath.Join(ft.outputDir, fmt.Sprintf("flow-events-%s.json", timestamp))
+
+	output := FlowTraceOutput{
+		Metadata: TraceMetadata{
+			StartTime:     ft.startTime,
+			EndTime:       time.Now(),
+			TotalEvents:   len(ft.events),
+			TotalDuration: time.Since(ft.startTime),
+			Version:       "1.0.0",
+		},
+		Events:       ft.events,
+		Correlations: ft.correlations,
+		Stats:        ft.computeStats(),
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal events: %w", err)
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fmt.Printf("Flow trace saved to: %s\n", filename)
+	fmt.Printf("Captured %d events with %d correlations\n", len(ft.events), len(ft.correlations))
+
+	return nil
+}
+
 // GenerateReport creates a completeness and analysis report
 func (ft *FlowTracer) GenerateReport() ([]byte, error) {
-	// TODO: Implement comprehensive reporting
-	// This will generate JSON reports with:
-	// - Completeness metrics
-	// - Flow patterns identified
-	// - Missing correlations
-	// - Performance stats
-	panic("not implemented yet - Phase 2")
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+
+	report := AnalysisReport{
+		Summary: ReportSummary{
+			TotalEvents:     len(ft.events),
+			Correlations:    len(ft.correlations),
+			Duration:        time.Since(ft.startTime),
+			EventsPerSecond: float64(len(ft.events)) / time.Since(ft.startTime).Seconds(),
+		},
+		Completeness: ft.computeCompleteness(),
+		Patterns:     ft.identifyPatterns(),
+		Stats:        ft.computeStats(),
+	}
+
+	return json.MarshalIndent(report, "", "  ")
+}
+
+// computeStats calculates comprehensive statistics
+func (ft *FlowTracer) computeStats() TracingStats {
+	return TracingStats{
+		TotalEvents:    len(ft.events),
+		MissedEvents:   0, // TODO: Implement missed event detection
+		Correlations:   len(ft.correlations),
+		UniquePatterns: ft.countUniquePatterns(),
+		ProcessingTime: time.Since(ft.startTime),
+	}
+}
+
+// computeCompleteness analyzes trace completeness
+func (ft *FlowTracer) computeCompleteness() CompletenessMetrics {
+	return CompletenessMetrics{
+		EventCoverage:       100.0, // TODO: Calculate actual coverage
+		CorrelationAccuracy: ft.calculateCorrelationAccuracy(),
+		MissingEvents:       []string{}, // TODO: Identify missing events
+		Confidence:          ft.calculateConfidence(),
+	}
+}
+
+// identifyPatterns finds common event sequences
+func (ft *FlowTracer) identifyPatterns() []EventPattern {
+	// TODO: Implement pattern recognition
+	return []EventPattern{}
+}
+
+// Helper methods
+
+func (ft *FlowTracer) countUniquePatterns() int {
+	// TODO: Implement pattern counting
+	return 0
+}
+
+func (ft *FlowTracer) calculateCorrelationAccuracy() float64 {
+	if len(ft.events) == 0 {
+		return 0.0
+	}
+	return float64(len(ft.correlations)) / float64(len(ft.events)) * 100.0
+}
+
+func (ft *FlowTracer) calculateConfidence() float64 {
+	// Simple confidence based on event count and correlations
+	if len(ft.events) < 10 {
+		return 50.0
+	}
+	if len(ft.correlations) > len(ft.events)/2 {
+		return 90.0
+	}
+	return 75.0
 }

@@ -185,6 +185,9 @@ func (n *OpNode) initEventSystem() {
 		flowTracer := flow.NewFlowTracer()
 		sys.AddTracer(flowTracer)
 		n.log.Info("Flow tracing enabled - capturing events for AST generation")
+
+		// Set up automatic file flushing on shutdown
+		n.resourcesCtx = context.WithValue(n.resourcesCtx, "flowTracer", flowTracer)
 	}
 
 	sys.Register("node", event.DeriverFunc(n.onEvent))
@@ -729,6 +732,14 @@ func (n *OpNode) Stop(ctx context.Context) error {
 	}
 
 	if n.eventSys != nil {
+		// Flush flow tracer data before stopping event system
+		if flowTracer := n.resourcesCtx.Value("flowTracer"); flowTracer != nil {
+			if ft, ok := flowTracer.(*flow.FlowTracer); ok {
+				if err := ft.FlushToFile(); err != nil {
+					n.log.Error("Failed to flush flow tracer data", "err", err)
+				}
+			}
+		}
 		n.eventSys.Stop()
 	}
 
