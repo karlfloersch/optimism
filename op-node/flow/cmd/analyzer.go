@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-node/flow"
@@ -70,6 +71,7 @@ func analyzeTrace(filename string) error {
 	printCorrelationAnalysis(trace.Correlations, trace.Events)
 	printPerformanceAnalysis(trace.Events, trace.Metadata)
 	printPatternAnalysis(trace.Events)
+	printASTAnalysis(trace.Events, trace.Correlations) // 🚀 NEW: AST Generation
 	printCompletenessAnalysis(trace)
 
 	return nil
@@ -345,4 +347,83 @@ func findSlowestEvents(events []flow.CapturedEvent, limit int) []flow.CapturedEv
 		return eventsCopy[:limit]
 	}
 	return eventsCopy
+}
+
+// 🚀 NEW: AST Analysis function
+func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint64) {
+	fmt.Println("🏗️ AST GENERATION & FLOW ANALYSIS")
+	
+	if len(events) == 0 {
+		fmt.Println("   No events available for AST generation")
+		return
+	}
+	
+	// Build AST from captured events
+	builder := flow.NewFlowBuilder(events, correlations)
+	flowGraph, err := builder.BuildAST()
+	if err != nil {
+		fmt.Printf("   ❌ Error building AST: %v\n", err)
+		return
+	}
+	
+	fmt.Println("   ✅ AST Generation Successful!")
+	fmt.Printf("   Flow Graph ID: %s\n", flowGraph.ID)
+	fmt.Printf("   Flow Name: %s\n", flowGraph.Name)
+	fmt.Printf("   Total Nodes: %d\n", len(flowGraph.Nodes))
+	fmt.Printf("   Total Edges: %d\n", len(flowGraph.Edges))
+	fmt.Printf("   Entry Points: %v\n", flowGraph.EntryPoints)
+	fmt.Println()
+	
+	// Analysis of generated flow graph
+	fmt.Println("   📊 Flow Graph Statistics:")
+	fmt.Printf("      Observed Execution Paths: %d\n", len(flowGraph.ObservedPaths))
+	
+	if flowGraph.Metrics != nil {
+		fmt.Printf("      Execution Count: %d\n", flowGraph.Metrics.ExecutionCount)
+		fmt.Printf("      Success Rate: %.1f%%\n", flowGraph.Metrics.SuccessRate*100)
+		fmt.Printf("      Average Duration: %v\n", flowGraph.Metrics.AverageDuration)
+		if len(flowGraph.Metrics.BottleneckNodes) > 0 {
+			fmt.Printf("      Bottleneck Nodes: %v\n", flowGraph.Metrics.BottleneckNodes)
+		}
+	}
+	
+	// Node type analysis
+	nodeTypes := make(map[string]int)
+	for _, node := range flowGraph.Nodes {
+		nodeTypes[node.Type().String()]++
+	}
+	
+	fmt.Println("   🎯 Node Type Distribution:")
+	for nodeType, count := range nodeTypes {
+		fmt.Printf("      %s: %d nodes\n", nodeType, count)
+	}
+	
+	// Edge analysis
+	if len(flowGraph.Edges) > 0 {
+		totalWeight := 0.0
+		for _, edge := range flowGraph.Edges {
+			totalWeight += edge.Weight
+		}
+		avgWeight := totalWeight / float64(len(flowGraph.Edges))
+		
+		fmt.Println("   🔗 Edge Statistics:")
+		fmt.Printf("      Average Transition Weight: %.2f\n", avgWeight)
+		fmt.Printf("      Most Common Transitions:\n")
+		
+		// Sort edges by weight to show most common transitions
+		sortedEdges := make([]flow.FlowEdge, len(flowGraph.Edges))
+		copy(sortedEdges, flowGraph.Edges)
+		sort.Slice(sortedEdges, func(i, j int) bool {
+			return sortedEdges[i].Weight > sortedEdges[j].Weight
+		})
+		
+		for i, edge := range sortedEdges {
+			if i >= 5 { // Top 5
+				break
+			}
+			fmt.Printf("         %s → %s (weight: %.0f)\n", edge.From, edge.To, edge.Weight)
+		}
+	}
+	
+	fmt.Println()
 }
