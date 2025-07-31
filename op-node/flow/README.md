@@ -30,16 +30,29 @@ op-node/flow/
 
 ## 🎯 Current Status
 
-**Phase 1 (In Progress)**: Basic event capture infrastructure
+**Phase 1 (Complete)**: Basic event capture infrastructure
 - ✅ Flow tracer that implements `event.Tracer` interface
 - ✅ Event capture with timing and correlation tracking
 - ✅ AST data structures for flow representation
-- ✅ Test framework for validation
-- 🚧 **Next**: Integrate with devstack tests
+- ✅ Unit test framework for validation
+- ✅ **Environment variable integration**: `OP_NODE_FLOW_TRACING=true`
+- 🚧 **Next**: Run devstack tests with flow tracing enabled
 
 ## 📖 Usage
 
-### Basic Flow Tracing
+### Environment Variable Integration (Recommended)
+
+```bash
+# Enable flow tracing on any devstack test
+OP_NODE_FLOW_TRACING=true go test ./example -run TestExample1 -v
+
+# The op-node will automatically:
+# 1. Create and add flow tracer to event system
+# 2. Log when flow tracing is enabled
+# 3. Capture all events during test execution
+```
+
+### Direct API Usage
 
 ```go
 // Create and add tracer to event system
