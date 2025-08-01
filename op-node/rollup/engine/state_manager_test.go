@@ -629,6 +629,42 @@ func TestEngineStateManager_PromoteCrossUnsafe_Success(t *testing.T) {
 	require.Equal(t, crossUnsafeRef, mockController.setCrossUnsafeHeadArg, "SetCrossUnsafeHead should have been called with correct argument")
 }
 
+func TestEngineStateManager_RequestPendingSafeUpdate_Success(t *testing.T) {
+	// Create mock controller
+	mockController := &MockEngineController{
+		pendingSafeL2Head: eth.L2BlockRef{Hash: common.HexToHash("0x1234"), Number: 100},
+		unsafeL2Head:      eth.L2BlockRef{Hash: common.HexToHash("0x5678"), Number: 102},
+		config:            &rollup.Config{L2ChainID: big.NewInt(1)},
+	}
+
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+
+	// Create mock emitter to capture events
+	var emittedEvents []event.Event
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+
+	// Execute RequestPendingSafeUpdate
+	ctx := context.Background()
+	err := stateManager.RequestPendingSafeUpdate(ctx, mockEmitter)
+
+	// Validate results
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 1, "Should emit exactly one PendingSafeUpdateEvent")
+
+	// Validate the emitted event is PendingSafeUpdateEvent with correct data
+	if pendingSafeEvent, ok := emittedEvents[0].(PendingSafeUpdateEvent); ok {
+		require.Equal(t, mockController.pendingSafeL2Head, pendingSafeEvent.PendingSafe)
+		require.Equal(t, mockController.unsafeL2Head, pendingSafeEvent.Unsafe)
+	} else {
+		t.Fatalf("Expected PendingSafeUpdateEvent, got %T", emittedEvents[0])
+	}
+}
+
 // MockEmitter for testing event emissions
 type MockEmitter struct {
 	EmitFunc func(ctx context.Context, ev event.Event)
