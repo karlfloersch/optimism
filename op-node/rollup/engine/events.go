@@ -305,7 +305,7 @@ type EngDeriver struct {
 	ec      *EngineController
 	ctx     context.Context
 	emitter event.Emitter
-	
+
 	// 🎯 PHASE 2A: EngineStateManager for internal-only events (zero blast radius)
 	engineStateManager *EngineStateManager
 }
@@ -319,9 +319,9 @@ func NewEngDeriver(log log.Logger, ctx context.Context, cfg *rollup.Config,
 	// This replaces the massive switch statement with clean, focused methods
 	controllerAdapter := NewEngineControllerAdapter(ec, cfg)
 	engineStateManager := NewEngineStateManager(controllerAdapter, log)
-	
+
 	log.Info("EngDeriver initialized with EngineStateManager", "strict_mode", true, "target_events", "TryUpdateEngine,ProcessUnsafePayload")
-	
+
 	return &EngDeriver{
 		log:                log,
 		cfg:                cfg,

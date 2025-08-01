@@ -1,4 +1,4 @@
-package engine
+package controllers
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
@@ -100,7 +101,7 @@ func (e *EngineStateManager) TryUpdateEngine(ctx context.Context) error {
 	// Call the actual engine controller method
 	if err := e.controller.TryUpdateEngine(ctx); err != nil {
 		// Handle the same error types as the original event handler
-		if errors.Is(err, ErrNoFCUNeeded) {
+		if errors.Is(err, engine.ErrNoFCUNeeded) {
 			// This is expected, not an error
 			return nil
 		}

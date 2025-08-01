@@ -20,11 +20,11 @@ type MockEngineController struct {
 	insertPayloadErr   error
 	unsafeL2Head       eth.L2BlockRef
 	config             *rollup.Config
-	
+
 	// Call tracking
 	tryUpdateEngineCalls int
 	insertPayloadCalls   int
-	
+
 	// State heads for testing
 	pendingSafeL2Head eth.L2BlockRef
 	localSafeL2Head   eth.L2BlockRef
@@ -153,10 +153,10 @@ func TestEngineStateManager_TryUpdateEngine_NoFCUNeeded(t *testing.T) {
 		tryUpdateEngineErr: ErrNoFCUNeeded,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	ctx := context.Background()
 	err := esm.TryUpdateEngine(ctx)
-	
+
 	// ErrNoFCUNeeded should be treated as success
 	require.NoError(t, err)
 	require.Equal(t, 1, mockController.tryUpdateEngineCalls)
@@ -236,58 +236,58 @@ func TestEngineStateManager_TryUpdateEngine_CriticalError(t *testing.T) {
 
 func TestEngineStateManager_ProcessUnsafePayload_Success(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
-	
+
 	// Create a basic mock config to avoid nil pointer panic
 	mockConfig := &rollup.Config{
 		L2ChainID: 1,
 	}
-	
+
 	mockController := &MockEngineController{
 		unsafeL2Head: eth.L2BlockRef{Hash: [32]byte{1}, Number: 100},
 		config:       mockConfig,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	envelope := &eth.ExecutionPayloadEnvelope{
 		ExecutionPayload: &eth.ExecutionPayload{
 			BlockHash: [32]byte{2}, // Different from current unsafe head
 		},
 	}
-	
+
 	ctx := context.Background()
 	err := esm.ProcessUnsafePayload(ctx, envelope)
-	
+
 	// This will likely still fail due to incomplete mock payload, but shouldn't panic
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to decode block ref")
-	
+
 	// The important thing is that we didn't panic and handled the error gracefully
 }
 
 func TestEngineStateManager_ProcessUnsafePayload_SkipDuplicate(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	sameHash := [32]byte{1}
-	
+
 	// Create a basic mock config
 	mockConfig := &rollup.Config{
 		L2ChainID: 1,
 	}
-	
+
 	mockController := &MockEngineController{
 		unsafeL2Head: eth.L2BlockRef{Hash: sameHash, Number: 100},
 		config:       mockConfig,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	envelope := &eth.ExecutionPayloadEnvelope{
 		ExecutionPayload: &eth.ExecutionPayload{
 			BlockHash: sameHash, // Same as current unsafe head
 		},
 	}
-	
+
 	ctx := context.Background()
 	err := esm.ProcessUnsafePayload(ctx, envelope)
-	
+
 	// This will still fail due to incomplete mock payload, but shouldn't crash
 	require.Error(t, err) // Expected due to payload decoding issues
 	require.Equal(t, 0, mockController.insertPayloadCalls, "Should not call InsertUnsafePayload for duplicate")
