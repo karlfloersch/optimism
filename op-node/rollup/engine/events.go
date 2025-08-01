@@ -488,9 +488,8 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 		}
 	case CrossUpdateRequestEvent:
 		// 🎯 PHASE: Replace with EngineStateManager imperative call
-		// This fixes the broken CrossUpdateRequestEvent (empty struct did nothing)
-		// and properly emits both CrossUnsafe and CrossSafe update events
-		if err := d.engineStateManager.RequestCrossUpdate(ctx, d.emitter); err != nil {
+		// Preserving original conditional logic: only emit events if flags are true
+		if err := d.engineStateManager.RequestCrossUpdate(ctx, x.CrossUnsafe, x.CrossSafe, d.emitter); err != nil {
 			d.log.Debug("RequestCrossUpdate completed with error", "error", err)
 		}
 	case InteropInvalidateBlockEvent:

@@ -188,10 +188,10 @@ func (e *EngineController) RequestForkchoiceUpdateImperative(ctx context.Context
 }
 
 // RequestCrossUpdateImperative requests cross-chain state updates imperatively
-// This replaces CrossUpdateRequestEvent emission and fixes the broken event behavior
-func (e *EngineController) RequestCrossUpdateImperative(ctx context.Context, emitter event.Emitter) error {
+// This replaces CrossUpdateRequestEvent emission with original conditional logic preserved
+func (e *EngineController) RequestCrossUpdateImperative(ctx context.Context, crossUnsafe, crossSafe bool, emitter event.Emitter) error {
 	if e.engineStateManager != nil {
-		return e.engineStateManager.RequestCrossUpdate(ctx, emitter)
+		return e.engineStateManager.RequestCrossUpdate(ctx, crossUnsafe, crossSafe, emitter)
 	}
 	// Fallback should not happen in normal operation since EngineStateManager is always set
 	e.log.Warn("RequestCrossUpdateImperative called without EngineStateManager - this should not happen")

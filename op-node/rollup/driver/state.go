@@ -425,8 +425,9 @@ func (s *SyncDeriver) SyncStep() {
 	// to ensure cross-L2 safety is continuously verified against the interop-backend.
 	if s.Config.InteropTime != nil && !s.ManagedBySupervisor {
 		// 🎯 PHASE: Replace CrossUpdateRequestEvent emission with direct imperative call
-		// This fixes the broken event (empty struct did nothing) and properly triggers cross-chain updates
-		if err := s.Engine.RequestCrossUpdateImperative(s.Ctx, s.Emitter); err != nil {
+		// Preserving original behavior: empty struct CrossUpdateRequestEvent{} had both flags false
+		// This means crossUnsafe=false, crossSafe=false -> no events emitted (may be intentional)
+		if err := s.Engine.RequestCrossUpdateImperative(s.Ctx, false, false, s.Emitter); err != nil {
 			s.Log.Debug("RequestCrossUpdate completed with error during SyncStep", "error", err)
 		}
 	}

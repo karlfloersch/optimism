@@ -346,29 +346,34 @@ func (e *EngineStateManager) RequestForkchoiceUpdate(ctx context.Context, emitte
 	return nil
 }
 
-// RequestCrossUpdate emits cross-chain state update events to repeat the current state
-// This replaces CrossUpdateRequestEvent which was broken (empty struct did nothing)
-// Based on the comment "triggers update events to be emitted, repeating the current state"
-func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, emitter event.Emitter) error {
-	e.log.Debug("Requesting cross-chain state update imperatively (repeating current state)")
+// RequestCrossUpdate handles CrossUpdateRequestEvent imperatively with original conditional logic
+// NOTE: Original event was emitted as empty struct CrossUpdateRequestEvent{} from driver/state.go
+// This meant both CrossUnsafe=false and CrossSafe=false, so original handler emitted nothing.
+// Preserving this behavior - may be intentional timing/triggering logic.
+func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, crossUnsafe, crossSafe bool, emitter event.Emitter) error {
+	e.log.Debug("Requesting cross-chain state update imperatively", "cross_unsafe", crossUnsafe, "cross_safe", crossSafe)
 	
-	// Emit CrossUnsafe state update
-	emitter.Emit(ctx, CrossUnsafeUpdateEvent{
-		CrossUnsafe: e.controller.CrossUnsafeL2Head(),
-		LocalUnsafe: e.controller.UnsafeL2Head(),
-	})
+	// Preserve original conditional logic from EngDeriver.OnEvent()
+	if crossUnsafe {
+		emitter.Emit(ctx, CrossUnsafeUpdateEvent{
+			CrossUnsafe: e.controller.CrossUnsafeL2Head(),
+			LocalUnsafe: e.controller.UnsafeL2Head(),
+		})
+		e.log.Debug("Emitted CrossUnsafeUpdateEvent", "cross_unsafe", e.controller.CrossUnsafeL2Head(), "local_unsafe", e.controller.UnsafeL2Head())
+	}
 	
-	// Emit CrossSafe state update  
-	emitter.Emit(ctx, CrossSafeUpdateEvent{
-		CrossSafe: e.controller.SafeL2Head(),
-		LocalSafe: e.controller.LocalSafeL2Head(),
-	})
+	if crossSafe {
+		emitter.Emit(ctx, CrossSafeUpdateEvent{
+			CrossSafe: e.controller.SafeL2Head(),
+			LocalSafe: e.controller.LocalSafeL2Head(),
+		})
+		e.log.Debug("Emitted CrossSafeUpdateEvent", "cross_safe", e.controller.SafeL2Head(), "local_safe", e.controller.LocalSafeL2Head())
+	}
 	
-	e.log.Debug("Cross-chain state updates emitted",
-		"cross_unsafe", e.controller.CrossUnsafeL2Head(),
-		"local_unsafe", e.controller.UnsafeL2Head(),
-		"cross_safe", e.controller.SafeL2Head(),
-		"local_safe", e.controller.LocalSafeL2Head())
+	// With original empty struct emission (both false), nothing gets emitted - preserving this behavior
+	if !crossUnsafe && !crossSafe {
+		e.log.Debug("CrossUpdateRequest with both flags false - no events emitted (preserving original behavior)")
+	}
 	
 	return nil
 }

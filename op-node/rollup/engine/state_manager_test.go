@@ -468,7 +468,7 @@ func TestEngineStateManager_RequestForkchoiceUpdate_Success(t *testing.T) {
 	}
 }
 
-func TestEngineStateManager_RequestCrossUpdate_Success(t *testing.T) {
+func TestEngineStateManager_RequestCrossUpdate_BothFlags(t *testing.T) {
 	// Create mock controller with test data
 	mockController := &MockEngineController{
 		crossUnsafeL2Head: eth.L2BlockRef{Hash: common.HexToHash("0x1234"), Number: 100},
@@ -490,13 +490,12 @@ func TestEngineStateManager_RequestCrossUpdate_Success(t *testing.T) {
 		},
 	}
 
-	// Call RequestCrossUpdate
+	// Test with both flags true - should emit both events
 	ctx := context.Background()
-	err := stateManager.RequestCrossUpdate(ctx, mockEmitter)
+	err := stateManager.RequestCrossUpdate(ctx, true, true, mockEmitter)
 
-	// Validate result - should emit both CrossUnsafe and CrossSafe events (fixes broken CrossUpdateRequestEvent)
 	require.NoError(t, err)
-	require.Len(t, emittedEvents, 2, "Should emit exactly two events: CrossUnsafeUpdateEvent and CrossSafeUpdateEvent")
+	require.Len(t, emittedEvents, 2, "Should emit exactly two events when both flags are true")
 
 	// Validate the first event is CrossUnsafeUpdateEvent
 	if crossUnsafeEvent, ok := emittedEvents[0].(CrossUnsafeUpdateEvent); ok {
@@ -513,6 +512,31 @@ func TestEngineStateManager_RequestCrossUpdate_Success(t *testing.T) {
 	} else {
 		t.Fatalf("Expected CrossSafeUpdateEvent as second event, got %T", emittedEvents[1])
 	}
+}
+
+func TestEngineStateManager_RequestCrossUpdate_NoFlags(t *testing.T) {
+	// Test the original driver/state.go behavior: CrossUpdateRequestEvent{} (both flags false)
+	mockController := &MockEngineController{
+		config: &rollup.Config{L2ChainID: big.NewInt(1)},
+	}
+
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+
+	// Create a mock emitter to capture emitted events
+	emittedEvents := []event.Event{}
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+
+	// Test with both flags false (original behavior) - should emit nothing
+	ctx := context.Background()
+	err := stateManager.RequestCrossUpdate(ctx, false, false, mockEmitter)
+
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 0, "Should emit no events when both flags are false (original behavior)")
 }
 
 // MockEmitter for testing event emissions
