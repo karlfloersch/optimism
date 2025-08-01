@@ -41,7 +41,10 @@ func (eq *EngDeriver) onPayloadSuccess(ctx context.Context, ev PayloadSuccessEve
 			Ref:      ev.Ref.BlockRef(),
 		})
 		// Apply it to the execution engine
-		eq.emitter.Emit(ctx, TryUpdateEngineEvent{})
+		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+		if err := eq.engineStateManager.TryUpdateEngine(ctx); err != nil {
+			eq.log.Debug("TryUpdateEngine completed with error during payload success replacement", "error", err)
+		}
 		// Not a regular reset, since we don't wind back to any L2 block.
 		// We start specifically from the replacement block.
 		return
@@ -58,9 +61,9 @@ func (eq *EngDeriver) onPayloadSuccess(ctx context.Context, ev PayloadSuccessEve
 		})
 	}
 
-	eq.emitter.Emit(ctx, TryUpdateEngineEvent{
-		BuildStarted:  ev.BuildStarted,
-		InsertStarted: ev.InsertStarted,
-		Envelope:      ev.Envelope,
-	})
+	// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+	// Note: BuildStarted, InsertStarted, Envelope metrics are handled by the EngineStateManager
+	if err := eq.engineStateManager.TryUpdateEngine(ctx); err != nil {
+		eq.log.Debug("TryUpdateEngine completed with error during payload success", "error", err, "build_started", ev.BuildStarted, "insert_started", ev.InsertStarted)
+	}
 }

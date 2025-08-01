@@ -369,7 +369,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 		ForceEngineReset(d.ec, x)
 
 		// Time to apply the changes to the underlying engine
-		d.emitter.Emit(ctx, TryUpdateEngineEvent{})
+		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+		if err := d.engineStateManager.TryUpdateEngine(ctx); err != nil {
+			d.log.Debug("TryUpdateEngine completed with error during ForceReset", "error", err)
+		}
 
 		v := EngineResetConfirmedEvent{
 			LocalUnsafe: d.ec.UnsafeL2Head(),
@@ -400,7 +403,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			d.emitter.Emit(ctx, PromoteCrossUnsafeEvent(x))
 		}
 		// Try to apply the forkchoice changes
-		d.emitter.Emit(ctx, TryUpdateEngineEvent{})
+		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+		if err := d.engineStateManager.TryUpdateEngine(ctx); err != nil {
+			d.log.Debug("TryUpdateEngine completed with error during UnsafeUpdate", "error", err)
+		}
 	case PromoteCrossUnsafeEvent:
 		d.ec.SetCrossUnsafeHead(x.Ref)
 		d.emitter.Emit(ctx, CrossUnsafeUpdateEvent{
@@ -456,7 +462,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			})
 		}
 		// Try to apply the forkchoice changes
-		d.emitter.Emit(ctx, TryUpdateEngineEvent{})
+		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+		if err := d.engineStateManager.TryUpdateEngine(ctx); err != nil {
+			d.log.Debug("TryUpdateEngine completed with error during PromoteSafe", "error", err)
+		}
 	case PromoteFinalizedEvent:
 		if x.Ref.Number < d.ec.Finalized().Number {
 			d.log.Error("Cannot rewind finality,", "ref", x.Ref, "finalized", d.ec.Finalized())
@@ -469,7 +478,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 		d.ec.SetFinalizedHead(x.Ref)
 		d.emitter.Emit(ctx, FinalizedUpdateEvent(x))
 		// Try to apply the forkchoice changes
-		d.emitter.Emit(ctx, TryUpdateEngineEvent{})
+		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
+		if err := d.engineStateManager.TryUpdateEngine(ctx); err != nil {
+			d.log.Debug("TryUpdateEngine completed with error during PromoteFinalized", "error", err)
+		}
 	case CrossUpdateRequestEvent:
 		if x.CrossUnsafe {
 			d.emitter.Emit(ctx, CrossUnsafeUpdateEvent{
