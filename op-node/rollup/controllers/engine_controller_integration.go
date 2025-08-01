@@ -2,9 +2,9 @@ package controllers
 
 import (
 	"context"
-	
+
 	"github.com/ethereum/go-ethereum/log"
-	
+
 	"github.com/ethereum-optimism/optimism/op-node/rollup/clsync"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/finality"
@@ -19,13 +19,13 @@ import (
 // EngineControllerWithForkchoiceController demonstrates the modified engine controller
 type EngineControllerWithForkchoiceController struct {
 	*engine.EngineController // Embed original controller
-	
+
 	// Replace event emission with direct controller calls
 	forkchoiceController *ForkchoiceController
 	log                  log.Logger
 }
 
-// NewEngineControllerWithForkchoiceController creates an engine controller that uses 
+// NewEngineControllerWithForkchoiceController creates an engine controller that uses
 // imperative forkchoice handling instead of events
 func NewEngineControllerWithForkchoiceController(
 	original *engine.EngineController,

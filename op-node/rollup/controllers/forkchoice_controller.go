@@ -24,7 +24,7 @@ type ForkchoiceUpdate struct {
 // ForkchoiceController manages forkchoice updates imperatively instead of through events
 type ForkchoiceController struct {
 	log log.Logger
-	
+
 	// All components that need to handle forkchoice updates
 	handlers []ForkchoiceHandler
 }
@@ -47,7 +47,7 @@ func (fc *ForkchoiceController) RegisterHandler(handler ForkchoiceHandler) {
 func (fc *ForkchoiceController) ProcessForkchoiceUpdate(ctx context.Context, update ForkchoiceUpdate) error {
 	fc.log.Debug("Processing forkchoice update imperatively",
 		"unsafe", update.UnsafeL2Head,
-		"safe", update.SafeL2Head, 
+		"safe", update.SafeL2Head,
 		"finalized", update.FinalizedL2Head,
 		"handlers", len(fc.handlers),
 	)
@@ -55,7 +55,7 @@ func (fc *ForkchoiceController) ProcessForkchoiceUpdate(ctx context.Context, upd
 	// Call each handler directly instead of emitting events
 	for i, handler := range fc.handlers {
 		if err := handler.HandleForkchoiceUpdate(ctx, update); err != nil {
-			fc.log.Error("Forkchoice handler failed", 
+			fc.log.Error("Forkchoice handler failed",
 				"handler_index", i,
 				"error", err,
 				"unsafe", update.UnsafeL2Head,
@@ -65,7 +65,7 @@ func (fc *ForkchoiceController) ProcessForkchoiceUpdate(ctx context.Context, upd
 		}
 	}
 
-	fc.log.Debug("Completed forkchoice update processing", 
+	fc.log.Debug("Completed forkchoice update processing",
 		"handlers_called", len(fc.handlers),
 		"unsafe", update.UnsafeL2Head,
 	)

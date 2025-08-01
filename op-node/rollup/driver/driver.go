@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/clsync"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/conductor"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/confdepth"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/controllers"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/finality"
@@ -29,6 +30,22 @@ var (
 	ErrSequencerAlreadyStarted = sequencing.ErrSequencerAlreadyStarted
 	ErrSequencerAlreadyStopped = sequencing.ErrSequencerAlreadyStopped
 )
+
+// forkchoiceControllerAdapter adapts controllers.ForkchoiceController to engine.ForkchoiceController
+type forkchoiceControllerAdapter struct {
+	controller *controllers.ForkchoiceController
+}
+
+// ProcessForkchoiceUpdate implements engine.ForkchoiceController
+func (f *forkchoiceControllerAdapter) ProcessForkchoiceUpdate(ctx context.Context, update engine.ForkchoiceUpdate) error {
+	// Convert engine.ForkchoiceUpdate to controllers.ForkchoiceUpdate
+	controllersUpdate := controllers.ForkchoiceUpdate{
+		UnsafeL2Head:    update.UnsafeL2Head,
+		SafeL2Head:      update.SafeL2Head,
+		FinalizedL2Head: update.FinalizedL2Head,
+	}
+	return f.controller.ProcessForkchoiceUpdate(ctx, controllersUpdate)
+}
 
 type Metrics interface {
 	RecordPipelineReset()
@@ -236,11 +253,12 @@ func NewDriver(
 	sys.Register("step-scheduler", schedDeriv)
 
 	var sequencer sequencing.SequencerIface
+	var findL1Origin *sequencing.L1OriginSelector
 	if driverCfg.SequencerEnabled {
 		asyncGossiper := async.NewAsyncGossiper(driverCtx, network, log, metrics)
 		attrBuilder := derive.NewFetchingAttributesBuilder(cfg, depSet, l1, l2)
 		sequencerConfDepth := confdepth.NewConfDepth(driverCfg.SequencerConfDepth, statusTracker.L1Head, l1)
-		findL1Origin := sequencing.NewL1OriginSelector(driverCtx, log, cfg, sequencerConfDepth)
+		findL1Origin = sequencing.NewL1OriginSelector(driverCtx, log, cfg, sequencerConfDepth)
 		sys.Register("origin-selector", findL1Origin)
 		sequencer = sequencing.NewSequencer(driverCtx, log, cfg, attrBuilder, findL1Origin,
 			sequencerStateListener, sequencerConductor, asyncGossiper, metrics)
@@ -248,6 +266,45 @@ func NewDriver(
 	} else {
 		sequencer = sequencing.DisabledSequencer{}
 	}
+
+	// 🎯 FORKCHOICE CONTROLLER INTEGRATION: Replace event-driven forkchoice with imperative calls
+	// This eliminates 375x ForkchoiceUpdateEvent emissions and replaces them with direct synchronous calls
+	var forkchoiceHandlers []controllers.ForkchoiceHandler
+	
+	// Add adapters for all forkchoice consumers
+	forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewStatusTrackerForkchoiceAdapter(statusTracker))
+	forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewCLSyncForkchoiceAdapter(clSync))
+	
+	// Type-assert finalizer to concrete type for adapter
+	if concreteFinalizer, ok := finalizer.(*finality.Finalizer); ok {
+		forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewFinalizerForkchoiceAdapter(concreteFinalizer))
+	} else if altDAFinalizer, ok := finalizer.(*finality.AltDAFinalizer); ok {
+		// For now, we'll skip AltDAFinalizer since we don't have an adapter for it yet
+		// This is safe because AltDAFinalizer may not need forkchoice updates
+		log.Debug("AltDAFinalizer detected, skipping forkchoice adapter (not implemented yet)", "type", "AltDAFinalizer")
+		_ = altDAFinalizer // Avoid unused variable warning
+	}
+	
+	// Add sequencer adapter only if sequencer is enabled and not disabled
+	if driverCfg.SequencerEnabled {
+		if concreteSequencer, ok := sequencer.(*sequencing.Sequencer); ok {
+			forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewSequencerForkchoiceAdapter(concreteSequencer))
+		}
+		if findL1Origin != nil {
+			forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewL1OriginSelectorForkchoiceAdapter(findL1Origin))
+		}
+	}
+	
+	// Create the ForkchoiceController with all handlers
+	forkchoiceController := controllers.NewForkchoiceController(log, forkchoiceHandlers...)
+	log.Info("ForkchoiceController initialized", "handlers", len(forkchoiceHandlers), "replacing_events", "ForkchoiceUpdateEvent")
+	
+	// Create adapter to bridge between controllers.ForkchoiceController and engine.ForkchoiceController
+	forkchoiceAdapter := &forkchoiceControllerAdapter{controller: forkchoiceController}
+	
+	// Wire the ForkchoiceController into the EngineController
+	// This replaces event emissions with direct imperative calls
+	ec.SetForkchoiceController(forkchoiceAdapter)
 
 	driverEmitter := sys.Register("driver", nil)
 	driver := &Driver{

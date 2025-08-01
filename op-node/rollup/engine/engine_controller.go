@@ -37,6 +37,19 @@ const (
 
 var ErrNoFCUNeeded = errors.New("no FCU call was needed")
 
+// ForkchoiceController interface for imperative forkchoice handling
+// This replaces event emissions with direct method calls
+type ForkchoiceController interface {
+	ProcessForkchoiceUpdate(ctx context.Context, update ForkchoiceUpdate) error
+}
+
+// ForkchoiceUpdate represents the data from a successful forkchoice update
+type ForkchoiceUpdate struct {
+	UnsafeL2Head    eth.L2BlockRef
+	SafeL2Head      eth.L2BlockRef
+	FinalizedL2Head eth.L2BlockRef
+}
+
 type ExecEngine interface {
 	GetPayload(ctx context.Context, payloadInfo eth.PayloadInfo) (*eth.ExecutionPayloadEnvelope, error)
 	ForkchoiceUpdate(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error)
@@ -66,6 +79,9 @@ type EngineController struct {
 	clock      clock.Clock
 
 	emitter event.Emitter
+
+	// 🎯 ForkchoiceController for imperative forkchoice handling instead of events
+	forkchoiceController ForkchoiceController
 
 	// To lock the engine RPC usage, such that components like the API, which need direct access, can protect their access.
 	mu gosync.RWMutex
@@ -123,7 +139,15 @@ func NewEngineController(engine ExecEngine, log log.Logger, metrics ECMetrics,
 		syncStatus: syncStatus,
 		clock:      clock.SystemClock,
 		emitter:    emitter,
+		// forkchoiceController is set later via SetForkchoiceController
 	}
+}
+
+// SetForkchoiceController sets the ForkchoiceController for imperative forkchoice handling
+// This replaces event emissions with direct method calls
+func (e *EngineController) SetForkchoiceController(controller ForkchoiceController) {
+	e.forkchoiceController = controller
+	e.log.Info("ForkchoiceController integrated into EngineController", "replacing_events", "ForkchoiceUpdateEvent")
 }
 
 // State Getters
@@ -370,11 +394,25 @@ func (e *EngineController) TryUpdateEngine(ctx context.Context) error {
 		}
 	}
 	if fcRes.PayloadStatus.Status == eth.ExecutionValid {
-		e.emitter.Emit(ctx, ForkchoiceUpdateEvent{
-			UnsafeL2Head:    e.unsafeHead,
-			SafeL2Head:      e.safeHead,
-			FinalizedL2Head: e.finalizedHead,
-		})
+		// 🎯 IMPERATIVE FORKCHOICE: Replace event emission with direct controller call
+		if e.forkchoiceController != nil {
+			update := ForkchoiceUpdate{
+				UnsafeL2Head:    e.unsafeHead,
+				SafeL2Head:      e.safeHead,
+				FinalizedL2Head: e.finalizedHead,
+			}
+			if err := e.forkchoiceController.ProcessForkchoiceUpdate(ctx, update); err != nil {
+				e.log.Error("ForkchoiceController failed to process update", "error", err, "unsafe", e.unsafeHead)
+				// Continue execution - this maintains the same error handling as events
+			}
+		} else {
+			// Fallback to event emission if controller not set (backward compatibility)
+			e.emitter.Emit(ctx, ForkchoiceUpdateEvent{
+				UnsafeL2Head:    e.unsafeHead,
+				SafeL2Head:      e.safeHead,
+				FinalizedL2Head: e.finalizedHead,
+			})
+		}
 	}
 	if e.unsafeHead == e.safeHead && e.safeHead == e.pendingSafeHead {
 		// Remove backupUnsafeHead because this backup will be never used after consolidation.
