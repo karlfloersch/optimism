@@ -20,6 +20,12 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/event"
 )
 
+// EngineForkchoiceRequester defines the interface the sequencer needs for imperative forkchoice requests
+// This replaces ForkchoiceRequestEvent emissions with direct method calls
+type EngineForkchoiceRequester interface {
+	RequestForkchoiceUpdateImperative(ctx context.Context, emitter event.Emitter) error
+}
+
 // sealingDuration defines the expected time it takes to seal the block
 const sealingDuration = time.Millisecond * 50
 
@@ -103,6 +109,9 @@ type Sequencer struct {
 
 	emitter event.Emitter
 
+	// Optional engine controller for imperative forkchoice requests (replaces events)
+	engineRequester EngineForkchoiceRequester
+
 	attrBuilder      derive.AttributesBuilder
 	l1OriginSelector L1OriginSelectorIface
 
@@ -134,6 +143,7 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 	conductor conductor.SequencerConductor,
 	asyncGossip AsyncGossiper,
 	metrics Metrics,
+	engineRequester EngineForkchoiceRequester, // Optional, can be nil
 ) *Sequencer {
 	return &Sequencer{
 		ctx:              driverCtx,
@@ -148,11 +158,26 @@ func NewSequencer(driverCtx context.Context, log log.Logger, rollupCfg *rollup.C
 		metrics:          metrics,
 		timeNow:          time.Now,
 		toBlockRef:       derive.PayloadToBlockRef,
+		engineRequester:  engineRequester,
 	}
 }
 
 func (d *Sequencer) AttachEmitter(em event.Emitter) {
 	d.emitter = em
+}
+
+// requestForkchoiceUpdate makes an imperative forkchoice request if engine is available,
+// otherwise falls back to event emission for backward compatibility
+func (d *Sequencer) requestForkchoiceUpdate(ctx context.Context) {
+	if d.engineRequester != nil {
+		// Use imperative call - this is the new preferred approach
+		if err := d.engineRequester.RequestForkchoiceUpdateImperative(ctx, d.emitter); err != nil {
+			d.log.Debug("Imperative forkchoice request completed with error", "error", err)
+		}
+	} else {
+		// Fallback to event emission for backward compatibility
+		d.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
+	}
 }
 
 func (d *Sequencer) OnEvent(ctx context.Context, ev event.Event) bool {
@@ -484,7 +509,7 @@ func (d *Sequencer) startBuildingBlock() {
 
 	// If we do not have data to know what to build on, then request a forkchoice update
 	if l2Head == (eth.L2BlockRef{}) {
-		d.emitter.Emit(d.ctx, engine.ForkchoiceRequestEvent{})
+		d.requestForkchoiceUpdate(d.ctx)
 		return
 	}
 	// If we have already started trying to build on top of this block, we can avoid starting over again.
@@ -645,7 +670,7 @@ func (d *Sequencer) Init(ctx context.Context, active bool) error {
 	d.asyncGossip.Start()
 
 	// The `latestHead` should be updated, so we can handle start-sequencer requests
-	d.emitter.Emit(d.ctx, engine.ForkchoiceRequestEvent{})
+	d.requestForkchoiceUpdate(d.ctx)
 
 	if active {
 		return d.forceStart()

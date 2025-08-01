@@ -723,7 +723,7 @@ func createSequencer(log log.Logger) (*Sequencer, *sequencerTestDeps) {
 	}
 	seq := NewSequencer(context.Background(), log, cfg, deps.attribBuilder,
 		deps.l1OriginSelector, deps.seqState, deps.conductor,
-		deps.asyncGossip, metrics.NoopMetrics)
+		deps.asyncGossip, metrics.NoopMetrics, nil) // nil engine requester for test
 	// We create mock payloads, with the epoch-id as tx[0], rather than proper L1Block-info deposit tx.
 	seq.toBlockRef = func(rollupCfg *rollup.Config, payload *eth.ExecutionPayload) (eth.L2BlockRef, error) {
 		return eth.L2BlockRef{

@@ -171,6 +171,22 @@ func (e *EngineController) TryUpdateEngineImperative(ctx context.Context) error 
 	return e.TryUpdateEngine(ctx)
 }
 
+// RequestForkchoiceUpdateImperative provides imperative access to RequestForkchoiceUpdate via EngineStateManager
+// This replaces ForkchoiceRequestEvent emissions throughout the codebase
+func (e *EngineController) RequestForkchoiceUpdateImperative(ctx context.Context, emitter event.Emitter) error {
+	if e.engineStateManager != nil {
+		return e.engineStateManager.RequestForkchoiceUpdate(ctx, emitter)
+	}
+	// Fallback to event emission if EngineStateManager not set (should not happen in normal operation)
+	e.log.Warn("RequestForkchoiceUpdateImperative called without EngineStateManager - using event fallback")
+	emitter.Emit(ctx, ForkchoiceUpdateEvent{
+		UnsafeL2Head:    e.UnsafeL2Head(),
+		SafeL2Head:      e.SafeL2Head(),
+		FinalizedL2Head: e.Finalized(),
+	})
+	return nil
+}
+
 // State Getters
 
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {

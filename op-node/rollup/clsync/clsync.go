@@ -20,6 +20,12 @@ type Metrics interface {
 	RecordUnsafePayloadsBuffer(length uint64, memSize uint64, next eth.BlockID)
 }
 
+// EngineForkchoiceRequester defines the interface needed for imperative forkchoice requests
+// This replaces ForkchoiceRequestEvent emissions with direct method calls
+type EngineForkchoiceRequester interface {
+	RequestForkchoiceUpdateImperative(ctx context.Context, emitter event.Emitter) error
+}
+
 // CLSync holds on to a queue of received unsafe payloads,
 // and tries to apply them to the tip of the chain when requested to.
 type CLSync struct {
@@ -29,22 +35,40 @@ type CLSync struct {
 
 	emitter event.Emitter
 
+	// Optional engine controller for imperative forkchoice requests (replaces events)
+	engineRequester EngineForkchoiceRequester
+
 	mu sync.Mutex
 
 	unsafePayloads *PayloadsQueue // queue of unsafe payloads, ordered by ascending block number, may have gaps and duplicates
 }
 
-func NewCLSync(log log.Logger, cfg *rollup.Config, metrics Metrics) *CLSync {
+func NewCLSync(log log.Logger, cfg *rollup.Config, metrics Metrics, engineRequester EngineForkchoiceRequester) *CLSync {
 	return &CLSync{
-		log:            log,
-		cfg:            cfg,
-		metrics:        metrics,
-		unsafePayloads: NewPayloadsQueue(log, maxUnsafePayloadsMemory, payloadMemSize),
+		log:             log,
+		cfg:             cfg,
+		metrics:         metrics,
+		unsafePayloads:  NewPayloadsQueue(log, maxUnsafePayloadsMemory, payloadMemSize),
+		engineRequester: engineRequester,
 	}
 }
 
 func (eq *CLSync) AttachEmitter(em event.Emitter) {
 	eq.emitter = em
+}
+
+// requestForkchoiceUpdate makes an imperative forkchoice request if engine is available,
+// otherwise falls back to event emission for backward compatibility
+func (eq *CLSync) requestForkchoiceUpdate(ctx context.Context) {
+	if eq.engineRequester != nil {
+		// Use imperative call - this is the new preferred approach
+		if err := eq.engineRequester.RequestForkchoiceUpdateImperative(ctx, eq.emitter); err != nil {
+			eq.log.Debug("Imperative forkchoice request completed with error", "error", err)
+		}
+	} else {
+		// Fallback to event emission for backward compatibility
+		eq.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
+	}
 }
 
 // LowestQueuedUnsafeBlock retrieves the first queued-up L2 unsafe payload, or a zeroed reference if there is none.
@@ -182,5 +206,5 @@ func (eq *CLSync) onUnsafePayload(ctx context.Context, x ReceivedUnsafePayloadEv
 	eq.log.Trace("Next unsafe payload to process", "next", p.ExecutionPayload.ID(), "timestamp", uint64(p.ExecutionPayload.Timestamp))
 
 	// request forkchoice signal, so we can process the payload maybe
-	eq.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
+	eq.requestForkchoiceUpdate(ctx)
 }
