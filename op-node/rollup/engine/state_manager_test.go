@@ -539,6 +539,48 @@ func TestEngineStateManager_RequestCrossUpdate_NoFlags(t *testing.T) {
 	require.Len(t, emittedEvents, 0, "Should emit no events when both flags are false (original behavior)")
 }
 
+func TestEngineStateManager_InvalidateBlock_Success(t *testing.T) {
+	// Create mock controller
+	mockController := &MockEngineController{
+		config: &rollup.Config{L2ChainID: big.NewInt(1)},
+	}
+	
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+	
+	// Create test data
+	invalidatedRef := eth.BlockRef{Hash: common.HexToHash("0xabcd"), Number: 100}
+	attributes := &derive.AttributesWithParent{
+		Attributes: &eth.PayloadAttributes{
+			Timestamp: 0x123456,
+		},
+		Parent: eth.L2BlockRef{Hash: common.HexToHash("0x1234"), Number: 99},
+	}
+	
+	// Create a mock emitter to capture emitted events
+	emittedEvents := []event.Event{}
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+	
+	// Call InvalidateBlock
+	ctx := context.Background()
+	err := stateManager.InvalidateBlock(ctx, invalidatedRef, attributes, mockEmitter)
+	
+	// Validate result - should emit BuildStartEvent
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 1, "Should emit exactly one BuildStartEvent")
+	
+	// Validate the emitted event is BuildStartEvent with correct attributes
+	if buildStartEvent, ok := emittedEvents[0].(BuildStartEvent); ok {
+		require.Equal(t, attributes, buildStartEvent.Attributes)
+	} else {
+		t.Fatalf("Expected BuildStartEvent, got %T", emittedEvents[0])
+	}
+}
+
 // MockEmitter for testing event emissions
 type MockEmitter struct {
 	EmitFunc func(ctx context.Context, ev event.Event)

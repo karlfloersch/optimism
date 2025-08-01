@@ -352,7 +352,7 @@ func (e *EngineStateManager) RequestForkchoiceUpdate(ctx context.Context, emitte
 // Preserving this behavior - may be intentional timing/triggering logic.
 func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, crossUnsafe, crossSafe bool, emitter event.Emitter) error {
 	e.log.Debug("Requesting cross-chain state update imperatively", "cross_unsafe", crossUnsafe, "cross_safe", crossSafe)
-	
+
 	// Preserve original conditional logic from EngDeriver.OnEvent()
 	if crossUnsafe {
 		emitter.Emit(ctx, CrossUnsafeUpdateEvent{
@@ -361,7 +361,7 @@ func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, crossUnsafe
 		})
 		e.log.Debug("Emitted CrossUnsafeUpdateEvent", "cross_unsafe", e.controller.CrossUnsafeL2Head(), "local_unsafe", e.controller.UnsafeL2Head())
 	}
-	
+
 	if crossSafe {
 		emitter.Emit(ctx, CrossSafeUpdateEvent{
 			CrossSafe: e.controller.SafeL2Head(),
@@ -369,12 +369,24 @@ func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, crossUnsafe
 		})
 		e.log.Debug("Emitted CrossSafeUpdateEvent", "cross_safe", e.controller.SafeL2Head(), "local_safe", e.controller.LocalSafeL2Head())
 	}
-	
+
 	// With original empty struct emission (both false), nothing gets emitted - preserving this behavior
 	if !crossUnsafe && !crossSafe {
 		e.log.Debug("CrossUpdateRequest with both flags false - no events emitted (preserving original behavior)")
 	}
+
+	return nil
+}
+
+// InvalidateBlock handles InteropInvalidateBlockEvent imperatively by emitting BuildStartEvent
+// This replaces the pure re-emission pattern: InteropInvalidateBlockEvent -> BuildStartEvent
+func (e *EngineStateManager) InvalidateBlock(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error {
+	e.log.Debug("Processing block invalidation imperatively", "invalidated", invalidated, "attributes", attributes)
 	
+	// Original logic: extract Attributes and emit as BuildStartEvent
+	emitter.Emit(ctx, BuildStartEvent{Attributes: attributes})
+	
+	e.log.Debug("Emitted BuildStartEvent for invalidated block", "invalidated", invalidated, "attributes", attributes)
 	return nil
 }
 

@@ -493,7 +493,11 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			d.log.Debug("RequestCrossUpdate completed with error", "error", err)
 		}
 	case InteropInvalidateBlockEvent:
-		d.emitter.Emit(ctx, BuildStartEvent{Attributes: x.Attributes})
+		// 🎯 PHASE: Replace with EngineStateManager imperative call
+		// Original logic: pure re-emission InteropInvalidateBlockEvent -> BuildStartEvent
+		if err := d.engineStateManager.InvalidateBlock(ctx, x.Invalidated, x.Attributes, d.emitter); err != nil {
+			d.log.Debug("InvalidateBlock completed with error", "error", err)
+		}
 	case BuildStartEvent:
 		d.onBuildStart(ctx, x)
 	case BuildStartedEvent:

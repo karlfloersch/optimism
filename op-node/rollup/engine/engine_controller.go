@@ -198,6 +198,16 @@ func (e *EngineController) RequestCrossUpdateImperative(ctx context.Context, cro
 	return fmt.Errorf("EngineStateManager not available for cross update request")
 }
 
+// InvalidateBlockImperative handles block invalidation imperatively instead of InteropInvalidateBlockEvent
+func (e *EngineController) InvalidateBlockImperative(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error {
+	if e.engineStateManager != nil {
+		return e.engineStateManager.InvalidateBlock(ctx, invalidated, attributes, emitter)
+	}
+	// Fallback should not happen in normal operation since EngineStateManager is always set
+	e.log.Warn("InvalidateBlockImperative called without EngineStateManager - this should not happen")
+	return fmt.Errorf("EngineStateManager not available for block invalidation")
+}
+
 // State Getters
 
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {

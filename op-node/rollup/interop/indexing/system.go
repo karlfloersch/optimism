@@ -46,12 +46,18 @@ type L1Source interface {
 	L1BlockRefByNumber(ctx context.Context, num uint64) (eth.L1BlockRef, error)
 }
 
+// EngineInvalidator defines the interface for imperative block invalidation
+type EngineInvalidator interface {
+	InvalidateBlockImperative(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error
+}
+
 // IndexingMode makes the op-node managed by an op-supervisor,
 // by serving sync work and updating the canonical chain based on instructions.
 type IndexingMode struct {
 	log log.Logger
 
 	emitter event.Emitter
+	engine  EngineInvalidator
 
 	l1 L1Source
 	l2 L2Source
@@ -159,6 +165,10 @@ func (m *IndexingMode) Stop(ctx context.Context) error {
 
 func (m *IndexingMode) AttachEmitter(em event.Emitter) {
 	m.emitter = em
+}
+
+func (m *IndexingMode) AttachEngine(engine EngineInvalidator) {
+	m.engine = engine
 }
 
 // Outgoing events to supervisor
@@ -332,8 +342,18 @@ func (m *IndexingMode) InvalidateBlock(ctx context.Context, seal supervisortypes
 		DerivedFrom: engine.ReplaceBlockSource,
 	}
 
-	m.emitter.Emit(m.ctx, engine.InteropInvalidateBlockEvent{
-		Invalidated: ref, Attributes: annotated})
+	// 🎯 PHASE: Replace InteropInvalidateBlockEvent emission with imperative call
+	// Original logic: emit InteropInvalidateBlockEvent -> EngDeriver re-emits as BuildStartEvent
+	if m.engine != nil {
+		if err := m.engine.InvalidateBlockImperative(ctx, ref, annotated, m.emitter); err != nil {
+			return fmt.Errorf("failed to invalidate block imperatively: %w", err)
+		}
+	} else {
+		// Fallback for tests or incomplete initialization - emit the event
+		m.log.Debug("EngineInvalidator not available - falling back to event emission")
+		m.emitter.Emit(m.ctx, engine.InteropInvalidateBlockEvent{
+			Invalidated: ref, Attributes: annotated})
+	}
 
 	// The node will send an event once the replacement is ready
 	return nil
