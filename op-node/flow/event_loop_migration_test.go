@@ -165,7 +165,7 @@ type ForkchoiceRequestEvent struct {
 func (e ForkchoiceRequestEvent) String() string { return "forkchoice-request" }
 
 type ForkchoiceUpdateEvent struct {
-	UnsafeL2Head    string `json:"unsafe_l2_head"`    
+	UnsafeL2Head    string `json:"unsafe_l2_head"`
 	SafeL2Head      string `json:"safe_l2_head"`
 	FinalizedL2Head string `json:"finalized_l2_head"`
 }
