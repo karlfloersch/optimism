@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/event"
 )
 
 // EngineControllerInterface defines the interface we need from EngineController
@@ -316,6 +317,33 @@ func (e *EngineStateManager) PromoteToFinalized(ctx context.Context, ref eth.L2B
 
 	// Try to apply the forkchoice changes (same as original)
 	return e.TryUpdateEngine(ctx)
+}
+
+// RequestForkchoiceUpdate handles ForkchoiceRequestEvent by emitting ForkchoiceUpdateEvent
+// with current engine state. This replaces the event-driven ForkchoiceRequestEvent handling.
+func (e *EngineStateManager) RequestForkchoiceUpdate(ctx context.Context, emitter event.Emitter) error {
+	e.log.Debug("Requesting forkchoice update imperatively")
+
+	// Get current engine state (same logic as ForkchoiceRequestEvent handler)
+	unsafeHead := e.controller.UnsafeL2Head()
+	safeHead := e.controller.SafeL2Head()
+	finalizedHead := e.controller.Finalized()
+
+	// Emit the ForkchoiceUpdateEvent (same behavior as original event handler)
+	forkchoiceUpdate := ForkchoiceUpdateEvent{
+		UnsafeL2Head:    unsafeHead,
+		SafeL2Head:      safeHead,
+		FinalizedL2Head: finalizedHead,
+	}
+
+	e.log.Debug("Emitting forkchoice update",
+		"unsafe", unsafeHead,
+		"safe", safeHead,
+		"finalized", finalizedHead)
+
+	// This still emits an event, but the request is now imperative
+	emitter.Emit(ctx, forkchoiceUpdate)
+	return nil
 }
 
 // 🛡️ DEFENSIVE HELPER METHODS

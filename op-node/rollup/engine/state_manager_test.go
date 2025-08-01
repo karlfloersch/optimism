@@ -3,14 +3,17 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/event"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 )
 
@@ -414,4 +417,64 @@ func TestEngineStateManager_RegisterExternalHandler(t *testing.T) {
 	require.Len(t, esm.externalHandlers, 2)
 	require.Equal(t, mockHandler1, esm.externalHandlers["Event1"])
 	require.Equal(t, mockHandler2, esm.externalHandlers["Event2"])
+}
+
+// TestEngineStateManager_RequestForkchoiceUpdate_Success validates the ForkchoiceRequestEvent replacement
+func TestEngineStateManager_RequestForkchoiceUpdate_Success(t *testing.T) {
+	// Create a mock controller with expected engine state
+	mockController := &MockEngineController{
+		config: &rollup.Config{L2ChainID: big.NewInt(1)},
+		unsafeL2Head: eth.L2BlockRef{
+			Hash:   common.HexToHash("0x1234"),
+			Number: 10,
+		},
+		safeL2Head: eth.L2BlockRef{
+			Hash:   common.HexToHash("0x5678"),
+			Number: 8,
+		},
+		finalizedHead: eth.L2BlockRef{
+			Hash:   common.HexToHash("0x9abc"),
+			Number: 5,
+		},
+	}
+
+	// Create state manager
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+
+	// Create a mock emitter to capture emitted events
+	emittedEvents := []event.Event{}
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+
+	// Call RequestForkchoiceUpdate
+	ctx := context.Background()
+	err := stateManager.RequestForkchoiceUpdate(ctx, mockEmitter)
+
+	// Validate result
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 1, "Should emit exactly one ForkchoiceUpdateEvent")
+
+	// Validate the emitted event has correct engine state
+	if forkchoiceEvent, ok := emittedEvents[0].(ForkchoiceUpdateEvent); ok {
+		require.Equal(t, mockController.unsafeL2Head, forkchoiceEvent.UnsafeL2Head)
+		require.Equal(t, mockController.safeL2Head, forkchoiceEvent.SafeL2Head)
+		require.Equal(t, mockController.finalizedHead, forkchoiceEvent.FinalizedL2Head)
+	} else {
+		t.Fatalf("Expected ForkchoiceUpdateEvent, got %T", emittedEvents[0])
+	}
+}
+
+// MockEmitter for testing event emissions
+type MockEmitter struct {
+	EmitFunc func(ctx context.Context, ev event.Event)
+}
+
+func (m *MockEmitter) Emit(ctx context.Context, ev event.Event) {
+	if m.EmitFunc != nil {
+		m.EmitFunc(ctx, ev)
+	}
 }

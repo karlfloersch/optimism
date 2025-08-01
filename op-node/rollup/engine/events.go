@@ -364,11 +364,11 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 		}
 		// Success logging is handled internally by EngineStateManager
 	case ForkchoiceRequestEvent:
-		d.emitter.Emit(ctx, ForkchoiceUpdateEvent{
-			UnsafeL2Head:    d.ec.UnsafeL2Head(),
-			SafeL2Head:      d.ec.SafeL2Head(),
-			FinalizedL2Head: d.ec.Finalized(),
-		})
+		// 🎯 PHASE 2A+: Replace with EngineStateManager imperative call
+		// This moves the forkchoice request logic from event-driven to imperative style
+		if err := d.engineStateManager.RequestForkchoiceUpdate(ctx, d.emitter); err != nil {
+			d.log.Debug("RequestForkchoiceUpdate completed with error", "error", err)
+		}
 	case rollup.ForceResetEvent:
 		ForceEngineReset(d.ec, x)
 
