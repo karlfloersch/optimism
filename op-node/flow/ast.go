@@ -210,8 +210,8 @@ type EventTriggerNode struct {
 	metadata map[string]any
 }
 
-func (n *EventTriggerNode) ID() string                                                      { return n.id }
-func (n *EventTriggerNode) Type() FlowNodeType                                            { return n.nodeType }
+func (n *EventTriggerNode) ID() string         { return n.id }
+func (n *EventTriggerNode) Type() FlowNodeType { return n.nodeType }
 func (n *EventTriggerNode) Execute(ctx context.Context, state *FlowState) (*FlowResult, error) {
 	// TODO: Phase 4 - implement execution
 	return &FlowResult{Success: true}, nil
@@ -219,11 +219,11 @@ func (n *EventTriggerNode) Execute(ctx context.Context, state *FlowState) (*Flow
 
 // FlowPattern represents a recurring pattern in event flows
 type FlowPattern struct {
-	Name        string    `json:"name"`
-	Sequence    []string  `json:"sequence"`
-	Frequency   int       `json:"frequency"`
-	Probability float64   `json:"probability"`
-	Description string    `json:"description"`
+	Name        string   `json:"name"`
+	Sequence    []string `json:"sequence"`
+	Frequency   int      `json:"frequency"`
+	Probability float64  `json:"probability"`
+	Description string   `json:"description"`
 }
 
 // Helper functions
@@ -250,7 +250,7 @@ func (fb *FlowBuilder) BuildAST() (*FlowGraph, error) {
 	// Phase 1: Group events by trigger type and build node library
 	nodeMap := make(map[string]FlowNode)
 	eventGroups := fb.groupEventsByType()
-	
+
 	// Create nodes from unique event types
 	for eventType, events := range eventGroups {
 		node := &EventTriggerNode{
@@ -263,14 +263,14 @@ func (fb *FlowBuilder) BuildAST() (*FlowGraph, error) {
 		}
 		nodeMap[eventType] = node
 	}
-	
-	// Phase 2: Find event sequences and create edges
-	edges := fb.buildEdgesFromSequences(nodeMap)
-	
+
+	// Phase 2: Build REAL data flow edges (not just temporal)
+	edges := fb.buildDataFlowEdges(nodeMap)
+
 	// Phase 3: Identify patterns and flows
 	patterns := fb.identifyCommonPatterns()
 	observedPaths := fb.extractObservedPaths()
-	
+
 	// Phase 4: Build complete flow graph
 	graph := &FlowGraph{
 		ID:             fmt.Sprintf("flow_%d", len(fb.events)),
@@ -288,7 +288,7 @@ func (fb *FlowBuilder) BuildAST() (*FlowGraph, error) {
 			BottleneckNodes: fb.findBottleneckNodes(eventGroups),
 		},
 	}
-	
+
 	return graph, nil
 }
 
@@ -305,7 +305,7 @@ func (fb *FlowBuilder) groupEventsByType() map[string][]CapturedEvent {
 func (fb *FlowBuilder) inferNodeType(eventType string, events []CapturedEvent) FlowNodeType {
 	// Infer node type based on event name patterns and behavior
 	name := eventType
-	
+
 	// Look for common patterns in event naming
 	if strings.Contains(name, "start") || strings.Contains(name, "init") {
 		return EventTrigger
@@ -325,7 +325,7 @@ func (fb *FlowBuilder) inferNodeType(eventType string, events []CapturedEvent) F
 	if strings.Contains(name, "complete") || strings.Contains(name, "finish") {
 		return TerminalNode
 	}
-	
+
 	// Default to ActionNode for processing events
 	return ActionNode
 }
@@ -334,68 +334,234 @@ func (fb *FlowBuilder) calculateAvgDuration(events []CapturedEvent) time.Duratio
 	if len(events) == 0 {
 		return 0
 	}
-	
+
 	var total time.Duration
 	for _, event := range events {
 		total += event.Duration
 	}
-	
+
 	return total / time.Duration(len(events))
 }
 
 func (fb *FlowBuilder) buildEdgesFromSequences(nodeMap map[string]FlowNode) []FlowEdge {
 	edges := make([]FlowEdge, 0)
 	edgeFreq := make(map[string]int) // track frequency of transitions
-	
+
 	// Build temporal sequences from correlated events
 	sequences := fb.buildEventSequences()
-	
+
 	// Create edges from sequential events
 	for _, sequence := range sequences {
 		for i := 0; i < len(sequence)-1; i++ {
 			from := sequence[i]
 			to := sequence[i+1]
-			
+
 			// Track edge frequency
 			edgeKey := from + "->" + to
 			edgeFreq[edgeKey]++
 		}
 	}
-	
+
 	// Convert frequency map to actual edges
 	for edgeKey, frequency := range edgeFreq {
 		parts := strings.Split(edgeKey, "->")
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		// Verify nodes exist
 		_, fromExists := nodeMap[parts[0]]
 		_, toExists := nodeMap[parts[1]]
 		if !fromExists || !toExists {
 			continue
 		}
-		
+
 		edge := FlowEdge{
 			From:      parts[0], // FlowEdge uses node IDs, not node objects
 			To:        parts[1],
-			Condition: nil, // TODO: Phase 3 - infer conditions
+			Condition: nil,                // TODO: Phase 3 - infer conditions
 			Weight:    float64(frequency), // Convert to float64
 			Metadata: map[string]any{
 				"frequency": frequency,
 				"edge_type": "temporal_sequence",
 			},
 		}
-		
+
 		edges = append(edges, edge)
 	}
-	
+
+	return edges
+}
+
+// 🚀 NEW: Build edges based on ACTUAL data flow dependencies (producer → consumer)
+func (fb *FlowBuilder) buildDataFlowEdges(nodeMap map[string]FlowNode) []FlowEdge {
+	edges := make([]FlowEdge, 0)
+	edgeFreq := make(map[string]int)
+
+	// Build producer-consumer mappings from our captured data
+	producerMap := make(map[string][]CapturedEvent) // data_type -> events that produce it
+	consumerMap := make(map[string][]CapturedEvent) // data_type -> events that consume it
+
+	// Phase 1: Index all producers and consumers
+	for _, event := range fb.events {
+		// Index producers
+		for _, produced := range event.ProducedData {
+			producerMap[produced] = append(producerMap[produced], event)
+		}
+
+		// Index consumers
+		for _, consumed := range event.ConsumedData {
+			consumerMap[consumed] = append(consumerMap[consumed], event)
+		}
+	}
+
+	// Phase 2: Connect producers to consumers through data dependencies
+	for dataType, producers := range producerMap {
+		consumers, hasConsumers := consumerMap[dataType]
+		if !hasConsumers {
+			continue // No consumers for this data type
+		}
+
+		// Create edges from each producer type to each consumer type
+		for _, producer := range producers {
+			for _, consumer := range consumers {
+				// Don't connect event to itself
+				if producer.EventName == consumer.EventName {
+					continue
+				}
+
+				// Verify nodes exist in our node map
+				_, producerExists := nodeMap[producer.EventName]
+				_, consumerExists := nodeMap[consumer.EventName]
+				if !producerExists || !consumerExists {
+					continue
+				}
+
+				// Track frequency of this data dependency
+				edgeKey := producer.EventName + "--[" + dataType + "]-->" + consumer.EventName
+				edgeFreq[edgeKey]++
+			}
+		}
+	}
+
+	// Phase 3: Convert to actual edges with data flow metadata
+	for edgeKey, frequency := range edgeFreq {
+		parts := strings.Split(edgeKey, "--[")
+		if len(parts) != 2 {
+			continue
+		}
+
+		fromEvent := parts[0]
+		rest := strings.Split(parts[1], "]-->")
+		if len(rest) != 2 {
+			continue
+		}
+
+		dataType := rest[0]
+		toEvent := rest[1]
+
+		edge := FlowEdge{
+			From:      fromEvent,
+			To:        toEvent,
+			Condition: nil, // TODO: infer conditions from state changes
+			Weight:    float64(frequency),
+			Metadata: map[string]any{
+				"edge_type":   "data_dependency", // ← REAL DATA FLOW!
+				"data_type":   dataType,          // What data connects them
+				"frequency":   frequency,         // How often this dependency occurs
+				"causal_link": true,              // This is a causal relationship
+			},
+		}
+
+		edges = append(edges, edge)
+	}
+
+	// Phase 4: Add temporal edges for events in same dataflow
+	temporalEdges := fb.buildTemporalEdgesWithinFlows(nodeMap)
+	edges = append(edges, temporalEdges...)
+
+	return edges
+}
+
+// Build temporal edges within the same dataflow (complement to data dependency edges)
+func (fb *FlowBuilder) buildTemporalEdgesWithinFlows(nodeMap map[string]FlowNode) []FlowEdge {
+	edges := make([]FlowEdge, 0)
+	edgeFreq := make(map[string]int)
+
+	// Group events by dataflow ID
+	flowGroups := make(map[string][]CapturedEvent)
+	for _, event := range fb.events {
+		if event.DataflowID != "" {
+			flowGroups[event.DataflowID] = append(flowGroups[event.DataflowID], event)
+		}
+	}
+
+	// Build temporal sequences within each flow
+	for flowID, events := range flowGroups {
+		if len(events) < 2 {
+			continue
+		}
+
+		// Sort by time within this flow
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].EmitTime.Before(events[j].EmitTime)
+		})
+
+		// Connect sequential events within the same logical flow
+		for i := 0; i < len(events)-1; i++ {
+			from := events[i].EventName
+			to := events[i+1].EventName
+
+			// Only connect if nodes exist and aren't the same
+			_, fromExists := nodeMap[from]
+			_, toExists := nodeMap[to]
+			if !fromExists || !toExists || from == to {
+				continue
+			}
+
+			edgeKey := from + "--[" + flowID + "]-->" + to
+			edgeFreq[edgeKey]++
+		}
+	}
+
+	// Convert to edges
+	for edgeKey, frequency := range edgeFreq {
+		parts := strings.Split(edgeKey, "--[")
+		if len(parts) != 2 {
+			continue
+		}
+
+		fromEvent := parts[0]
+		rest := strings.Split(parts[1], "]-->")
+		if len(rest) != 2 {
+			continue
+		}
+
+		flowID := rest[0]
+		toEvent := rest[1]
+
+		edge := FlowEdge{
+			From:      fromEvent,
+			To:        toEvent,
+			Condition: nil,
+			Weight:    float64(frequency) * 0.5, // Lower weight than data dependencies
+			Metadata: map[string]any{
+				"edge_type":   "temporal_within_flow", // Temporal but within logical flows
+				"flow_id":     flowID,
+				"frequency":   frequency,
+				"causal_link": false, // This is temporal ordering, not causal
+			},
+		}
+
+		edges = append(edges, edge)
+	}
+
 	return edges
 }
 
 func (fb *FlowBuilder) buildEventSequences() [][]string {
 	sequences := make([][]string, 0)
-	
+
 	// Group events by correlation context to build sequences
 	contextGroups := make(map[uint64][]CapturedEvent)
 	for _, event := range fb.events {
@@ -403,37 +569,37 @@ func (fb *FlowBuilder) buildEventSequences() [][]string {
 			contextGroups[event.DerivContext] = append(contextGroups[event.DerivContext], event)
 		}
 	}
-	
+
 	// Sort each context group by time and extract event names
 	for _, events := range contextGroups {
 		if len(events) < 2 {
 			continue // Need at least 2 events for a sequence
 		}
-		
+
 		// Sort by emit time
 		sort.Slice(events, func(i, j int) bool {
 			return events[i].EmitTime.Before(events[j].EmitTime)
 		})
-		
+
 		// Extract event names as sequence
 		sequence := make([]string, len(events))
 		for i, event := range events {
 			sequence[i] = event.EventName
 		}
-		
+
 		sequences = append(sequences, sequence)
 	}
-	
+
 	return sequences
 }
 
 func (fb *FlowBuilder) identifyCommonPatterns() []FlowPattern {
 	patterns := make([]FlowPattern, 0)
 	sequences := fb.buildEventSequences()
-	
+
 	// Find common subsequences (patterns)
 	patternCounts := make(map[string]int)
-	
+
 	// Look for patterns of length 2-4
 	for _, sequence := range sequences {
 		for length := 2; length <= 4 && length <= len(sequence); length++ {
@@ -443,7 +609,7 @@ func (fb *FlowBuilder) identifyCommonPatterns() []FlowPattern {
 			}
 		}
 	}
-	
+
 	// Convert to FlowPattern objects, filtering for significant patterns
 	for pattern, count := range patternCounts {
 		if count >= 3 { // Only include patterns that occur at least 3 times
@@ -456,25 +622,25 @@ func (fb *FlowBuilder) identifyCommonPatterns() []FlowPattern {
 			})
 		}
 	}
-	
+
 	// Sort by frequency (most common first)
 	sort.Slice(patterns, func(i, j int) bool {
 		return patterns[i].Frequency > patterns[j].Frequency
 	})
-	
+
 	return patterns
 }
 
 func (fb *FlowBuilder) findMostCommonStartEvent(eventGroups map[string][]CapturedEvent) string {
 	// Find the event type that most commonly starts sequences
 	startEventCounts := make(map[string]int)
-	
+
 	for _, sequence := range fb.buildEventSequences() {
 		if len(sequence) > 0 {
 			startEventCounts[sequence[0]]++
 		}
 	}
-	
+
 	// Find the most common start event
 	maxCount := 0
 	mostCommon := ""
@@ -484,7 +650,7 @@ func (fb *FlowBuilder) findMostCommonStartEvent(eventGroups map[string][]Capture
 			mostCommon = eventType
 		}
 	}
-	
+
 	return mostCommon
 }
 
@@ -499,35 +665,35 @@ func (fb *FlowBuilder) calculateOverallAvgDuration() time.Duration {
 	if len(fb.events) == 0 {
 		return 0
 	}
-	
+
 	var total time.Duration
 	for _, event := range fb.events {
 		total += event.Duration
 	}
-	
+
 	return total / time.Duration(len(fb.events))
 }
 
 func (fb *FlowBuilder) findBottleneckNodes(eventGroups map[string][]CapturedEvent) []string {
 	bottlenecks := make([]string, 0)
-	
+
 	// Find event types with highest average duration
 	type nodePerf struct {
 		eventType   string
 		avgDuration time.Duration
 	}
-	
+
 	perfs := make([]nodePerf, 0)
 	for eventType, events := range eventGroups {
 		avg := fb.calculateAvgDuration(events)
 		perfs = append(perfs, nodePerf{eventType, avg})
 	}
-	
+
 	// Sort by duration (highest first)
 	sort.Slice(perfs, func(i, j int) bool {
 		return perfs[i].avgDuration > perfs[j].avgDuration
 	})
-	
+
 	// Take top 20% as bottlenecks
 	count := len(perfs) / 5
 	if count < 1 {
@@ -536,10 +702,10 @@ func (fb *FlowBuilder) findBottleneckNodes(eventGroups map[string][]CapturedEven
 	if count > len(perfs) {
 		count = len(perfs)
 	}
-	
+
 	for i := 0; i < count; i++ {
 		bottlenecks = append(bottlenecks, perfs[i].eventType)
 	}
-	
+
 	return bottlenecks
 }

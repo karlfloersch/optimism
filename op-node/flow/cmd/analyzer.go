@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-node/flow"
@@ -71,7 +72,17 @@ func analyzeTrace(filename string) error {
 	printCorrelationAnalysis(trace.Correlations, trace.Events)
 	printPerformanceAnalysis(trace.Events, trace.Metadata)
 	printPatternAnalysis(trace.Events)
-	printASTAnalysis(trace.Events, trace.Correlations) // 🚀 NEW: AST Generation
+
+	// 🚀 AST Generation and Graph Export
+	builder := flow.NewFlowBuilder(trace.Events, trace.Correlations)
+	flowGraph, err := builder.BuildAST()
+	if err != nil {
+		fmt.Printf("Error building AST: %v\n", err)
+	} else {
+		printASTAnalysis(flowGraph)
+		generateGraphOutputs(flowGraph, filename)
+	}
+
 	printCompletenessAnalysis(trace)
 
 	return nil
@@ -350,22 +361,9 @@ func findSlowestEvents(events []flow.CapturedEvent, limit int) []flow.CapturedEv
 }
 
 // 🚀 NEW: AST Analysis function
-func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint64) {
+func printASTAnalysis(flowGraph *flow.FlowGraph) {
 	fmt.Println("🏗️ AST GENERATION & FLOW ANALYSIS")
-	
-	if len(events) == 0 {
-		fmt.Println("   No events available for AST generation")
-		return
-	}
-	
-	// Build AST from captured events
-	builder := flow.NewFlowBuilder(events, correlations)
-	flowGraph, err := builder.BuildAST()
-	if err != nil {
-		fmt.Printf("   ❌ Error building AST: %v\n", err)
-		return
-	}
-	
+
 	fmt.Println("   ✅ AST Generation Successful!")
 	fmt.Printf("   Flow Graph ID: %s\n", flowGraph.ID)
 	fmt.Printf("   Flow Name: %s\n", flowGraph.Name)
@@ -373,11 +371,11 @@ func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint6
 	fmt.Printf("   Total Edges: %d\n", len(flowGraph.Edges))
 	fmt.Printf("   Entry Points: %v\n", flowGraph.EntryPoints)
 	fmt.Println()
-	
+
 	// Analysis of generated flow graph
 	fmt.Println("   📊 Flow Graph Statistics:")
 	fmt.Printf("      Observed Execution Paths: %d\n", len(flowGraph.ObservedPaths))
-	
+
 	if flowGraph.Metrics != nil {
 		fmt.Printf("      Execution Count: %d\n", flowGraph.Metrics.ExecutionCount)
 		fmt.Printf("      Success Rate: %.1f%%\n", flowGraph.Metrics.SuccessRate*100)
@@ -386,18 +384,18 @@ func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint6
 			fmt.Printf("      Bottleneck Nodes: %v\n", flowGraph.Metrics.BottleneckNodes)
 		}
 	}
-	
+
 	// Node type analysis
 	nodeTypes := make(map[string]int)
 	for _, node := range flowGraph.Nodes {
 		nodeTypes[node.Type().String()]++
 	}
-	
+
 	fmt.Println("   🎯 Node Type Distribution:")
 	for nodeType, count := range nodeTypes {
 		fmt.Printf("      %s: %d nodes\n", nodeType, count)
 	}
-	
+
 	// Edge analysis
 	if len(flowGraph.Edges) > 0 {
 		totalWeight := 0.0
@@ -405,18 +403,18 @@ func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint6
 			totalWeight += edge.Weight
 		}
 		avgWeight := totalWeight / float64(len(flowGraph.Edges))
-		
+
 		fmt.Println("   🔗 Edge Statistics:")
 		fmt.Printf("      Average Transition Weight: %.2f\n", avgWeight)
 		fmt.Printf("      Most Common Transitions:\n")
-		
+
 		// Sort edges by weight to show most common transitions
 		sortedEdges := make([]flow.FlowEdge, len(flowGraph.Edges))
 		copy(sortedEdges, flowGraph.Edges)
 		sort.Slice(sortedEdges, func(i, j int) bool {
 			return sortedEdges[i].Weight > sortedEdges[j].Weight
 		})
-		
+
 		for i, edge := range sortedEdges {
 			if i >= 5 { // Top 5
 				break
@@ -424,6 +422,281 @@ func printASTAnalysis(events []flow.CapturedEvent, correlations map[uint64]uint6
 			fmt.Printf("         %s → %s (weight: %.0f)\n", edge.From, edge.To, edge.Weight)
 		}
 	}
-	
+
 	fmt.Println()
+}
+
+// 🎨 Graph Generation Functions
+
+func generateGraphOutputs(flowGraph *flow.FlowGraph, traceFilename string) {
+	fmt.Println("🎨 GENERATING FLOW VISUALIZATIONS")
+
+	// Generate base filename from trace file
+	baseFilename := strings.TrimSuffix(traceFilename, ".json")
+
+	// Generate GraphViz .dot file
+	dotFile := baseFilename + "_flow.dot"
+	if err := generateGraphViz(flowGraph, dotFile); err != nil {
+		fmt.Printf("   ❌ Error generating GraphViz: %v\n", err)
+	} else {
+		fmt.Printf("   ✅ GraphViz saved: %s\n", dotFile)
+		fmt.Printf("      To render: dot -Tpng %s -o %s.png\n", dotFile, baseFilename)
+	}
+
+	// Generate Mermaid .mmd file
+	mermaidFile := baseFilename + "_flow.mmd"
+	if err := generateMermaid(flowGraph, mermaidFile); err != nil {
+		fmt.Printf("   ❌ Error generating Mermaid: %v\n", err)
+	} else {
+		fmt.Printf("   ✅ Mermaid saved: %s\n", mermaidFile)
+		fmt.Printf("      View at: https://mermaid.live/ or use mermaid-cli\n")
+	}
+
+	// Generate summary report
+	reportFile := baseFilename + "_analysis.md"
+	if err := generateAnalysisReport(flowGraph, reportFile); err != nil {
+		fmt.Printf("   ❌ Error generating report: %v\n", err)
+	} else {
+		fmt.Printf("   ✅ Analysis report: %s\n", reportFile)
+	}
+
+	fmt.Println()
+}
+
+func generateGraphViz(flowGraph *flow.FlowGraph, filename string) error {
+	var dot strings.Builder
+
+	dot.WriteString("digraph FlowGraph {\n")
+	dot.WriteString("  rankdir=TB;\n")
+	dot.WriteString("  node [shape=box, style=\"rounded,filled\", fontname=\"Arial\"];\n")
+	dot.WriteString("  edge [fontname=\"Arial\", fontsize=10];\n\n")
+
+	// Add title
+	dot.WriteString(fmt.Sprintf("  label=\"%s\\nNodes: %d, Edges: %d\";\n",
+		flowGraph.Name, len(flowGraph.Nodes), len(flowGraph.Edges)))
+	dot.WriteString("  labelloc=t;\n")
+	dot.WriteString("  fontsize=16;\n\n")
+
+	// Add nodes with colors based on type
+	for nodeID, node := range flowGraph.Nodes {
+		color := getNodeColor(node.Type())
+		safeID := strings.ReplaceAll(nodeID, "-", "_")
+		label := strings.ReplaceAll(nodeID, "-", "\\n")
+
+		dot.WriteString(fmt.Sprintf("  %s [label=\"%s\", fillcolor=\"%s\"];\n",
+			safeID, label, color))
+	}
+
+	dot.WriteString("\n")
+
+	// Add edges with weights
+	for _, edge := range flowGraph.Edges {
+		fromSafe := strings.ReplaceAll(edge.From, "-", "_")
+		toSafe := strings.ReplaceAll(edge.To, "-", "_")
+
+		// Thicker lines for more frequent transitions
+		penwidth := 1.0 + (edge.Weight / 10.0)
+		if penwidth > 5.0 {
+			penwidth = 5.0
+		}
+
+		dot.WriteString(fmt.Sprintf("  %s -> %s [label=\"%.0f\", penwidth=%.1f];\n",
+			fromSafe, toSafe, edge.Weight, penwidth))
+	}
+
+	dot.WriteString("}\n")
+
+	return os.WriteFile(filename, []byte(dot.String()), 0644)
+}
+
+func generateMermaid(flowGraph *flow.FlowGraph, filename string) error {
+	var mmd strings.Builder
+
+	mmd.WriteString("graph TD\n")
+	mmd.WriteString(fmt.Sprintf("  %% %s - Nodes: %d, Edges: %d\n\n",
+		flowGraph.Name, len(flowGraph.Nodes), len(flowGraph.Edges)))
+
+	// Add nodes with shapes based on type
+	for nodeID, node := range flowGraph.Nodes {
+		shape := getMermaidShape(node.Type())
+		safeID := strings.ReplaceAll(nodeID, "-", "_")
+		label := strings.ReplaceAll(nodeID, "-", " ")
+
+		mmd.WriteString(fmt.Sprintf("  %s%s\"%s\"%s\n", safeID, shape[0], label, shape[1]))
+	}
+
+	mmd.WriteString("\n")
+
+	// Add edges
+	for _, edge := range flowGraph.Edges {
+		fromSafe := strings.ReplaceAll(edge.From, "-", "_")
+		toSafe := strings.ReplaceAll(edge.To, "-", "_")
+
+		// Thicker arrows for more frequent transitions
+		arrow := "-->"
+		if edge.Weight > 5 {
+			arrow = "==>"
+		}
+
+		mmd.WriteString(fmt.Sprintf("  %s %s|%.0f| %s\n",
+			fromSafe, arrow, edge.Weight, toSafe))
+	}
+
+	// Add styling
+	mmd.WriteString("\n  %% Styling\n")
+	for nodeID, node := range flowGraph.Nodes {
+		safeID := strings.ReplaceAll(nodeID, "-", "_")
+		class := getMermaidClass(node.Type())
+		mmd.WriteString(fmt.Sprintf("  class %s %s\n", safeID, class))
+	}
+
+	mmd.WriteString("\n  classDef trigger fill:#e1f5fe\n")
+	mmd.WriteString("  classDef action fill:#f3e5f5\n")
+	mmd.WriteString("  classDef decision fill:#fff3e0\n")
+	mmd.WriteString("  classDef sync fill:#e8f5e8\n")
+	mmd.WriteString("  classDef terminal fill:#ffebee\n")
+
+	return os.WriteFile(filename, []byte(mmd.String()), 0644)
+}
+
+func generateAnalysisReport(flowGraph *flow.FlowGraph, filename string) error {
+	var report strings.Builder
+
+	report.WriteString(fmt.Sprintf("# Flow Analysis Report: %s\n\n", flowGraph.Name))
+	report.WriteString(fmt.Sprintf("Generated: %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+
+	// Summary
+	report.WriteString("## Summary\n\n")
+	report.WriteString(fmt.Sprintf("- **Total Nodes**: %d\n", len(flowGraph.Nodes)))
+	report.WriteString(fmt.Sprintf("- **Total Edges**: %d\n", len(flowGraph.Edges)))
+	report.WriteString(fmt.Sprintf("- **Entry Points**: %v\n", flowGraph.EntryPoints))
+	report.WriteString(fmt.Sprintf("- **Execution Paths**: %d\n\n", len(flowGraph.ObservedPaths)))
+
+	// Node analysis
+	nodeTypes := make(map[string]int)
+	for _, node := range flowGraph.Nodes {
+		nodeTypes[node.Type().String()]++
+	}
+
+	report.WriteString("## Node Type Distribution\n\n")
+	for nodeType, count := range nodeTypes {
+		report.WriteString(fmt.Sprintf("- **%s**: %d nodes\n", nodeType, count))
+	}
+	report.WriteString("\n")
+
+	// Top transitions
+	if len(flowGraph.Edges) > 0 {
+		// Sort edges by weight
+		sortedEdges := make([]flow.FlowEdge, len(flowGraph.Edges))
+		copy(sortedEdges, flowGraph.Edges)
+		sort.Slice(sortedEdges, func(i, j int) bool {
+			return sortedEdges[i].Weight > sortedEdges[j].Weight
+		})
+
+		report.WriteString("## Most Common Transitions\n\n")
+		for i, edge := range sortedEdges {
+			if i >= 10 { // Top 10
+				break
+			}
+			report.WriteString(fmt.Sprintf("%d. **%s → %s** (weight: %.0f)\n",
+				i+1, edge.From, edge.To, edge.Weight))
+		}
+		report.WriteString("\n")
+	}
+
+	// Performance insights
+	if flowGraph.Metrics != nil {
+		report.WriteString("## Performance Insights\n\n")
+		report.WriteString(fmt.Sprintf("- **Success Rate**: %.1f%%\n", flowGraph.Metrics.SuccessRate*100))
+		report.WriteString(fmt.Sprintf("- **Average Duration**: %v\n", flowGraph.Metrics.AverageDuration))
+		if len(flowGraph.Metrics.BottleneckNodes) > 0 {
+			report.WriteString(fmt.Sprintf("- **Bottleneck Nodes**: %v\n", flowGraph.Metrics.BottleneckNodes))
+		}
+		report.WriteString("\n")
+	}
+
+	// Refactoring recommendations
+	report.WriteString("## Refactoring Recommendations\n\n")
+	report.WriteString("Based on the flow analysis:\n\n")
+
+	// Find nodes with high fan-out (decision points)
+	fanOut := make(map[string]int)
+	for _, edge := range flowGraph.Edges {
+		fanOut[edge.From]++
+	}
+
+	for nodeID, count := range fanOut {
+		if count >= 3 {
+			report.WriteString(fmt.Sprintf("- **%s** has %d outgoing transitions - consider explicit state machine\n", nodeID, count))
+		}
+	}
+
+	// Find bottlenecks
+	if flowGraph.Metrics != nil && len(flowGraph.Metrics.BottleneckNodes) > 0 {
+		report.WriteString("- Consider optimizing bottleneck nodes:\n")
+		for _, node := range flowGraph.Metrics.BottleneckNodes {
+			report.WriteString(fmt.Sprintf("  - %s\n", node))
+		}
+	}
+
+	return os.WriteFile(filename, []byte(report.String()), 0644)
+}
+
+// Helper functions for styling
+
+func getNodeColor(nodeType flow.FlowNodeType) string {
+	switch nodeType {
+	case flow.EventTrigger:
+		return "lightblue"
+	case flow.StateCheck:
+		return "lightgreen"
+	case flow.ActionNode:
+		return "lightyellow"
+	case flow.DecisionNode:
+		return "orange"
+	case flow.SyncPoint:
+		return "lightgray"
+	case flow.TerminalNode:
+		return "lightcoral"
+	default:
+		return "white"
+	}
+}
+
+func getMermaidShape(nodeType flow.FlowNodeType) [2]string {
+	switch nodeType {
+	case flow.EventTrigger:
+		return [2]string{"(", ")"} // Round
+	case flow.StateCheck:
+		return [2]string{"{", "}"} // Diamond
+	case flow.ActionNode:
+		return [2]string{"[", "]"} // Rectangle
+	case flow.DecisionNode:
+		return [2]string{"{", "}"} // Diamond
+	case flow.SyncPoint:
+		return [2]string{"[[", "]]"} // Subroutine
+	case flow.TerminalNode:
+		return [2]string{"((", "))"} // Circle
+	default:
+		return [2]string{"[", "]"} // Rectangle
+	}
+}
+
+func getMermaidClass(nodeType flow.FlowNodeType) string {
+	switch nodeType {
+	case flow.EventTrigger:
+		return "trigger"
+	case flow.StateCheck:
+		return "action"
+	case flow.ActionNode:
+		return "action"
+	case flow.DecisionNode:
+		return "decision"
+	case flow.SyncPoint:
+		return "sync"
+	case flow.TerminalNode:
+		return "terminal"
+	default:
+		return "action"
+	}
 }
