@@ -21,6 +21,11 @@ type L2 interface {
 	PayloadByNumber(context.Context, uint64) (*eth.ExecutionPayloadEnvelope, error)
 }
 
+// PendingSafeRequester provides imperative methods for pending safe requests
+type PendingSafeRequester interface {
+	RequestPendingSafeUpdateImperative(ctx context.Context, emitter event.Emitter) error
+}
+
 type AttributesHandler struct {
 	log log.Logger
 	cfg *rollup.Config
@@ -33,6 +38,7 @@ type AttributesHandler struct {
 	mu sync.Mutex
 
 	emitter event.Emitter
+	engine  PendingSafeRequester // for imperative pending safe requests
 
 	attributes     *derive.AttributesWithParent
 	sentAttributes bool
@@ -52,6 +58,23 @@ func (eq *AttributesHandler) AttachEmitter(em event.Emitter) {
 	eq.emitter = em
 }
 
+func (eq *AttributesHandler) AttachEngine(engine PendingSafeRequester) {
+	eq.engine = engine
+}
+
+// requestPendingSafeUpdate provides imperative pending safe requests with fallback for tests
+func (eq *AttributesHandler) requestPendingSafeUpdate(ctx context.Context) {
+	if eq.engine != nil {
+		if err := eq.engine.RequestPendingSafeUpdateImperative(ctx, eq.emitter); err != nil {
+			eq.log.Debug("RequestPendingSafeUpdateImperative completed with error", "error", err)
+		}
+	} else {
+		// Fallback for tests and cases where engine is not wired
+		eq.log.Debug("FALLBACK: Emitting PendingSafeRequestEvent (engine not wired)")
+		eq.emitter.Emit(ctx, engine.PendingSafeRequestEvent{})
+	}
+}
+
 func (eq *AttributesHandler) OnEvent(ctx context.Context, ev event.Event) bool {
 	// Events may be concurrent in the future. Prevent unsafe concurrent modifications to the attributes.
 	eq.mu.Lock()
@@ -65,7 +88,7 @@ func (eq *AttributesHandler) OnEvent(ctx context.Context, ev event.Event) bool {
 		eq.sentAttributes = false
 		eq.emitter.Emit(ctx, derive.ConfirmReceivedAttributesEvent{})
 		// to make sure we have a pre-state signal to process the attributes from
-		eq.emitter.Emit(ctx, engine.PendingSafeRequestEvent{})
+		eq.requestPendingSafeUpdate(ctx)
 	case rollup.ResetEvent, rollup.ForceResetEvent:
 		eq.sentAttributes = false
 		eq.attributes = nil
@@ -81,7 +104,7 @@ func (eq *AttributesHandler) OnEvent(ctx context.Context, ev event.Event) bool {
 		eq.attributes = nil
 		// Time to re-evaluate without attributes.
 		// (the pending-safe state will then be forwarded to our source of attributes).
-		eq.emitter.Emit(ctx, engine.PendingSafeRequestEvent{})
+		eq.requestPendingSafeUpdate(ctx)
 	case engine.PayloadSealExpiredErrorEvent:
 		if x.DerivedFrom == (eth.L1BlockRef{}) {
 			return true // from sequencing
@@ -98,7 +121,7 @@ func (eq *AttributesHandler) OnEvent(ctx context.Context, ev event.Event) bool {
 			"build_id", x.Info.ID, "timestamp", x.Info.Timestamp, "err", x.Err)
 		eq.sentAttributes = false
 		eq.attributes = nil
-		eq.emitter.Emit(ctx, engine.PendingSafeRequestEvent{})
+		eq.requestPendingSafeUpdate(ctx)
 	default:
 		return false
 	}

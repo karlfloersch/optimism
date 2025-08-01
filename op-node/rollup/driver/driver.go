@@ -231,8 +231,9 @@ func NewDriver(
 	}
 	sys.Register("finalizer", finalizer)
 
-	sys.Register("attributes-handler",
-		attributes.NewAttributesHandler(log, cfg, driverCtx, l2))
+	attributesHandler := attributes.NewAttributesHandler(log, cfg, driverCtx, l2)
+	attributesHandler.AttachEngine(ec) // Wire EngineController for imperative pending safe requests
+	sys.Register("attributes-handler", attributesHandler)
 
 	derivationPipeline := derive.NewDerivationPipeline(log, cfg, depSet, verifConfDepth, l1Blobs, altDA, l2, metrics, indexingMode)
 

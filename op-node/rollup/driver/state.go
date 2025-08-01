@@ -419,7 +419,9 @@ func (s *SyncDeriver) SyncStep() {
 	// Instead, we request the engine to repeat where its pending-safe head is at.
 	// Upon the pending-safe signal the attributes deriver can then ask the pipeline
 	// to generate new attributes, if no attributes are known already.
-	s.Emitter.Emit(s.Ctx, engine.PendingSafeRequestEvent{})
+	if err := s.Engine.RequestPendingSafeUpdateImperative(s.Ctx, s.Emitter); err != nil {
+		s.Log.Debug("RequestPendingSafeUpdateImperative completed with error during SyncStep", "error", err)
+	}
 
 	// If interop is configured, we have to run the engine events,
 	// to ensure cross-L2 safety is continuously verified against the interop-backend.

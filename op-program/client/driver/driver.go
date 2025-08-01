@@ -57,6 +57,7 @@ func NewDriver(logger log.Logger, cfg *rollup.Config, depSet derive.DependencySe
 		result:         eth.L2BlockRef{},
 		targetBlockNum: targetBlockNum,
 	}
+	prog.AttachEngine(ec) // Wire EngineController for imperative pending safe requests
 
 	d.deriver = &event.DeriverMux{
 		prog,
