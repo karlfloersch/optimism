@@ -424,7 +424,11 @@ func (s *SyncDeriver) SyncStep() {
 	// If interop is configured, we have to run the engine events,
 	// to ensure cross-L2 safety is continuously verified against the interop-backend.
 	if s.Config.InteropTime != nil && !s.ManagedBySupervisor {
-		s.Emitter.Emit(s.Ctx, engine.CrossUpdateRequestEvent{})
+		// 🎯 PHASE: Replace CrossUpdateRequestEvent emission with direct imperative call
+		// This fixes the broken event (empty struct did nothing) and properly triggers cross-chain updates
+		if err := s.Engine.RequestCrossUpdateImperative(s.Ctx, s.Emitter); err != nil {
+			s.Log.Debug("RequestCrossUpdate completed with error during SyncStep", "error", err)
+		}
 	}
 }
 

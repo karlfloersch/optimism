@@ -346,6 +346,33 @@ func (e *EngineStateManager) RequestForkchoiceUpdate(ctx context.Context, emitte
 	return nil
 }
 
+// RequestCrossUpdate emits cross-chain state update events to repeat the current state
+// This replaces CrossUpdateRequestEvent which was broken (empty struct did nothing)
+// Based on the comment "triggers update events to be emitted, repeating the current state"
+func (e *EngineStateManager) RequestCrossUpdate(ctx context.Context, emitter event.Emitter) error {
+	e.log.Debug("Requesting cross-chain state update imperatively (repeating current state)")
+	
+	// Emit CrossUnsafe state update
+	emitter.Emit(ctx, CrossUnsafeUpdateEvent{
+		CrossUnsafe: e.controller.CrossUnsafeL2Head(),
+		LocalUnsafe: e.controller.UnsafeL2Head(),
+	})
+	
+	// Emit CrossSafe state update  
+	emitter.Emit(ctx, CrossSafeUpdateEvent{
+		CrossSafe: e.controller.SafeL2Head(),
+		LocalSafe: e.controller.LocalSafeL2Head(),
+	})
+	
+	e.log.Debug("Cross-chain state updates emitted",
+		"cross_unsafe", e.controller.CrossUnsafeL2Head(),
+		"local_unsafe", e.controller.UnsafeL2Head(),
+		"cross_safe", e.controller.SafeL2Head(),
+		"local_safe", e.controller.LocalSafeL2Head())
+	
+	return nil
+}
+
 // 🛡️ DEFENSIVE HELPER METHODS
 
 // notifyExternalHandlers provides backward compatibility by calling external event handlers

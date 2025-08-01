@@ -487,17 +487,11 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			d.log.Debug("TryUpdateEngine completed with error during PromoteFinalized", "error", err)
 		}
 	case CrossUpdateRequestEvent:
-		if x.CrossUnsafe {
-			d.emitter.Emit(ctx, CrossUnsafeUpdateEvent{
-				CrossUnsafe: d.ec.CrossUnsafeL2Head(),
-				LocalUnsafe: d.ec.UnsafeL2Head(),
-			})
-		}
-		if x.CrossSafe {
-			d.emitter.Emit(ctx, CrossSafeUpdateEvent{
-				CrossSafe: d.ec.SafeL2Head(),
-				LocalSafe: d.ec.LocalSafeL2Head(),
-			})
+		// 🎯 PHASE: Replace with EngineStateManager imperative call
+		// This fixes the broken CrossUpdateRequestEvent (empty struct did nothing)
+		// and properly emits both CrossUnsafe and CrossSafe update events
+		if err := d.engineStateManager.RequestCrossUpdate(ctx, d.emitter); err != nil {
+			d.log.Debug("RequestCrossUpdate completed with error", "error", err)
 		}
 	case InteropInvalidateBlockEvent:
 		d.emitter.Emit(ctx, BuildStartEvent{Attributes: x.Attributes})

@@ -102,6 +102,8 @@ type EngineController interface {
 	TryUpdateEngine(ctx context.Context) error
 	// TryUpdateEngineImperative provides imperative engine updates instead of event emissions
 	TryUpdateEngineImperative(ctx context.Context) error
+	// RequestCrossUpdateImperative provides imperative cross-chain updates instead of CrossUpdateRequestEvent
+	RequestCrossUpdateImperative(ctx context.Context, emitter event.Emitter) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
 }
 

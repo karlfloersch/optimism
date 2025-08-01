@@ -468,6 +468,53 @@ func TestEngineStateManager_RequestForkchoiceUpdate_Success(t *testing.T) {
 	}
 }
 
+func TestEngineStateManager_RequestCrossUpdate_Success(t *testing.T) {
+	// Create mock controller with test data
+	mockController := &MockEngineController{
+		crossUnsafeL2Head: eth.L2BlockRef{Hash: common.HexToHash("0x1234"), Number: 100},
+		unsafeL2Head:      eth.L2BlockRef{Hash: common.HexToHash("0x5678"), Number: 101},
+		safeL2Head:        eth.L2BlockRef{Hash: common.HexToHash("0x9abc"), Number: 98},
+		localSafeL2Head:   eth.L2BlockRef{Hash: common.HexToHash("0xdef0"), Number: 97},
+		config:            &rollup.Config{L2ChainID: big.NewInt(1)},
+	}
+
+	// Create state manager
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+
+	// Create a mock emitter to capture emitted events
+	emittedEvents := []event.Event{}
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+
+	// Call RequestCrossUpdate
+	ctx := context.Background()
+	err := stateManager.RequestCrossUpdate(ctx, mockEmitter)
+
+	// Validate result - should emit both CrossUnsafe and CrossSafe events (fixes broken CrossUpdateRequestEvent)
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 2, "Should emit exactly two events: CrossUnsafeUpdateEvent and CrossSafeUpdateEvent")
+
+	// Validate the first event is CrossUnsafeUpdateEvent
+	if crossUnsafeEvent, ok := emittedEvents[0].(CrossUnsafeUpdateEvent); ok {
+		require.Equal(t, mockController.crossUnsafeL2Head, crossUnsafeEvent.CrossUnsafe)
+		require.Equal(t, mockController.unsafeL2Head, crossUnsafeEvent.LocalUnsafe)
+	} else {
+		t.Fatalf("Expected CrossUnsafeUpdateEvent as first event, got %T", emittedEvents[0])
+	}
+
+	// Validate the second event is CrossSafeUpdateEvent
+	if crossSafeEvent, ok := emittedEvents[1].(CrossSafeUpdateEvent); ok {
+		require.Equal(t, mockController.safeL2Head, crossSafeEvent.CrossSafe)
+		require.Equal(t, mockController.localSafeL2Head, crossSafeEvent.LocalSafe)
+	} else {
+		t.Fatalf("Expected CrossSafeUpdateEvent as second event, got %T", emittedEvents[1])
+	}
+}
+
 // MockEmitter for testing event emissions
 type MockEmitter struct {
 	EmitFunc func(ctx context.Context, ev event.Event)
