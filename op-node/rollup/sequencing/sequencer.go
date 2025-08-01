@@ -169,6 +169,10 @@ func (d *Sequencer) AttachEmitter(em event.Emitter) {
 // requestForkchoiceUpdate makes an imperative forkchoice request, with event fallback for tests
 func (d *Sequencer) requestForkchoiceUpdate(ctx context.Context) {
 	if d.engineRequester == nil {
+		// FALLBACK: This event emission exists solely for unit test compatibility.
+		// In production, engineRequester is always non-nil and uses imperative calls.
+		// In tests, engineRequester is nil, so we fall back to ForkchoiceRequestEvent
+		// to maintain existing test expectations and enable proper mocking.
 		d.log.Debug("Sequencer engineRequester is nil - falling back to ForkchoiceRequestEvent emission for test compatibility")
 		d.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
 		return

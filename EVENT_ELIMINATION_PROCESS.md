@@ -180,6 +180,33 @@ grep "PASS\|FAIL" validation.log
 // Update to test imperative methods directly
 ```
 
+#### 5.4 Test Fallbacks (When Needed)
+If unit tests break because they rely on event-driven behavior that can't be easily mocked imperatively, consider adding a **test-only fallback**:
+
+```go
+func (d *Component) requestSomeOperation(ctx context.Context) {
+    if d.operationRequester == nil {
+        // FALLBACK: This event emission exists solely for unit test compatibility.
+        // In production, operationRequester is always non-nil and uses imperative calls.
+        // In tests, operationRequester is nil, so we fall back to the old event
+        // to maintain existing test expectations and enable proper mocking.
+        d.log.Debug("Component operationRequester is nil - falling back to SomeEvent emission for test compatibility")
+        d.emitter.Emit(ctx, engine.SomeEvent{})
+        return
+    }
+    // Production imperative call
+    if err := d.operationRequester.RequestSomeOperationImperative(ctx, d.emitter); err != nil {
+        d.log.Debug("Imperative operation request completed with error", "error", err)
+    }
+}
+```
+
+**When to use fallbacks:**
+- ✅ Complex chaos tests or simulations that heavily rely on event-driven behavior
+- ✅ Legacy tests where refactoring to imperatives would be disproportionately complex
+- ❌ Regular unit tests (prefer updating them to use imperative interfaces)
+- ❌ Production code paths (should always use imperative approach)
+
 ### Phase 6: Cleanup & Documentation 📚
 
 #### 6.1 Remove Fallbacks (Recommended)
