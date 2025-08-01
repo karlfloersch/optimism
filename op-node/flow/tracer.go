@@ -33,6 +33,14 @@ type FlowTracer struct {
 
 	// 🚀 NEW: Static code analysis mapping
 	staticCodeMap map[string]*StaticEventMapping
+	// Track real producer-consumer relationships from code analysis
+	realProducers map[string][]string // event_name -> [file:line, file:line]
+	realConsumers map[string][]string // event_name -> [handler_func, handler_func]
+
+	// 🎯 NEW: Causal Event Chain Tracking
+	eventRegistry   map[uint64]*CapturedEvent // emitContext -> CapturedEvent (for quick lookup)
+	callTraceDepths map[uint64]int            // emitContext -> depth in call chain
+	rootEvents      []uint64                  // Events that started call chains (no parent)
 }
 
 // StaticEventMapping represents what we learned from static code analysis
@@ -66,6 +74,13 @@ type CapturedEvent struct {
 	ConsumedData []string               `json:"consumed_data,omitempty"` // What data this event reads
 	StateChanges map[string]interface{} `json:"state_changes,omitempty"` // System state changes
 	DataflowID   string                 `json:"dataflow_id,omitempty"`   // Groups related data flows
+
+	// 🎯 NEW: Causal Event Chain Tracing
+	ParentEventID   uint64   `json:"parent_event_id,omitempty"`   // What event triggered this deriver?
+	ParentEventName string   `json:"parent_event_name,omitempty"` // Name of the triggering event
+	ChildEventIDs   []uint64 `json:"child_event_ids,omitempty"`   // What events did this trigger?
+	CallTraceDepth  int      `json:"call_trace_depth,omitempty"`  // How deep in the call chain are we?
+	CallTracePath   []string `json:"call_trace_path,omitempty"`   // Full path: ["EventA", "EventB", "EventC"]
 }
 
 // TracingStats tracks tracer performance and completeness
@@ -75,7 +90,7 @@ type TracingStats struct {
 	Correlations         int
 	UniquePatterns       int
 	ProcessingTime       time.Duration
-	MissingEventMappings int  // 🚨 Count events without static analysis
+	MissingEventMappings int // 🚨 Count events without static analysis
 }
 
 // NewFlowTracer creates a new flow tracer
@@ -93,6 +108,14 @@ func NewFlowTracer() *FlowTracer {
 		outputDir:    outputDir,
 		autoSave:     os.Getenv("OP_NODE_FLOW_AUTOSAVE") == "true",
 		flushOnExit:  true,
+		// Initialize static code analysis
+		staticCodeMap: make(map[string]*StaticEventMapping),
+		realProducers: make(map[string][]string),
+		realConsumers: make(map[string][]string),
+		// 🎯 Initialize causal chain tracking
+		eventRegistry:   make(map[uint64]*CapturedEvent),
+		callTraceDepths: make(map[uint64]int),
+		rootEvents:      make([]uint64, 0),
 	}
 }
 
@@ -106,6 +129,14 @@ func NewFlowTracerWithOptions(outputDir string, autoSave bool) *FlowTracer {
 		outputDir:    outputDir,
 		autoSave:     autoSave,
 		flushOnExit:  true,
+		// Initialize static code analysis
+		staticCodeMap: make(map[string]*StaticEventMapping),
+		realProducers: make(map[string][]string),
+		realConsumers: make(map[string][]string),
+		// 🎯 Initialize causal chain tracking
+		eventRegistry:   make(map[uint64]*CapturedEvent),
+		callTraceDepths: make(map[uint64]int),
+		rootEvents:      make([]uint64, 0),
 	}
 }
 
@@ -162,6 +193,21 @@ func (ft *FlowTracer) OnEmit(name string, ev event.AnnotatedEvent, derivContext 
 	eventData, producedData, consumedData, stateChanges := ft.analyzeEventDataFlow(ev.Event, name)
 	dataflowID := ft.generateDataflowID(ev.Event, derivContext)
 
+	// 🎯 CONTEXT-BASED: Extract causal chain from context
+	causalChain := event.GetCausalChain(ev.Ctx)
+	var parentEventID uint64
+	var parentEventName string
+	var callDepth int
+	var callPath []string
+
+	if causalChain != nil {
+		parentEventID = causalChain.ParentEmitContext
+		parentEventName = causalChain.ParentEventName
+		callDepth = causalChain.CausalDepth
+		callPath = make([]string, len(causalChain.CausalPath))
+		copy(callPath, causalChain.CausalPath)
+	}
+
 	// Track emit event
 	captured := CapturedEvent{
 		EmitContext:  ev.EmitContext,
@@ -175,6 +221,25 @@ func (ft *FlowTracer) OnEmit(name string, ev event.AnnotatedEvent, derivContext 
 		ConsumedData: consumedData,
 		StateChanges: stateChanges,
 		DataflowID:   dataflowID,
+		// 🎯 Context-based causal chain tracking
+		ParentEventID:   parentEventID,
+		ParentEventName: parentEventName,
+		CallTraceDepth:  callDepth,
+		CallTracePath:   callPath,
+	}
+
+	// Register this event for future parent lookups
+	ft.eventRegistry[ev.EmitContext] = &captured
+	ft.callTraceDepths[ev.EmitContext] = callDepth
+
+	// Update parent event's child list (if it has a parent)
+	if parentEventID != 0 {
+		if parentEvent, exists := ft.eventRegistry[parentEventID]; exists {
+			parentEvent.ChildEventIDs = append(parentEvent.ChildEventIDs, ev.EmitContext)
+		}
+	} else {
+		// This is a root event (no parent)
+		ft.rootEvents = append(ft.rootEvents, ev.EmitContext)
 	}
 
 	ft.events = append(ft.events, captured)
@@ -417,7 +482,7 @@ func (ft *FlowTracer) inferDataDependencies(eventName, deriverName string) (prod
 		ft.recordMissingEventAnalysis(eventName, deriverName)
 		return []string{}, []string{} // Return empty - no guessing allowed!
 	}
-	
+
 	return staticMapping.Produced, staticMapping.Consumed
 }
 
@@ -483,7 +548,7 @@ func (ft *FlowTracer) recordMissingEventAnalysis(eventName, deriverName string) 
 	// NOTE: This assumes the caller already holds ft.mu.Lock()
 	// Track missing events for systematic analysis coverage
 	ft.stats.MissingEventMappings++
-	
+
 	// TODO: Later we can log these or store them to guide our static analysis
 	// For now, we silently track them in stats
 }
@@ -500,6 +565,12 @@ func (ft *FlowTracer) getStaticCodeMapping(eventName string) *StaticEventMapping
 
 // initializeStaticCodeMap populates the static analysis results from actual code parsing
 func (ft *FlowTracer) initializeStaticCodeMap() {
+	// 🚀 NEW: First try to parse actual code, fallback to hardcoded mappings
+	if ft.parseRealCodeMappings() {
+		return // Using real static code analysis
+	}
+
+	// FALLBACK: Current hardcoded mappings (eventually will be replaced)
 	ft.staticCodeMap = map[string]*StaticEventMapping{
 		// 📚 REAL DATA from payload_process.go analysis
 		"payload-process": {
@@ -593,4 +664,144 @@ func (ft *FlowTracer) initializeStaticCodeMap() {
 			},
 		},
 	}
+}
+
+// 🚀 NEW: Parse actual Go code to extract real producer-consumer relationships
+func (ft *FlowTracer) parseRealCodeMappings() bool {
+	// Try to run the static analyzer on the op-node rollup code
+	analyzer := NewStaticAnalyzer()
+
+	// Find the correct path to rollup directory
+	rollupPath := ft.findRollupDirectory()
+	if rollupPath == "" {
+		return false // Fall back to hardcoded mappings
+	}
+
+	err := analyzer.AnalyzeDirectory(rollupPath)
+	if err != nil {
+		// If analysis fails, fall back to hardcoded mappings
+		return false
+	}
+
+	// Convert analyzer results to our static mappings
+	ft.staticCodeMap = analyzer.BuildEventMappings()
+
+	// Extract producer/consumer info for debugging
+	ft.realProducers = make(map[string][]string)
+	ft.realConsumers = make(map[string][]string)
+
+	for eventType, producers := range analyzer.producers {
+		for _, producer := range producers {
+			ft.realProducers[eventType] = append(ft.realProducers[eventType],
+				fmt.Sprintf("%s:%d", producer.File, producer.Line))
+		}
+	}
+
+	for eventType, consumers := range analyzer.consumers {
+		for _, consumer := range consumers {
+			ft.realConsumers[eventType] = append(ft.realConsumers[eventType],
+				fmt.Sprintf("%s.%s", consumer.ReceiverType, consumer.HandlerFunc))
+		}
+	}
+
+	// Print results for debugging
+	analyzer.PrintResults()
+
+	return len(ft.staticCodeMap) > 0
+}
+
+// findRollupDirectory locates the op-node/rollup directory from various possible locations
+func (ft *FlowTracer) findRollupDirectory() string {
+	possiblePaths := []string{
+		"../rollup",                  // From op-node/flow/
+		"rollup",                     // From op-node/
+		"../../op-node/rollup",       // From op-devstack/
+		"../../../rollup",            // From op-node/flow/cmd/
+		"../../../../op-node/rollup", // From op-node/flow/cmd/static_analyzer/
+	}
+
+	for _, path := range possiblePaths {
+		if ft.directoryExists(path) {
+			return path
+		}
+	}
+
+	return "" // Not found
+}
+
+// directoryExists checks if a directory exists
+func (ft *FlowTracer) directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// extractRealProducers scans all Go files for emitter.Emit() calls
+func (ft *FlowTracer) extractRealProducers() map[string][]string {
+	// TODO: Walk through op-node/rollup/**/*.go files
+	// TODO: Parse Go AST and find all emitter.Emit() calls
+	// TODO: Return map[event_name] -> [file:line, file:line, ...]
+
+	// EXAMPLE of what this would return:
+	return map[string][]string{
+		"PayloadProcessEvent":   {"build_sealed.go:30"},
+		"PayloadSuccessEvent":   {"payload_process.go:54"},
+		"ForkchoiceUpdateEvent": {"engine_controller.go:363", "engine_controller.go:463"},
+		"TryUpdateEngineEvent":  {"payload_success.go:43", "payload_success.go:60"},
+	}
+}
+
+// extractRealConsumers scans all Go files for OnEvent() handlers
+func (ft *FlowTracer) extractRealConsumers() map[string][]string {
+	// TODO: Walk through op-node/rollup/**/*.go files
+	// TODO: Parse Go AST and find all OnEvent() switch statements
+	// TODO: Return map[event_name] -> [handler_func, handler_func, ...]
+
+	// EXAMPLE of what this would return:
+	return map[string][]string{
+		"PayloadSuccessEvent":   {"Sequencer.onPayloadSuccess", "AttributesHandler.onPayloadSuccess"},
+		"ForkchoiceUpdateEvent": {"Sequencer.onForkchoiceUpdate", "CLSync.onForkchoiceUpdate"},
+		"BuildStartedEvent":     {"Sequencer.onBuildStarted"},
+	}
+}
+
+// 🎯 NEW: Build causal event chain relationships
+func (ft *FlowTracer) buildCausalChain(derivContext uint64) (parentEventID uint64, parentEventName string, callDepth int, callPath []string) {
+	// If derivContext is 0, this is a root event (no parent)
+	if derivContext == 0 {
+		return 0, "", 0, []string{}
+	}
+
+	// Find the parent event by looking for an event with emitContext == derivContext
+	parentEvent, exists := ft.eventRegistry[derivContext]
+	if !exists {
+		// Parent not found - treat as root event
+		return 0, "", 0, []string{}
+	}
+
+	// Found parent event!
+	parentEventID = derivContext
+	parentEventName = parentEvent.EventName
+
+	// Build call trace by following the chain back to root
+	callPath = make([]string, 0)
+	callDepth = 0
+	currentEvent := parentEvent
+
+	// Walk back through the chain to build full path
+	for currentEvent != nil {
+		callPath = append([]string{currentEvent.EventName}, callPath...) // Prepend to build correct order
+		callDepth++
+
+		// Move to parent's parent
+		if currentEvent.ParentEventID == 0 {
+			break // Reached root
+		}
+
+		currentEvent = ft.eventRegistry[currentEvent.ParentEventID]
+		if currentEvent == nil {
+			break // Safety check
+		}
+	}
+
+	return parentEventID, parentEventName, callDepth, callPath
 }

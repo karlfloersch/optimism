@@ -18,10 +18,114 @@ import (
 )
 
 type eventTraceKeyType struct{}
+type causalChainKeyType struct{}
 
 var (
-	ctxKeyEventTrace = eventTraceKeyType{}
+	ctxKeyEventTrace  = eventTraceKeyType{}
+	ctxKeyCausalChain = causalChainKeyType{}
 )
+
+// CausalChain tracks event causality for full callstack tracing
+type CausalChain struct {
+	ParentEmitContext  uint64   // What event caused this one
+	ParentEventName    string   // Name of parent event
+	CausalPath         []string // Full path: [EventA, EventB, EventC]
+	CausalDepth        int      // Depth in call chain
+	CurrentEmitContext uint64   // Current event being processed
+	CurrentEventName   string   // Current event name
+}
+
+// setupProcessingContext enhances event processing context with causal info
+func setupProcessingContext(ctx context.Context, eventName string, emitContext uint64) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	parent := getCausalChain(ctx)
+	var newChain *CausalChain
+
+	if parent == nil {
+		// Root event - start new chain
+		newChain = &CausalChain{
+			ParentEmitContext:  0,
+			ParentEventName:    "",
+			CausalPath:         []string{eventName},
+			CausalDepth:        0,
+			CurrentEmitContext: emitContext,
+			CurrentEventName:   eventName,
+		}
+	} else {
+		// Extend existing chain
+		newPath := make([]string, len(parent.CausalPath)+1)
+		copy(newPath, parent.CausalPath)
+		newPath[len(newPath)-1] = eventName
+
+		newChain = &CausalChain{
+			ParentEmitContext:  parent.CurrentEmitContext,
+			ParentEventName:    parent.CurrentEventName,
+			CausalPath:         newPath,
+			CausalDepth:        parent.CausalDepth + 1,
+			CurrentEmitContext: emitContext,
+			CurrentEventName:   eventName,
+		}
+	}
+
+	return context.WithValue(ctx, ctxKeyCausalChain, newChain)
+}
+
+// prepareEmissionContext prepares context for emitting new events
+func prepareEmissionContext(processingCtx context.Context, newEventName string, newEmitContext uint64) context.Context {
+	if processingCtx == nil {
+		processingCtx = context.Background()
+	}
+
+	parent := getCausalChain(processingCtx)
+	if parent == nil {
+		// Root emission
+		newChain := &CausalChain{
+			ParentEmitContext:  0,
+			ParentEventName:    "",
+			CausalPath:         []string{newEventName},
+			CausalDepth:        0,
+			CurrentEmitContext: newEmitContext,
+			CurrentEventName:   newEventName,
+		}
+		return context.WithValue(processingCtx, ctxKeyCausalChain, newChain)
+	}
+
+	// Build child chain
+	newPath := make([]string, len(parent.CausalPath)+1)
+	copy(newPath, parent.CausalPath)
+	newPath[len(newPath)-1] = newEventName
+
+	newChain := &CausalChain{
+		ParentEmitContext:  parent.CurrentEmitContext,
+		ParentEventName:    parent.CurrentEventName,
+		CausalPath:         newPath,
+		CausalDepth:        parent.CausalDepth + 1,
+		CurrentEmitContext: newEmitContext,
+		CurrentEventName:   newEventName,
+	}
+
+	return context.WithValue(processingCtx, ctxKeyCausalChain, newChain)
+}
+
+// GetCausalChain extracts causal chain from context (exported for tracers)
+func GetCausalChain(ctx context.Context) *CausalChain {
+	if ctx == nil {
+		return nil
+	}
+	chain, ok := ctx.Value(ctxKeyCausalChain).(*CausalChain)
+	if !ok {
+		return nil
+	}
+	return chain
+}
+
+// getCausalChain is the internal version
+func getCausalChain(ctx context.Context) *CausalChain {
+	return GetCausalChain(ctx)
+}
 
 type eventTrace struct {
 	UUID string
@@ -173,7 +277,11 @@ func (r *systemActor) RunEvent(ev AnnotatedEvent) {
 	prev := r.currentEvent
 	start := time.Now()
 	r.currentEvent = r.sys.recordDerivStart(r.name, ev, start)
-	effect := r.deriv.OnEvent(ev.Ctx, ev.Event)
+
+	// 🎯 MINIMAL CHANGE 1: Enhance context with causal information
+	enhancedCtx := setupProcessingContext(ev.Ctx, ev.Event.String(), ev.EmitContext)
+
+	effect := r.deriv.OnEvent(enhancedCtx, ev.Event)
 	elapsed := time.Since(start)
 	r.sys.recordDerivEnd(r.name, ev, r.currentEvent, start, elapsed, effect)
 	r.currentEvent = prev
@@ -356,8 +464,12 @@ func (s *Sys) recordEmit(name string, ev AnnotatedEvent, derivContext uint64, em
 // The name of the emitter is provided to further contextualize the event.
 func (s *Sys) emit(name string, derivContext uint64, ctx context.Context, ev Event, emitPriority Priority) {
 	emitContext := s.emitContext.Add(1)
+
+	// 🎯 MINIMAL CHANGE 2: Prepare emission context with causal chain
+	emissionCtx := prepareEmissionContext(ctx, ev.String(), emitContext)
+
 	annotated := AnnotatedEvent{
-		Ctx:          ctx,
+		Ctx:          emissionCtx,
 		Event:        ev,
 		EmitContext:  emitContext,
 		EmitPriority: emitPriority,

@@ -83,6 +83,9 @@ func analyzeTrace(filename string) error {
 		generateGraphOutputs(flowGraph, filename)
 	}
 
+	// 🎯 NEW: Generate causal event chain analysis
+	printCallTraceAnalysis(trace.Events)
+
 	printCompletenessAnalysis(trace)
 
 	return nil
@@ -699,4 +702,109 @@ func getMermaidClass(nodeType flow.FlowNodeType) string {
 	default:
 		return "action"
 	}
+}
+
+// 🎯 NEW: Print causal event chain analysis
+func printCallTraceAnalysis(events []flow.CapturedEvent) {
+	fmt.Println("🎯 CAUSAL EVENT CHAIN ANALYSIS")
+
+	// Find root events (events with no parent)
+	rootEvents := make([]flow.CapturedEvent, 0)
+	eventsByDepth := make(map[int][]flow.CapturedEvent)
+	maxDepth := 0
+
+	for _, event := range events {
+		if event.ParentEventID == 0 {
+			rootEvents = append(rootEvents, event)
+		}
+
+		depth := event.CallTraceDepth
+		eventsByDepth[depth] = append(eventsByDepth[depth], event)
+		if depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+
+	fmt.Printf("   📍 Root Events (call chain starters): %d\n", len(rootEvents))
+	fmt.Printf("   🌳 Maximum Call Chain Depth: %d\n", maxDepth)
+	fmt.Printf("   📊 Events by Depth:\n")
+
+	for depth := 0; depth <= maxDepth; depth++ {
+		if eventsAtDepth, exists := eventsByDepth[depth]; exists {
+			fmt.Printf("      Depth %d: %d events\n", depth, len(eventsAtDepth))
+		}
+	}
+
+	fmt.Println()
+
+	// Show sample call chains
+	fmt.Println("🔗 SAMPLE CALL CHAINS:")
+
+	sampleCount := 0
+	maxSamples := 5
+
+	for _, event := range events {
+		if len(event.CallTracePath) > 2 && sampleCount < maxSamples { // Show interesting chains
+			fmt.Printf("   📋 Chain %d (depth %d):\n", sampleCount+1, event.CallTraceDepth)
+			fmt.Printf("      Path: %s\n", strings.Join(event.CallTracePath, " → "))
+			fmt.Printf("      Final Event: %s (ID: %d)\n", event.EventName, event.EmitContext)
+			fmt.Printf("      Parent: %s (ID: %d)\n", event.ParentEventName, event.ParentEventID)
+			if len(event.ChildEventIDs) > 0 {
+				fmt.Printf("      Children: %d events\n", len(event.ChildEventIDs))
+			}
+			fmt.Println()
+			sampleCount++
+		}
+	}
+
+	if sampleCount == 0 {
+		fmt.Println("   No complex call chains found (all events may be root events)")
+	}
+
+	// Show most common call patterns
+	fmt.Println("📈 MOST COMMON CALL PATTERNS:")
+	pathCounts := make(map[string]int)
+
+	for _, event := range events {
+		if len(event.CallTracePath) > 1 {
+			pathKey := strings.Join(event.CallTracePath, " → ")
+			pathCounts[pathKey]++
+		}
+	}
+
+	// Sort by frequency
+	type pathFreq struct {
+		path  string
+		count int
+	}
+
+	var sortedPaths []pathFreq
+	for path, count := range pathCounts {
+		sortedPaths = append(sortedPaths, pathFreq{path, count})
+	}
+
+	// Simple sort by count (descending)
+	for i := 0; i < len(sortedPaths)-1; i++ {
+		for j := i + 1; j < len(sortedPaths); j++ {
+			if sortedPaths[j].count > sortedPaths[i].count {
+				sortedPaths[i], sortedPaths[j] = sortedPaths[j], sortedPaths[i]
+			}
+		}
+	}
+
+	// Show top patterns
+	showCount := 10
+	if len(sortedPaths) < showCount {
+		showCount = len(sortedPaths)
+	}
+
+	for i := 0; i < showCount; i++ {
+		fmt.Printf("   %d. %s (occurred %d times)\n", i+1, sortedPaths[i].path, sortedPaths[i].count)
+	}
+
+	if len(sortedPaths) == 0 {
+		fmt.Println("   No call patterns found")
+	}
+
+	fmt.Println()
 }
