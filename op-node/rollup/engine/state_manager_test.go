@@ -593,13 +593,13 @@ func TestEngineStateManager_PromoteCrossUnsafe_Success(t *testing.T) {
 		unsafeL2Head: eth.L2BlockRef{Hash: common.HexToHash("0x5678"), Number: 101},
 		config:       &rollup.Config{L2ChainID: big.NewInt(1)},
 	}
-	
+
 	logger := testlog.Logger(t, log.LevelDebug)
 	stateManager := NewEngineStateManager(mockController, logger)
-	
+
 	// Create test data
 	crossUnsafeRef := eth.L2BlockRef{Hash: common.HexToHash("0xabcd"), Number: 100}
-	
+
 	// Create a mock emitter to capture emitted events
 	emittedEvents := []event.Event{}
 	mockEmitter := &MockEmitter{
@@ -607,15 +607,15 @@ func TestEngineStateManager_PromoteCrossUnsafe_Success(t *testing.T) {
 			emittedEvents = append(emittedEvents, ev)
 		},
 	}
-	
+
 	// Call PromoteCrossUnsafe
 	ctx := context.Background()
 	err := stateManager.PromoteCrossUnsafe(ctx, crossUnsafeRef, mockEmitter)
-	
+
 	// Validate result - should update state and emit CrossUnsafeUpdateEvent
 	require.NoError(t, err)
 	require.Len(t, emittedEvents, 1, "Should emit exactly one CrossUnsafeUpdateEvent")
-	
+
 	// Validate the emitted event is CrossUnsafeUpdateEvent with correct data
 	if crossUnsafeEvent, ok := emittedEvents[0].(CrossUnsafeUpdateEvent); ok {
 		require.Equal(t, crossUnsafeRef, crossUnsafeEvent.CrossUnsafe)
@@ -623,7 +623,7 @@ func TestEngineStateManager_PromoteCrossUnsafe_Success(t *testing.T) {
 	} else {
 		t.Fatalf("Expected CrossUnsafeUpdateEvent, got %T", emittedEvents[0])
 	}
-	
+
 	// Validate that SetCrossUnsafeHead was called on the controller
 	require.True(t, mockController.setCrossUnsafeHeadCalled, "SetCrossUnsafeHead should have been called")
 	require.Equal(t, crossUnsafeRef, mockController.setCrossUnsafeHeadArg, "SetCrossUnsafeHead should have been called with correct argument")

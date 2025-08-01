@@ -282,7 +282,7 @@ func (m *IndexingMode) UpdateCrossUnsafe(ctx context.Context, id eth.BlockID) er
 	if err != nil {
 		return fmt.Errorf("failed to get L2BlockRef: %w", err)
 	}
-	
+
 	// 🎯 PHASE: Replace PromoteCrossUnsafeEvent emission with imperative call
 	if m.engine != nil {
 		if err := m.engine.PromoteCrossUnsafeImperative(ctx, l2Ref, m.emitter); err != nil {
@@ -295,7 +295,7 @@ func (m *IndexingMode) UpdateCrossUnsafe(ctx context.Context, id eth.BlockID) er
 			Ref: l2Ref,
 		})
 	}
-	
+
 	// We return early: there is no point waiting for the cross-unsafe engine-update synchronously.
 	// All error-feedback comes to the supervisor by aborting derivation tasks with an error.
 	return nil

@@ -394,16 +394,16 @@ func (e *EngineStateManager) InvalidateBlock(ctx context.Context, invalidated et
 // This replaces the state update + re-emission pattern: PromoteCrossUnsafeEvent -> CrossUnsafeUpdateEvent
 func (e *EngineStateManager) PromoteCrossUnsafe(ctx context.Context, ref eth.L2BlockRef, emitter event.Emitter) error {
 	e.log.Debug("Processing cross-unsafe promotion imperatively", "ref", ref)
-	
+
 	// Original logic: update cross unsafe head state
 	e.controller.SetCrossUnsafeHead(ref)
-	
+
 	// Original logic: emit CrossUnsafeUpdateEvent with current state
 	emitter.Emit(ctx, CrossUnsafeUpdateEvent{
 		CrossUnsafe: ref,
 		LocalUnsafe: e.controller.UnsafeL2Head(),
 	})
-	
+
 	e.log.Debug("Cross-unsafe promotion completed", "cross_unsafe", ref, "local_unsafe", e.controller.UnsafeL2Head())
 	return nil
 }
