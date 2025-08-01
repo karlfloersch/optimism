@@ -319,6 +319,10 @@ func NewEngDeriver(log log.Logger, ctx context.Context, cfg *rollup.Config,
 	// This replaces the massive switch statement with clean, focused methods
 	controllerAdapter := NewEngineControllerAdapter(ec, cfg)
 	engineStateManager := NewEngineStateManager(controllerAdapter, log)
+	
+	// 🎯 PHASE 2A+: Wire EngineStateManager into EngineController for external access
+	// This enables driver/state.go to call TryUpdateEngine imperatively
+	ec.SetEngineStateManager(engineStateManager)
 
 	log.Info("EngDeriver initialized with EngineStateManager", "strict_mode", true, "target_events", "TryUpdateEngine,ProcessUnsafePayload")
 

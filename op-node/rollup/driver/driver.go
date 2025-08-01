@@ -100,6 +100,8 @@ type EngineController interface {
 	IsEngineSyncing() bool
 	InsertUnsafePayload(ctx context.Context, payload *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
 	TryUpdateEngine(ctx context.Context) error
+	// TryUpdateEngineImperative provides imperative engine updates instead of event emissions
+	TryUpdateEngineImperative(ctx context.Context) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
 }
 

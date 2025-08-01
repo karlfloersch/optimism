@@ -268,7 +268,7 @@ func TestEngineStateManager_ProcessUnsafePayload_SkipDuplicate(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	sameHash := [32]byte{1}
 
-	// Create a basic mock config  
+	// Create a basic mock config
 	mockConfig := &rollup.Config{
 		// Using nil config for now - the test will focus on error handling
 	}

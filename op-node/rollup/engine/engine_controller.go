@@ -82,6 +82,9 @@ type EngineController struct {
 
 	// 🎯 ForkchoiceController for imperative forkchoice handling instead of events
 	forkchoiceController ForkchoiceController
+	
+	// 🎯 EngineStateManager for imperative engine operations instead of events
+	engineStateManager *EngineStateManager
 
 	// To lock the engine RPC usage, such that components like the API, which need direct access, can protect their access.
 	mu gosync.RWMutex
@@ -148,6 +151,24 @@ func NewEngineController(engine ExecEngine, log log.Logger, metrics ECMetrics,
 func (e *EngineController) SetForkchoiceController(controller ForkchoiceController) {
 	e.forkchoiceController = controller
 	e.log.Info("ForkchoiceController integrated into EngineController", "replacing_events", "ForkchoiceUpdateEvent")
+}
+
+// SetEngineStateManager sets the EngineStateManager for imperative engine operations
+// This enables external components to call engine operations directly instead of emitting events
+func (e *EngineController) SetEngineStateManager(manager *EngineStateManager) {
+	e.engineStateManager = manager
+	e.log.Info("EngineStateManager integrated into EngineController", "replacing_events", "TryUpdateEngineEvent")
+}
+
+// TryUpdateEngineImperative provides a bridge to call EngineStateManager.TryUpdateEngine() directly
+// This replaces TryUpdateEngineEvent emissions with synchronous imperative calls
+func (e *EngineController) TryUpdateEngineImperative(ctx context.Context) error {
+	if e.engineStateManager != nil {
+		// Use the imperative EngineStateManager approach
+		return e.engineStateManager.TryUpdateEngine(ctx)
+	}
+	// Fallback to the original method if EngineStateManager is not set
+	return e.TryUpdateEngine(ctx)
 }
 
 // State Getters

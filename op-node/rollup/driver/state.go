@@ -397,7 +397,11 @@ func (s *SyncDeriver) SyncStep() {
 
 	s.tryBackupUnsafeReorg()
 
-	s.Emitter.Emit(s.Ctx, engine.TryUpdateEngineEvent{})
+	// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct imperative call
+	// This completes 100% TryUpdateEngine elimination (final emission site)
+	if err := s.Engine.TryUpdateEngineImperative(s.Ctx); err != nil {
+		s.Log.Debug("TryUpdateEngine completed with error during SyncStep", "error", err)
+	}
 
 	if s.Engine.IsEngineSyncing() {
 		// The pipeline cannot move forwards if doing EL sync.
