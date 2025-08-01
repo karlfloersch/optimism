@@ -270,11 +270,11 @@ func NewDriver(
 	// 🎯 FORKCHOICE CONTROLLER INTEGRATION: Replace event-driven forkchoice with imperative calls
 	// This eliminates 375x ForkchoiceUpdateEvent emissions and replaces them with direct synchronous calls
 	var forkchoiceHandlers []controllers.ForkchoiceHandler
-	
+
 	// Add adapters for all forkchoice consumers
 	forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewStatusTrackerForkchoiceAdapter(statusTracker))
 	forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewCLSyncForkchoiceAdapter(clSync))
-	
+
 	// Type-assert finalizer to concrete type for adapter
 	if concreteFinalizer, ok := finalizer.(*finality.Finalizer); ok {
 		forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewFinalizerForkchoiceAdapter(concreteFinalizer))
@@ -284,7 +284,7 @@ func NewDriver(
 		log.Debug("AltDAFinalizer detected, skipping forkchoice adapter (not implemented yet)", "type", "AltDAFinalizer")
 		_ = altDAFinalizer // Avoid unused variable warning
 	}
-	
+
 	// Add sequencer adapter only if sequencer is enabled and not disabled
 	if driverCfg.SequencerEnabled {
 		if concreteSequencer, ok := sequencer.(*sequencing.Sequencer); ok {
@@ -294,14 +294,14 @@ func NewDriver(
 			forkchoiceHandlers = append(forkchoiceHandlers, controllers.NewL1OriginSelectorForkchoiceAdapter(findL1Origin))
 		}
 	}
-	
+
 	// Create the ForkchoiceController with all handlers
 	forkchoiceController := controllers.NewForkchoiceController(log, forkchoiceHandlers...)
 	log.Info("ForkchoiceController initialized", "handlers", len(forkchoiceHandlers), "replacing_events", "ForkchoiceUpdateEvent")
-	
+
 	// Create adapter to bridge between controllers.ForkchoiceController and engine.ForkchoiceController
 	forkchoiceAdapter := &forkchoiceControllerAdapter{controller: forkchoiceController}
-	
+
 	// Wire the ForkchoiceController into the EngineController
 	// This replaces event emissions with direct imperative calls
 	ec.SetForkchoiceController(forkchoiceAdapter)
