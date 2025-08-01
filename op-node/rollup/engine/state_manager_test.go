@@ -1,4 +1,4 @@
-package controllers
+package engine
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
-	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 )
@@ -19,10 +19,18 @@ type MockEngineController struct {
 	tryUpdateEngineErr error
 	insertPayloadErr   error
 	unsafeL2Head       eth.L2BlockRef
+	config             *rollup.Config
 	
 	// Call tracking
 	tryUpdateEngineCalls int
 	insertPayloadCalls   int
+	
+	// State heads for testing
+	pendingSafeL2Head eth.L2BlockRef
+	localSafeL2Head   eth.L2BlockRef
+	safeL2Head        eth.L2BlockRef
+	finalizedHead     eth.L2BlockRef
+	crossUnsafeL2Head eth.L2BlockRef
 }
 
 func (m *MockEngineController) TryUpdateEngine(ctx context.Context) error {
@@ -39,6 +47,60 @@ func (m *MockEngineController) UnsafeL2Head() eth.L2BlockRef {
 	return m.unsafeL2Head
 }
 
+// Config implements EngineControllerInterface
+func (m *MockEngineController) Config() *rollup.Config {
+	return m.config
+}
+
+// State head setters and getters for interface compliance
+func (m *MockEngineController) SetUnsafeHead(ref eth.L2BlockRef) {
+	m.unsafeL2Head = ref
+}
+
+func (m *MockEngineController) SetPendingSafeL2Head(ref eth.L2BlockRef) {
+	m.pendingSafeL2Head = ref
+}
+
+func (m *MockEngineController) PendingSafeL2Head() eth.L2BlockRef {
+	return m.pendingSafeL2Head
+}
+
+func (m *MockEngineController) SetLocalSafeHead(ref eth.L2BlockRef) {
+	m.localSafeL2Head = ref
+}
+
+func (m *MockEngineController) LocalSafeL2Head() eth.L2BlockRef {
+	return m.localSafeL2Head
+}
+
+func (m *MockEngineController) SetSafeHead(ref eth.L2BlockRef) {
+	m.safeL2Head = ref
+}
+
+func (m *MockEngineController) SafeL2Head() eth.L2BlockRef {
+	return m.safeL2Head
+}
+
+func (m *MockEngineController) SetFinalizedHead(ref eth.L2BlockRef) {
+	m.finalizedHead = ref
+}
+
+func (m *MockEngineController) Finalized() eth.L2BlockRef {
+	return m.finalizedHead
+}
+
+func (m *MockEngineController) SetCrossUnsafeHead(ref eth.L2BlockRef) {
+	m.crossUnsafeL2Head = ref
+}
+
+func (m *MockEngineController) CrossUnsafeL2Head() eth.L2BlockRef {
+	return m.crossUnsafeL2Head
+}
+
+func (m *MockEngineController) SetBackupUnsafeL2Head(ref eth.L2BlockRef, pending bool) {
+	// Mock implementation - just store for testing
+}
+
 // MockEngineEventHandler for testing external handlers
 type MockEngineEventHandler struct {
 	events []struct {
@@ -53,7 +115,7 @@ func (m *MockEngineEventHandler) HandleEngineEvent(ctx context.Context, eventTyp
 		EventType string
 		Data      interface{}
 	}{eventType, data})
-	
+
 	if m.shouldError {
 		return fmt.Errorf("mock handler error for %s", eventType)
 	}
@@ -63,9 +125,9 @@ func (m *MockEngineEventHandler) HandleEngineEvent(ctx context.Context, eventTyp
 func TestEngineStateManager_NewEngineStateManager(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
-	
+
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	require.NotNil(t, esm)
 	require.Equal(t, mockController, esm.controller)
 	require.Equal(t, logger, esm.log)
@@ -77,10 +139,10 @@ func TestEngineStateManager_TryUpdateEngine_Success(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	ctx := context.Background()
 	err := esm.TryUpdateEngine(ctx)
-	
+
 	require.NoError(t, err)
 	require.Equal(t, 1, mockController.tryUpdateEngineCalls)
 }
@@ -88,7 +150,7 @@ func TestEngineStateManager_TryUpdateEngine_Success(t *testing.T) {
 func TestEngineStateManager_TryUpdateEngine_NoFCUNeeded(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{
-		tryUpdateEngineErr: engine.ErrNoFCUNeeded,
+		tryUpdateEngineErr: ErrNoFCUNeeded,
 	}
 	esm := NewEngineStateManager(mockController, logger)
 	
@@ -107,18 +169,18 @@ func TestEngineStateManager_TryUpdateEngine_ResetError(t *testing.T) {
 		tryUpdateEngineErr: resetErr,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register external handler to capture reset event
 	mockHandler := &MockEngineEventHandler{}
 	esm.RegisterExternalHandler("ResetEvent", mockHandler)
-	
+
 	ctx := context.Background()
 	err := esm.TryUpdateEngine(ctx)
-	
+
 	require.Error(t, err)
 	require.ErrorIs(t, err, derive.ErrReset)
 	require.Equal(t, 1, mockController.tryUpdateEngineCalls)
-	
+
 	// Verify external handler was called
 	require.Len(t, mockHandler.events, 1)
 	require.Equal(t, "ResetEvent", mockHandler.events[0].EventType)
@@ -131,18 +193,18 @@ func TestEngineStateManager_TryUpdateEngine_TemporaryError(t *testing.T) {
 		tryUpdateEngineErr: tempErr,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register external handler to capture temporary error event
 	mockHandler := &MockEngineEventHandler{}
 	esm.RegisterExternalHandler("EngineTemporaryErrorEvent", mockHandler)
-	
+
 	ctx := context.Background()
 	err := esm.TryUpdateEngine(ctx)
-	
+
 	require.Error(t, err)
 	require.ErrorIs(t, err, derive.ErrTemporary)
 	require.Equal(t, 1, mockController.tryUpdateEngineCalls)
-	
+
 	// Verify external handler was called
 	require.Len(t, mockHandler.events, 1)
 	require.Equal(t, "EngineTemporaryErrorEvent", mockHandler.events[0].EventType)
@@ -155,18 +217,18 @@ func TestEngineStateManager_TryUpdateEngine_CriticalError(t *testing.T) {
 		tryUpdateEngineErr: criticalErr,
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register external handler to capture critical error event
 	mockHandler := &MockEngineEventHandler{}
 	esm.RegisterExternalHandler("CriticalErrorEvent", mockHandler)
-	
+
 	ctx := context.Background()
 	err := esm.TryUpdateEngine(ctx)
-	
+
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected TryUpdateEngine error type")
 	require.Equal(t, 1, mockController.tryUpdateEngineCalls)
-	
+
 	// Verify external handler was called
 	require.Len(t, mockHandler.events, 1)
 	require.Equal(t, "CriticalErrorEvent", mockHandler.events[0].EventType)
@@ -174,8 +236,15 @@ func TestEngineStateManager_TryUpdateEngine_CriticalError(t *testing.T) {
 
 func TestEngineStateManager_ProcessUnsafePayload_Success(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
+	
+	// Create a basic mock config to avoid nil pointer panic
+	mockConfig := &rollup.Config{
+		L2ChainID: 1,
+	}
+	
 	mockController := &MockEngineController{
 		unsafeL2Head: eth.L2BlockRef{Hash: [32]byte{1}, Number: 100},
+		config:       mockConfig,
 	}
 	esm := NewEngineStateManager(mockController, logger)
 	
@@ -188,8 +257,7 @@ func TestEngineStateManager_ProcessUnsafePayload_Success(t *testing.T) {
 	ctx := context.Background()
 	err := esm.ProcessUnsafePayload(ctx, envelope)
 	
-	// This will fail due to missing config (nil passed to PayloadToBlockRef)
-	// This is expected until we add a Config() method to the interface
+	// This will likely still fail due to incomplete mock payload, but shouldn't panic
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to decode block ref")
 	
@@ -199,8 +267,15 @@ func TestEngineStateManager_ProcessUnsafePayload_Success(t *testing.T) {
 func TestEngineStateManager_ProcessUnsafePayload_SkipDuplicate(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	sameHash := [32]byte{1}
+	
+	// Create a basic mock config
+	mockConfig := &rollup.Config{
+		L2ChainID: 1,
+	}
+	
 	mockController := &MockEngineController{
 		unsafeL2Head: eth.L2BlockRef{Hash: sameHash, Number: 100},
+		config:       mockConfig,
 	}
 	esm := NewEngineStateManager(mockController, logger)
 	
@@ -213,9 +288,8 @@ func TestEngineStateManager_ProcessUnsafePayload_SkipDuplicate(t *testing.T) {
 	ctx := context.Background()
 	err := esm.ProcessUnsafePayload(ctx, envelope)
 	
-	// This will still fail due to missing config in PayloadToBlockRef
-	// But we can test that the duplicate check logic is in place
-	require.Error(t, err) // Expected due to nil config
+	// This will still fail due to incomplete mock payload, but shouldn't crash
+	require.Error(t, err) // Expected due to payload decoding issues
 	require.Equal(t, 0, mockController.insertPayloadCalls, "Should not call InsertUnsafePayload for duplicate")
 }
 
@@ -225,23 +299,23 @@ func TestEngineStateManager_PromoteToPendingSafe(t *testing.T) {
 		unsafeL2Head: eth.L2BlockRef{Hash: [32]byte{1}, Number: 100},
 	}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register external handler to capture pending safe update
 	mockHandler := &MockEngineEventHandler{}
 	esm.RegisterExternalHandler("PendingSafeUpdateEvent", mockHandler)
-	
+
 	ref := eth.L2BlockRef{Hash: [32]byte{2}, Number: 99}
 	source := eth.L1BlockRef{Hash: [32]byte{3}, Number: 50}
-	
+
 	ctx := context.Background()
 	err := esm.PromoteToPendingSafe(ctx, ref, source, true)
-	
+
 	require.NoError(t, err)
-	
+
 	// Verify external handler was called
 	require.Len(t, mockHandler.events, 1)
 	require.Equal(t, "PendingSafeUpdateEvent", mockHandler.events[0].EventType)
-	
+
 	// Verify the update data structure
 	updateData := mockHandler.events[0].Data.(struct {
 		PendingSafe eth.L2BlockRef
@@ -255,12 +329,12 @@ func TestEngineStateManager_StrictMode_Panic(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register handler that will error
 	mockHandler := &MockEngineEventHandler{shouldError: true}
 	esm.RegisterExternalHandler("TestEvent", mockHandler)
 	esm.SetStrictMode(true)
-	
+
 	// This should panic due to strict mode
 	require.Panics(t, func() {
 		esm.notifyExternalHandlers(context.Background(), "TestEvent", "test data")
@@ -271,17 +345,17 @@ func TestEngineStateManager_NonStrictMode_NoError(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register handler that will error
 	mockHandler := &MockEngineEventHandler{shouldError: true}
 	esm.RegisterExternalHandler("TestEvent", mockHandler)
 	esm.SetStrictMode(false)
-	
+
 	// This should not panic due to non-strict mode
 	require.NotPanics(t, func() {
 		esm.notifyExternalHandlers(context.Background(), "TestEvent", "test data")
 	})
-	
+
 	// Verify the handler was still called
 	require.Len(t, mockHandler.events, 1)
 	require.Equal(t, "TestEvent", mockHandler.events[0].EventType)
@@ -289,20 +363,20 @@ func TestEngineStateManager_NonStrictMode_NoError(t *testing.T) {
 
 func TestEngineStateManager_ValidateConfiguration(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
-	
+
 	// Test with nil controller
 	esm := &EngineStateManager{log: logger}
 	err := esm.validateConfiguration()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "EngineController is nil")
-	
+
 	// Test with nil logger
 	mockController := &MockEngineController{}
 	esm = &EngineStateManager{controller: mockController}
 	err = esm.validateConfiguration()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Logger is nil")
-	
+
 	// Test with valid configuration
 	esm = NewEngineStateManager(mockController, logger)
 	err = esm.validateConfiguration()
@@ -313,14 +387,14 @@ func TestEngineStateManager_GetStats(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	// Register some handlers
 	mockHandler := &MockEngineEventHandler{}
 	esm.RegisterExternalHandler("TestEvent1", mockHandler)
 	esm.RegisterExternalHandler("TestEvent2", mockHandler)
-	
+
 	stats := esm.GetStats()
-	
+
 	require.Equal(t, true, stats["strict_mode"])
 	require.Equal(t, 2, stats["external_handlers"])
 	require.Equal(t, true, stats["controller_set"])
@@ -330,13 +404,13 @@ func TestEngineStateManager_RegisterExternalHandler(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	mockController := &MockEngineController{}
 	esm := NewEngineStateManager(mockController, logger)
-	
+
 	mockHandler1 := &MockEngineEventHandler{}
 	mockHandler2 := &MockEngineEventHandler{}
-	
+
 	esm.RegisterExternalHandler("Event1", mockHandler1)
 	esm.RegisterExternalHandler("Event2", mockHandler2)
-	
+
 	require.Len(t, esm.externalHandlers, 2)
 	require.Equal(t, mockHandler1, esm.externalHandlers["Event1"])
 	require.Equal(t, mockHandler2, esm.externalHandlers["Event2"])
