@@ -82,7 +82,7 @@ type EngineController struct {
 
 	// 🎯 ForkchoiceController for imperative forkchoice handling instead of events
 	forkchoiceController ForkchoiceController
-	
+
 	// 🎯 EngineStateManager for imperative engine operations instead of events
 	engineStateManager *EngineStateManager
 
