@@ -408,6 +408,21 @@ func (e *EngineStateManager) PromoteCrossUnsafe(ctx context.Context, ref eth.L2B
 	return nil
 }
 
+// RequestPendingSafeUpdate handles PendingSafeRequestEvent imperatively by emitting PendingSafeUpdateEvent
+// This replaces the pure re-emission pattern: PendingSafeRequestEvent -> PendingSafeUpdateEvent
+func (e *EngineStateManager) RequestPendingSafeUpdate(ctx context.Context, emitter event.Emitter) error {
+	e.log.Debug("Processing pending safe request imperatively")
+
+	// Original logic: emit PendingSafeUpdateEvent with current state
+	emitter.Emit(ctx, PendingSafeUpdateEvent{
+		PendingSafe: e.controller.PendingSafeL2Head(),
+		Unsafe:      e.controller.UnsafeL2Head(),
+	})
+
+	e.log.Debug("Emitted PendingSafeUpdateEvent", "pending_safe", e.controller.PendingSafeL2Head(), "unsafe", e.controller.UnsafeL2Head())
+	return nil
+}
+
 // 🛡️ DEFENSIVE HELPER METHODS
 
 // notifyExternalHandlers provides backward compatibility by calling external event handlers

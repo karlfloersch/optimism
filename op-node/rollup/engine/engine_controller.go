@@ -218,6 +218,16 @@ func (e *EngineController) PromoteCrossUnsafeImperative(ctx context.Context, ref
 	return fmt.Errorf("EngineStateManager not available for cross-unsafe promotion")
 }
 
+// RequestPendingSafeUpdateImperative handles pending safe requests imperatively instead of PendingSafeRequestEvent
+func (e *EngineController) RequestPendingSafeUpdateImperative(ctx context.Context, emitter event.Emitter) error {
+	if e.engineStateManager != nil {
+		return e.engineStateManager.RequestPendingSafeUpdate(ctx, emitter)
+	}
+	// Fallback should not happen in normal operation since EngineStateManager is always set
+	e.log.Warn("RequestPendingSafeUpdateImperative called without EngineStateManager - this should not happen")
+	return fmt.Errorf("EngineStateManager not available for pending safe update")
+}
+
 // State Getters
 
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {

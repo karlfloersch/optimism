@@ -108,6 +108,8 @@ type EngineController interface {
 	InvalidateBlockImperative(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error
 	// PromoteCrossUnsafeImperative handles cross-unsafe promotion imperatively instead of PromoteCrossUnsafeEvent
 	PromoteCrossUnsafeImperative(ctx context.Context, ref eth.L2BlockRef, emitter event.Emitter) error
+	// RequestPendingSafeUpdateImperative handles pending safe requests imperatively instead of PendingSafeRequestEvent
+	RequestPendingSafeUpdateImperative(ctx context.Context, emitter event.Emitter) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
 }
 

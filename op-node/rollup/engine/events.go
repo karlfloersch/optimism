@@ -421,10 +421,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			d.log.Debug("PromoteCrossUnsafe completed with error", "error", err)
 		}
 	case PendingSafeRequestEvent:
-		d.emitter.Emit(ctx, PendingSafeUpdateEvent{
-			PendingSafe: d.ec.PendingSafeL2Head(),
-			Unsafe:      d.ec.UnsafeL2Head(),
-		})
+		// 🎯 PHASE: Replace with EngineStateManager imperative call
+		if err := d.engineStateManager.RequestPendingSafeUpdate(ctx, d.emitter); err != nil {
+			d.log.Debug("RequestPendingSafeUpdate completed with error", "error", err)
+		}
 	case PromotePendingSafeEvent:
 		// Only promote if not already stale.
 		// Resets/overwrites happen through engine-resets, not through promotion.
