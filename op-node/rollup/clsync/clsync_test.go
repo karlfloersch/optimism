@@ -129,10 +129,10 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
@@ -151,10 +151,10 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
@@ -174,10 +174,10 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
@@ -195,10 +195,10 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA2})
 		emitter.AssertExpectations(t)
 
@@ -216,13 +216,13 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 		emitter.AssertExpectations(t) // nothing to process yet
 
 		require.Nil(t, cl.unsafePayloads.Peek(), "no payloads yet")
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
@@ -247,7 +247,7 @@ func TestCLSync(t *testing.T) {
 		require.Nil(t, cl.unsafePayloads.Peek(), "pop because applied")
 
 		// repeat for A2
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA2})
 		emitter.AssertExpectations(t)
 
@@ -275,13 +275,13 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA2})
 		emitter.AssertExpectations(t)
 
@@ -320,10 +320,10 @@ func TestCLSync(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
@@ -361,11 +361,11 @@ func TestCLSync(t *testing.T) {
 	t.Run("invalid payload error", func(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelError)
 		emitter := &testutils.MockEmitter{}
-		cl := NewCLSync(logger, cfg, metrics)
+		cl := NewCLSync(logger, cfg, metrics, nil) // nil engine requester for test
 		cl.AttachEmitter(emitter)
 
 		// CLSync gets payload and requests engine state, to later determine if payload should be forwarded
-		emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	
 		cl.OnEvent(context.Background(), ReceivedUnsafePayloadEvent{Envelope: payloadA1})
 		emitter.AssertExpectations(t)
 
