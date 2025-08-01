@@ -57,17 +57,14 @@ func (eq *CLSync) AttachEmitter(em event.Emitter) {
 	eq.emitter = em
 }
 
-// requestForkchoiceUpdate makes an imperative forkchoice request if engine is available,
-// otherwise falls back to event emission for backward compatibility
+// requestForkchoiceUpdate makes an imperative forkchoice request
 func (eq *CLSync) requestForkchoiceUpdate(ctx context.Context) {
-	if eq.engineRequester != nil {
-		// Use imperative call - this is the new preferred approach
-		if err := eq.engineRequester.RequestForkchoiceUpdateImperative(ctx, eq.emitter); err != nil {
-			eq.log.Debug("Imperative forkchoice request completed with error", "error", err)
-		}
-	} else {
-		// Fallback to event emission for backward compatibility
-		eq.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
+	if eq.engineRequester == nil {
+		eq.log.Error("CRITICAL: CLSync engineRequester is nil - this should never happen with proper wiring")
+		return
+	}
+	if err := eq.engineRequester.RequestForkchoiceUpdateImperative(ctx, eq.emitter); err != nil {
+		eq.log.Debug("Imperative forkchoice request completed with error", "error", err)
 	}
 }
 

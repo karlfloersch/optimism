@@ -166,17 +166,14 @@ func (d *Sequencer) AttachEmitter(em event.Emitter) {
 	d.emitter = em
 }
 
-// requestForkchoiceUpdate makes an imperative forkchoice request if engine is available,
-// otherwise falls back to event emission for backward compatibility
+// requestForkchoiceUpdate makes an imperative forkchoice request
 func (d *Sequencer) requestForkchoiceUpdate(ctx context.Context) {
-	if d.engineRequester != nil {
-		// Use imperative call - this is the new preferred approach
-		if err := d.engineRequester.RequestForkchoiceUpdateImperative(ctx, d.emitter); err != nil {
-			d.log.Debug("Imperative forkchoice request completed with error", "error", err)
-		}
-	} else {
-		// Fallback to event emission for backward compatibility
-		d.emitter.Emit(ctx, engine.ForkchoiceRequestEvent{})
+	if d.engineRequester == nil {
+		d.log.Error("CRITICAL: Sequencer engineRequester is nil - this should never happen with proper wiring")
+		return
+	}
+	if err := d.engineRequester.RequestForkchoiceUpdateImperative(ctx, d.emitter); err != nil {
+		d.log.Debug("Imperative forkchoice request completed with error", "error", err)
 	}
 }
 
