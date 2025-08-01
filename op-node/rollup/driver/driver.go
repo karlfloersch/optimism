@@ -106,6 +106,8 @@ type EngineController interface {
 	RequestCrossUpdateImperative(ctx context.Context, crossUnsafe, crossSafe bool, emitter event.Emitter) error
 	// InvalidateBlockImperative handles block invalidation imperatively instead of InteropInvalidateBlockEvent
 	InvalidateBlockImperative(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error
+	// PromoteCrossUnsafeImperative handles cross-unsafe promotion imperatively instead of PromoteCrossUnsafeEvent
+	PromoteCrossUnsafeImperative(ctx context.Context, ref eth.L2BlockRef, emitter event.Emitter) error
 	TryBackupUnsafeReorg(ctx context.Context) (bool, error)
 }
 

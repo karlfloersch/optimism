@@ -404,7 +404,10 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 	case UnsafeUpdateEvent:
 		// pre-interop everything that is local-unsafe is also immediately cross-unsafe.
 		if !d.cfg.IsInterop(x.Ref.Time) {
-			d.emitter.Emit(ctx, PromoteCrossUnsafeEvent(x))
+			// 🎯 PHASE: Replace PromoteCrossUnsafeEvent emission with imperative call
+			if err := d.engineStateManager.PromoteCrossUnsafe(ctx, x.Ref, d.emitter); err != nil {
+				d.log.Debug("PromoteCrossUnsafe completed with error during UnsafeUpdate", "error", err)
+			}
 		}
 		// Try to apply the forkchoice changes
 		// 🎯 PHASE 2A+: Replace TryUpdateEngineEvent emission with direct EngineStateManager call
@@ -412,11 +415,11 @@ func (d *EngDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 			d.log.Debug("TryUpdateEngine completed with error during UnsafeUpdate", "error", err)
 		}
 	case PromoteCrossUnsafeEvent:
-		d.ec.SetCrossUnsafeHead(x.Ref)
-		d.emitter.Emit(ctx, CrossUnsafeUpdateEvent{
-			CrossUnsafe: x.Ref,
-			LocalUnsafe: d.ec.UnsafeL2Head(),
-		})
+		// 🎯 PHASE: Replace with EngineStateManager imperative call
+		// Original logic: update cross unsafe head + emit CrossUnsafeUpdateEvent
+		if err := d.engineStateManager.PromoteCrossUnsafe(ctx, x.Ref, d.emitter); err != nil {
+			d.log.Debug("PromoteCrossUnsafe completed with error", "error", err)
+		}
 	case PendingSafeRequestEvent:
 		d.emitter.Emit(ctx, PendingSafeUpdateEvent{
 			PendingSafe: d.ec.PendingSafeL2Head(),

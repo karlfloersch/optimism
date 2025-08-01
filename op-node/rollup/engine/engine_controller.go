@@ -208,6 +208,16 @@ func (e *EngineController) InvalidateBlockImperative(ctx context.Context, invali
 	return fmt.Errorf("EngineStateManager not available for block invalidation")
 }
 
+// PromoteCrossUnsafeImperative handles cross-unsafe promotion imperatively instead of PromoteCrossUnsafeEvent
+func (e *EngineController) PromoteCrossUnsafeImperative(ctx context.Context, ref eth.L2BlockRef, emitter event.Emitter) error {
+	if e.engineStateManager != nil {
+		return e.engineStateManager.PromoteCrossUnsafe(ctx, ref, emitter)
+	}
+	// Fallback should not happen in normal operation since EngineStateManager is always set
+	e.log.Warn("PromoteCrossUnsafeImperative called without EngineStateManager - this should not happen")
+	return fmt.Errorf("EngineStateManager not available for cross-unsafe promotion")
+}
+
 // State Getters
 
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {

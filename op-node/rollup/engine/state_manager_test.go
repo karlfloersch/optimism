@@ -28,6 +28,10 @@ type MockEngineController struct {
 	tryUpdateEngineCalls int
 	insertPayloadCalls   int
 
+	// SetCrossUnsafeHead tracking
+	setCrossUnsafeHeadCalled bool
+	setCrossUnsafeHeadArg    eth.L2BlockRef
+
 	// State heads for testing
 	pendingSafeL2Head eth.L2BlockRef
 	localSafeL2Head   eth.L2BlockRef
@@ -93,6 +97,8 @@ func (m *MockEngineController) Finalized() eth.L2BlockRef {
 }
 
 func (m *MockEngineController) SetCrossUnsafeHead(ref eth.L2BlockRef) {
+	m.setCrossUnsafeHeadCalled = true
+	m.setCrossUnsafeHeadArg = ref
 	m.crossUnsafeL2Head = ref
 }
 
@@ -544,10 +550,10 @@ func TestEngineStateManager_InvalidateBlock_Success(t *testing.T) {
 	mockController := &MockEngineController{
 		config: &rollup.Config{L2ChainID: big.NewInt(1)},
 	}
-	
+
 	logger := testlog.Logger(t, log.LevelDebug)
 	stateManager := NewEngineStateManager(mockController, logger)
-	
+
 	// Create test data
 	invalidatedRef := eth.BlockRef{Hash: common.HexToHash("0xabcd"), Number: 100}
 	attributes := &derive.AttributesWithParent{
@@ -556,6 +562,43 @@ func TestEngineStateManager_InvalidateBlock_Success(t *testing.T) {
 		},
 		Parent: eth.L2BlockRef{Hash: common.HexToHash("0x1234"), Number: 99},
 	}
+
+	// Create a mock emitter to capture emitted events
+	emittedEvents := []event.Event{}
+	mockEmitter := &MockEmitter{
+		EmitFunc: func(ctx context.Context, ev event.Event) {
+			emittedEvents = append(emittedEvents, ev)
+		},
+	}
+
+	// Call InvalidateBlock
+	ctx := context.Background()
+	err := stateManager.InvalidateBlock(ctx, invalidatedRef, attributes, mockEmitter)
+
+	// Validate result - should emit BuildStartEvent
+	require.NoError(t, err)
+	require.Len(t, emittedEvents, 1, "Should emit exactly one BuildStartEvent")
+
+	// Validate the emitted event is BuildStartEvent with correct attributes
+	if buildStartEvent, ok := emittedEvents[0].(BuildStartEvent); ok {
+		require.Equal(t, attributes, buildStartEvent.Attributes)
+	} else {
+		t.Fatalf("Expected BuildStartEvent, got %T", emittedEvents[0])
+	}
+}
+
+func TestEngineStateManager_PromoteCrossUnsafe_Success(t *testing.T) {
+	// Create mock controller
+	mockController := &MockEngineController{
+		unsafeL2Head: eth.L2BlockRef{Hash: common.HexToHash("0x5678"), Number: 101},
+		config:       &rollup.Config{L2ChainID: big.NewInt(1)},
+	}
+	
+	logger := testlog.Logger(t, log.LevelDebug)
+	stateManager := NewEngineStateManager(mockController, logger)
+	
+	// Create test data
+	crossUnsafeRef := eth.L2BlockRef{Hash: common.HexToHash("0xabcd"), Number: 100}
 	
 	// Create a mock emitter to capture emitted events
 	emittedEvents := []event.Event{}
@@ -565,20 +608,25 @@ func TestEngineStateManager_InvalidateBlock_Success(t *testing.T) {
 		},
 	}
 	
-	// Call InvalidateBlock
+	// Call PromoteCrossUnsafe
 	ctx := context.Background()
-	err := stateManager.InvalidateBlock(ctx, invalidatedRef, attributes, mockEmitter)
+	err := stateManager.PromoteCrossUnsafe(ctx, crossUnsafeRef, mockEmitter)
 	
-	// Validate result - should emit BuildStartEvent
+	// Validate result - should update state and emit CrossUnsafeUpdateEvent
 	require.NoError(t, err)
-	require.Len(t, emittedEvents, 1, "Should emit exactly one BuildStartEvent")
+	require.Len(t, emittedEvents, 1, "Should emit exactly one CrossUnsafeUpdateEvent")
 	
-	// Validate the emitted event is BuildStartEvent with correct attributes
-	if buildStartEvent, ok := emittedEvents[0].(BuildStartEvent); ok {
-		require.Equal(t, attributes, buildStartEvent.Attributes)
+	// Validate the emitted event is CrossUnsafeUpdateEvent with correct data
+	if crossUnsafeEvent, ok := emittedEvents[0].(CrossUnsafeUpdateEvent); ok {
+		require.Equal(t, crossUnsafeRef, crossUnsafeEvent.CrossUnsafe)
+		require.Equal(t, mockController.unsafeL2Head, crossUnsafeEvent.LocalUnsafe)
 	} else {
-		t.Fatalf("Expected BuildStartEvent, got %T", emittedEvents[0])
+		t.Fatalf("Expected CrossUnsafeUpdateEvent, got %T", emittedEvents[0])
 	}
+	
+	// Validate that SetCrossUnsafeHead was called on the controller
+	require.True(t, mockController.setCrossUnsafeHeadCalled, "SetCrossUnsafeHead should have been called")
+	require.Equal(t, crossUnsafeRef, mockController.setCrossUnsafeHeadArg, "SetCrossUnsafeHead should have been called with correct argument")
 }
 
 // MockEmitter for testing event emissions

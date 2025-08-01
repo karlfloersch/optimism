@@ -46,9 +46,10 @@ type L1Source interface {
 	L1BlockRefByNumber(ctx context.Context, num uint64) (eth.L1BlockRef, error)
 }
 
-// EngineInvalidator defines the interface for imperative block invalidation
+// EngineInvalidator defines the interface for imperative engine operations
 type EngineInvalidator interface {
 	InvalidateBlockImperative(ctx context.Context, invalidated eth.BlockRef, attributes *derive.AttributesWithParent, emitter event.Emitter) error
+	PromoteCrossUnsafeImperative(ctx context.Context, ref eth.L2BlockRef, emitter event.Emitter) error
 }
 
 // IndexingMode makes the op-node managed by an op-supervisor,
@@ -281,9 +282,20 @@ func (m *IndexingMode) UpdateCrossUnsafe(ctx context.Context, id eth.BlockID) er
 	if err != nil {
 		return fmt.Errorf("failed to get L2BlockRef: %w", err)
 	}
-	m.emitter.Emit(m.ctx, engine.PromoteCrossUnsafeEvent{
-		Ref: l2Ref,
-	})
+	
+	// 🎯 PHASE: Replace PromoteCrossUnsafeEvent emission with imperative call
+	if m.engine != nil {
+		if err := m.engine.PromoteCrossUnsafeImperative(ctx, l2Ref, m.emitter); err != nil {
+			return fmt.Errorf("failed to promote cross-unsafe imperatively: %w", err)
+		}
+	} else {
+		// Fallback for tests or incomplete initialization - emit the event
+		m.log.Debug("EngineInvalidator not available - falling back to PromoteCrossUnsafeEvent emission")
+		m.emitter.Emit(m.ctx, engine.PromoteCrossUnsafeEvent{
+			Ref: l2Ref,
+		})
+	}
+	
 	// We return early: there is no point waiting for the cross-unsafe engine-update synchronously.
 	// All error-feedback comes to the supervisor by aborting derivation tasks with an error.
 	return nil
