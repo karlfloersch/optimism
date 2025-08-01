@@ -174,7 +174,7 @@ func TestSequencer_StartStop(t *testing.T) {
 	deps.conductor.leader = true
 
 	testCtx := context.Background()
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	require.NoError(t, seq.Init(testCtx, false))
 	emitter.AssertExpectations(t)
 	require.False(t, deps.conductor.closed, "conductor is ready")
@@ -264,7 +264,7 @@ func TestSequencer_StaleBuild(t *testing.T) {
 	deps.conductor.leader = true
 
 	testCtx := context.Background()
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	require.NoError(t, seq.Init(testCtx, false))
 	emitter.AssertExpectations(t)
 	require.False(t, deps.conductor.closed, "conductor is ready")
@@ -474,13 +474,13 @@ func TestSequencerBuild(t *testing.T) {
 
 	testCtx := context.Background()
 	// Init will request a forkchoice update
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	require.NoError(t, seq.Init(testCtx, true))
 	emitter.AssertExpectations(t)
 	require.True(t, seq.Active(), "started in active mode")
 
 	// It will request a forkchoice update, it needs the head before being able to build on top of it
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	seq.OnEvent(context.Background(), SequencerActionEvent{})
 	emitter.AssertExpectations(t)
 
@@ -632,13 +632,13 @@ func TestSequencerL1TemporaryErrorEvent(t *testing.T) {
 
 	testCtx := context.Background()
 	// Init will request a forkchoice update
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	require.NoError(t, seq.Init(testCtx, true))
 	emitter.AssertExpectations(t)
 	require.True(t, seq.Active(), "started in active mode")
 
 	// It will request a forkchoice update, it needs the head before being able to build on top of it
-	emitter.ExpectOnce(engine.ForkchoiceRequestEvent{})
+	// ForkchoiceRequestEvent eliminated - no longer expected
 	seq.OnEvent(context.Background(), SequencerActionEvent{})
 	emitter.AssertExpectations(t)
 

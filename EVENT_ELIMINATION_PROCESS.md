@@ -7,7 +7,7 @@ This document captures the proven step-by-step process for eliminating events fr
 Our goal is to replace implicit event emissions and handlers with explicit method calls, making the control flow easier to trace and debug. This process has been successfully applied to eliminate:
 
 - ✅ **TryUpdateEngineEvent** (585 occurrences → 0)
-- ✅ **ForkchoiceUpdateEvent** (375+ occurrences → controlled)  
+- ✅ **ForkchoiceUpdateEvent** (375+ occurrences → controlled)
 - ✅ **ForkchoiceRequestEvent** (multiple sites → 0)
 
 ## The Step-by-Step Process
@@ -68,11 +68,11 @@ type Consumer struct {
 // Add to the appropriate state manager (e.g., EngineStateManager)
 func (esm *EngineStateManager) ProcessSomeOperation(ctx context.Context, data DataType) error {
     esm.log.Debug("Processing operation imperatively", "data", data)
-    
+
     // Same logic as original event handler
     // Handle errors defensively
     // Log for debugging
-    
+
     return nil
 }
 ```
@@ -153,9 +153,9 @@ d.requestSomeOperation(ctx, data)
 func TestStateManager_ProcessSomeOperation_Success(t *testing.T) {
     // Test the new imperative method
     stateManager := NewStateManager(mockController, logger)
-    
+
     err := stateManager.ProcessSomeOperation(ctx, testData)
-    
+
     assert.NoError(t, err)
     // Verify expected state changes
 }
@@ -255,7 +255,7 @@ if requester == nil {
     // silently emit old event
 }
 
-// GOOD  
+// GOOD
 if requester == nil {
     log.Error("CRITICAL: requester is nil")
     return
@@ -265,7 +265,7 @@ if requester == nil {
 ### ❌ Incomplete Wiring
 Always wire dependencies in all code paths:
 - Production code
-- Test code  
+- Test code
 - E2E test helpers
 - Development utilities
 
@@ -284,7 +284,7 @@ Event elimination can reveal subtle timing/ordering dependencies. If tests fail:
 
 ## Example: Complete ForkchoiceRequestEvent Elimination
 
-**Before**: 
+**Before**:
 - Multiple emission sites across sequencer, clsync, e2e helpers
 - Event-driven communication between components
 - Implicit control flow
