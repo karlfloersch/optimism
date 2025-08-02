@@ -25,9 +25,10 @@ echo ""
 
 # Check if sync-tester is running
 echo "🔍 Checking if sync-tester is running..."
+HEALTH_CHECK_UUID=$(uuidgen)
 if curl -s -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-    http://127.0.0.1:9000/chain/11155420/synctest/test-session 2>/dev/null | grep -q "result"; then
+    "http://127.0.0.1:9000/chain/11155420/synctest/${HEALTH_CHECK_UUID}?latest=1&safe=1&finalized=1" 2>/dev/null | grep -q "result"; then
     echo "✅ sync-tester is running on port 9000"
 else
     echo "❌ sync-tester is NOT running on port 9000!"
@@ -74,7 +75,7 @@ echo "⏳ Waiting for op-node RPC to initialize..."
 for i in {1..15}; do
     echo "   Attempt $i/15: Checking if op-node RPC is ready..."
     if curl -s -X POST -H "Content-Type: application/json" \
-        --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+        --data '{"jsonrpc":"2.0","method":"health_status","params":[],"id":1}' \
         http://127.0.0.1:$RPC_PORT 2>/dev/null | grep -q "result"; then
         echo "✅ op-node RPC is ready!"
         break
@@ -88,11 +89,11 @@ for i in {1..15}; do
     sleep 3
 done
 
-# Capture starting L2 block state
+# Capture starting L2 block state from sync-tester
 echo "🚀 Capturing starting L2 block state..."
 STARTING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-    http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
+    "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
 
 if [ -n "$STARTING_BLOCK_RESPONSE" ] && [ "$STARTING_BLOCK_RESPONSE" != "null" ]; then
     STARTING_BLOCK_NUMBER=$(echo "$STARTING_BLOCK_RESPONSE" | jq -r '.number // "0x0"')
@@ -113,10 +114,10 @@ echo "⏳ Syncing for 60 seconds with status checks..."
 for i in {1..4}; do
     echo "   Status check $i/4 (after $((i*15)) seconds)..."
     
-    # Check current block
+    # Check current block from sync-tester
     CURRENT_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
         --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-        http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
+        "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
     
     if [ -n "$CURRENT_RESPONSE" ] && [ "$CURRENT_RESPONSE" != "null" ]; then
         CURRENT_BLOCK_NUMBER=$(echo "$CURRENT_RESPONSE" | jq -r '.number // "0x0"')
@@ -135,11 +136,11 @@ for i in {1..4}; do
     sleep 15
 done
 
-# Capture ending L2 block state BEFORE stopping op-node
+# Capture ending L2 block state from sync-tester BEFORE stopping op-node
 echo "🏁 Capturing ending L2 block state..."
 ENDING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-    http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
+    "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
 
 # Stop op-node
 echo "🛑 Stopping op-node..."
