@@ -1,4 +1,4 @@
 synctesters:
   sepolia:
     chain_id: 11155420
-    el_rpc: https://optimism-sepolia.infura.io/v3/YOUR_INFURA_KEY
+    el_rpc: https://optimism-sepolia.infura.io/v3/fce31f1fb2d54caa9b31ed7d28437fa5

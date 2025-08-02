@@ -2,29 +2,38 @@
 
 set -e
 
+# Usage function
+usage() {
+    echo "Usage: $0 <L1_RPC_URL> <L2_RPC_URL> [L1_BEACON_URL]"
+    echo ""
+    echo "Examples:"
+    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY'"
+    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY' 'https://ethereum-sepolia-beacon-api.publicnode.com'"
+    echo ""
+    echo "Arguments:"
+    echo "  L1_RPC_URL    - Ethereum Sepolia RPC endpoint (required)"
+    echo "  L2_RPC_URL    - Optimism Sepolia RPC endpoint (required)"
+    echo "  L1_BEACON_URL - Ethereum Sepolia beacon API endpoint (optional)"
+    exit 1
+}
+
+# Check command line arguments
+if [ $# -lt 2 ]; then
+    echo "❌ Error: Missing required arguments"
+    echo ""
+    usage
+fi
+
 echo "🚀 Starting op-node sync test"
 echo "============================="
 
 # Generate a unique session ID for this test
 SESSION_UUID=$(uuidgen)
 
-# L1 and L1 Beacon endpoints from environment variables with defaults
-L1_ENDPOINT="${L1_ENDPOINT:-https://sepolia.infura.io/v3/YOUR_INFURA_KEY}"
-L1_BEACON_ENDPOINT="${L1_BEACON_ENDPOINT:-https://ethereum-sepolia-beacon-api.publicnode.com}"
-L2_RPC_ENDPOINT="${L2_RPC_ENDPOINT:-https://optimism-sepolia.infura.io/v3/YOUR_INFURA_KEY}"
-
-# Check for required environment variables
-if [[ "$L1_ENDPOINT" == *"YOUR_INFURA_KEY"* ]]; then
-    echo "❌ Please set L1_ENDPOINT environment variable with your Infura key"
-    echo "   Example: export L1_ENDPOINT='https://sepolia.infura.io/v3/YOUR_KEY'"
-    exit 1
-fi
-
-if [[ "$L2_RPC_ENDPOINT" == *"YOUR_INFURA_KEY"* ]]; then
-    echo "❌ Please set L2_RPC_ENDPOINT environment variable with your Infura key"
-    echo "   Example: export L2_RPC_ENDPOINT='https://optimism-sepolia.infura.io/v3/YOUR_KEY'"
-    exit 1
-fi
+# RPC endpoints from command line arguments
+L1_ENDPOINT="$1"
+L2_RPC_ENDPOINT="$2"
+L1_BEACON_ENDPOINT="${3:-https://ethereum-sepolia-beacon-api.publicnode.com}"
 
 # L2 endpoint (via sync-tester proxy with session)
 # latest=10, safe=5, finalized=1 (blocks behind real chain for controlled testing)
@@ -148,6 +157,9 @@ else
     STARTING_BLOCK_NUM_DEC="unknown"
 fi
 
+# Record start time for performance calculation
+START_TIME=$(date +%s)
+
 # Sync with status checks
 echo "⏳ Syncing for 60 seconds..."
 for i in {1..4}; do
@@ -155,17 +167,17 @@ for i in {1..4}; do
     CURRENT_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
         --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
         "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
-    
+
     if [ -n "$CURRENT_RESPONSE" ] && [ "$CURRENT_RESPONSE" != "null" ]; then
         CURRENT_BLOCK_NUMBER=$(echo "$CURRENT_RESPONSE" | jq -r '.number // "0x0"')
         CURRENT_BLOCK_NUM_DEC=$(printf "%d" "$CURRENT_BLOCK_NUMBER" 2>/dev/null || echo "0")
-        
+
         if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$CURRENT_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
             PROGRESS=$((CURRENT_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
             echo "   Progress: $PROGRESS blocks (current: #$CURRENT_BLOCK_NUM_DEC)"
         fi
     fi
-    
+
     sleep 15
 done
 
@@ -173,6 +185,9 @@ done
 ENDING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
     "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
+
+# Record end time for performance calculation
+END_TIME=$(date +%s)
 
 # Stop processes
 echo "🛑 Stopping processes..."
@@ -194,10 +209,21 @@ echo "📋 SYNC TEST RESULTS"
 echo "===================="
 echo "Session ID: $SESSION_UUID"
 
-# Calculate blocks processed
+# Calculate blocks processed and performance metrics
 if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
     BLOCKS_PROCESSED=$((ENDING_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
+    DURATION_SECONDS=$((END_TIME - START_TIME))
+    
+    # Calculate blocks per second (with 2 decimal places)
+    if [ "$DURATION_SECONDS" -gt 0 ]; then
+        BLOCKS_PER_SECOND=$(echo "scale=2; $BLOCKS_PROCESSED / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
+    else
+        BLOCKS_PER_SECOND="unknown"
+    fi
+    
     echo "✅ Blocks processed: $BLOCKS_PROCESSED"
+    echo "⏱️  Duration: ${DURATION_SECONDS}s"
+    echo "🚀 Performance: ${BLOCKS_PER_SECOND} blocks/second"
     echo "✅ Test completed successfully"
 else
     echo "❌ Unable to calculate blocks processed"
