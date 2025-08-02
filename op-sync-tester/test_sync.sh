@@ -213,14 +213,14 @@ echo "Session ID: $SESSION_UUID"
 if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
     BLOCKS_PROCESSED=$((ENDING_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
     DURATION_SECONDS=$((END_TIME - START_TIME))
-    
+
     # Calculate blocks per second (with 2 decimal places)
     if [ "$DURATION_SECONDS" -gt 0 ]; then
         BLOCKS_PER_SECOND=$(echo "scale=2; $BLOCKS_PROCESSED / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
     else
         BLOCKS_PER_SECOND="unknown"
     fi
-    
+
     echo "✅ Blocks processed: $BLOCKS_PROCESSED"
     echo "⏱️  Duration: ${DURATION_SECONDS}s"
     echo "🚀 Performance: ${BLOCKS_PER_SECOND} blocks/second"
