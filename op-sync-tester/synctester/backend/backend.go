@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -35,9 +36,53 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 
 type Session struct {
 	SessionID string
-	Latest    uint64
-	Safe      uint64
-	Finalized uint64
+	
+	// Mutex for thread-safe head updates
+	mu sync.RWMutex
+	
+	// Initial offsets from real chain (set once during session creation)
+	LatestOffset    uint64
+	SafeOffset      uint64
+	FinalizedOffset uint64
+	
+	// Current head block numbers (updated as op-node progresses)
+	LatestHead    uint64
+	SafeHead      uint64
+	FinalizedHead uint64
+}
+
+// UpdateLatestHead safely updates the latest head
+func (s *Session) UpdateLatestHead(blockNumber uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if blockNumber > s.LatestHead {
+		s.LatestHead = blockNumber
+	}
+}
+
+// UpdateSafeHead safely updates the safe head
+func (s *Session) UpdateSafeHead(blockNumber uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if blockNumber > s.SafeHead {
+		s.SafeHead = blockNumber
+	}
+}
+
+// UpdateFinalizedHead safely updates the finalized head
+func (s *Session) UpdateFinalizedHead(blockNumber uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if blockNumber > s.FinalizedHead {
+		s.FinalizedHead = blockNumber
+	}
+}
+
+// GetHeads safely returns all current head values
+func (s *Session) GetHeads() (latest, safe, finalized uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LatestHead, s.SafeHead, s.FinalizedHead
 }
 
 type APIRouter interface {

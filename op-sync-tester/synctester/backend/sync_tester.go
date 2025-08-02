@@ -157,7 +157,7 @@ func (s *SyncTester) GetBlockByNumber(ctx context.Context, number rpc.BlockNumbe
 	return result, nil
 }
 
-// resolveBlockNumber applies session offset logic to block number requests
+// resolveBlockNumber resolves block numbers based on session state
 func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc.BlockNumber) (*big.Int, error) {
 	// Check if this request has a session context
 	session, hasSession := SessionFromContext(ctx)
@@ -174,52 +174,105 @@ func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc
 		}
 	}
 
-	// For session requests, we need to get the current chain tip and apply offsets
-	currentBlockNumber, err := s.elClient.BlockNumber(ctx)
+	// Initialize session heads if they haven't been set yet
+	err := s.initializeSessionHeads(ctx, session)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current block number: %w", err)
+		return nil, fmt.Errorf("failed to initialize session heads: %w", err)
 	}
 
-	// Handle special cases for latest/safe/finalized based on session offsets
+	// Get current head values from session
+	latest, safe, finalized := session.GetHeads()
+
+	// Handle special cases for latest/safe/finalized based on session state
 	if requestedNumber == rpc.LatestBlockNumber {
-		// Apply session.Latest offset to current tip
-		if currentBlockNumber >= session.Latest {
-			targetBlock := currentBlockNumber - session.Latest
-			return big.NewInt(int64(targetBlock)), nil
-		} else {
-			// If offset is larger than current block, return genesis
-			return big.NewInt(0), nil
-		}
+		return big.NewInt(int64(latest)), nil
 	} else if requestedNumber == rpc.EarliestBlockNumber {
 		return big.NewInt(0), nil
 	} else if requestedNumber == rpc.PendingBlockNumber {
-		// Apply session.Latest offset for pending too
-		if currentBlockNumber >= session.Latest {
-			targetBlock := currentBlockNumber - session.Latest
-			return big.NewInt(int64(targetBlock)), nil
-		} else {
-			return big.NewInt(0), nil
-		}
+		// Treat pending as latest
+		return big.NewInt(int64(latest)), nil
 	} else if requestedNumber == rpc.FinalizedBlockNumber {
-		// Apply session.Finalized offset
-		if currentBlockNumber >= session.Finalized {
-			targetBlock := currentBlockNumber - session.Finalized
-			return big.NewInt(int64(targetBlock)), nil
-		} else {
-			return big.NewInt(0), nil
-		}
+		return big.NewInt(int64(finalized)), nil
 	} else if requestedNumber == rpc.SafeBlockNumber {
-		// Apply session.Safe offset
-		if currentBlockNumber >= session.Safe {
-			targetBlock := currentBlockNumber - session.Safe
-			return big.NewInt(int64(targetBlock)), nil
-		} else {
-			return big.NewInt(0), nil
-		}
+		return big.NewInt(int64(safe)), nil
 	} else {
 		// For specific block numbers, pass through as-is
 		return big.NewInt(int64(requestedNumber)), nil
 	}
+}
+
+// initializeSessionHeads initializes session head positions on first use
+func (s *SyncTester) initializeSessionHeads(ctx context.Context, session *Session) error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	
+	// Check if already initialized (any non-zero head indicates initialization)
+	if session.LatestHead > 0 || session.SafeHead > 0 || session.FinalizedHead > 0 {
+		return nil
+	}
+
+	// Get current chain tip to calculate initial positions
+	currentBlockNumber, err := s.elClient.BlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get current block number: %w", err)
+	}
+
+	// Calculate initial head positions based on offsets
+	if currentBlockNumber >= session.LatestOffset {
+		session.LatestHead = currentBlockNumber - session.LatestOffset
+	} else {
+		session.LatestHead = 1 // Use 1 instead of 0 to indicate initialization
+	}
+	
+	if currentBlockNumber >= session.SafeOffset {
+		session.SafeHead = currentBlockNumber - session.SafeOffset
+	} else {
+		session.SafeHead = 1 // Use 1 instead of 0 to indicate initialization
+	}
+	
+	if currentBlockNumber >= session.FinalizedOffset {
+		session.FinalizedHead = currentBlockNumber - session.FinalizedOffset
+	} else {
+		session.FinalizedHead = 1 // Use 1 instead of 0 to indicate initialization
+	}
+	
+	s.log.Info("Initialized session heads", 
+		"sessionID", session.SessionID,
+		"latest", session.LatestHead, 
+		"safe", session.SafeHead, 
+		"finalized", session.FinalizedHead)
+	
+	return nil
+}
+
+// updateSessionHeads updates the session head positions when ForkchoiceUpdated is called
+func (s *SyncTester) updateSessionHeads(ctx context.Context, latestBlock, safeBlock, finalizedBlock uint64) {
+	session, hasSession := SessionFromContext(ctx)
+	if !hasSession {
+		return // No session context, nothing to update
+	}
+
+	// Update each head type
+	session.UpdateLatestHead(latestBlock)
+	session.UpdateSafeHead(safeBlock)  
+	session.UpdateFinalizedHead(finalizedBlock)
+
+	s.log.Info("Updated session heads",
+		"sessionID", session.SessionID,
+		"latest", latestBlock,
+		"safe", safeBlock,
+		"finalized", finalizedBlock)
+}
+
+// updateLatestHead updates only the latest head when new blocks are received
+func (s *SyncTester) updateLatestHead(ctx context.Context, blockNumber uint64) {
+	session, hasSession := SessionFromContext(ctx)
+	if !hasSession {
+		return // No session context, nothing to update
+	}
+
+	session.UpdateLatestHead(blockNumber)
+	s.log.Info("Updated latest head", "sessionID", session.SessionID, "latest", blockNumber)
 }
 
 func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
@@ -293,6 +346,9 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 	}
 
 	s.log.Info("ForkchoiceUpdated validation successful", "headNumber", headBlock.NumberU64(), "safeNumber", safeBlock.NumberU64(), "finalizedNumber", finalizedBlock.NumberU64())
+
+	// Update session heads if this is a session request
+	s.updateSessionHeads(ctx, headBlock.NumberU64(), safeBlock.NumberU64(), finalizedBlock.NumberU64())
 
 	// Return VALID status with the head block hash as latest valid
 	result := &eth.ForkchoiceUpdatedResult{
@@ -533,6 +589,9 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 	}
 
 	s.log.Info("NewPayload validation successful", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+
+	// Update latest head in session (new blocks represent latest progress)
+	s.updateLatestHead(ctx, uint64(payload.BlockNumber))
 
 	// Return VALID status accepting the payload
 	result := &eth.PayloadStatusV1{
