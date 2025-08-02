@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/holiman/uint256"
 
 	"github.com/ethereum-optimism/optimism/op-sync-tester/synctester/backend/config"
 	sttypes "github.com/ethereum-optimism/optimism/op-sync-tester/synctester/backend/types"
@@ -37,6 +38,18 @@ type SyncTester struct {
 	elClient *ethclient.Client
 
 	sessions map[string]*Session
+	
+	// Payload building tracking
+	payloadBuilds sync.Map // map[eth.PayloadID]*PayloadBuildJob
+}
+
+// PayloadBuildJob tracks a payload building request
+type PayloadBuildJob struct {
+	ID              eth.PayloadID
+	Attributes      *eth.PayloadAttributes
+	ForkchoiceState *eth.ForkchoiceState
+	CreatedAt       uint64
+	Built           bool
 }
 
 var _ frontend.SyncBackend = (*SyncTester)(nil)
@@ -216,41 +229,41 @@ func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
 // Engine API methods - these need to make direct RPC calls since ethclient doesn't expose them
 func (s *SyncTester) GetPayloadV1(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
 	s.log.Info("GetPayloadV1 requested", "payloadID", payloadID)
-	// For now, return an error since we're not actually building blocks
-	// TODO: Could implement mock payload building if needed
-	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
+	return s.buildMockPayload(ctx, payloadID)
 }
 
 func (s *SyncTester) GetPayloadV2(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	s.log.Info("GetPayloadV2 requested", "payloadID", payloadID)
-	// For now, return an error since we're not actually building blocks
-	// TODO: Could implement mock payload building if needed
-	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
+	s.log.Warn("GetPayloadV2 requested but only v4 supported", "payloadID", payloadID)
+	return nil, fmt.Errorf("payload %s not found: only v4 supported for recent blocks", payloadID.String())
 }
 
 func (s *SyncTester) GetPayloadV3(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	s.log.Info("GetPayloadV3 requested", "payloadID", payloadID)
-	// For now, return an error since we're not actually building blocks
-	// TODO: Could implement mock payload building if needed
-	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
+	s.log.Warn("GetPayloadV3 requested but only v4 supported", "payloadID", payloadID)
+	return nil, fmt.Errorf("payload %s not found: only v4 supported for recent blocks", payloadID.String())
 }
 
 func (s *SyncTester) GetPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
 	s.log.Info("GetPayloadV4 requested", "payloadID", payloadID)
-	// For now, return an error since we're not actually building blocks
-	// TODO: Could implement mock payload building if needed
-	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
+	return s.buildMockPayloadV4(ctx, payloadID)
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV1(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
-	return s.mockForkchoiceUpdated(ctx, state, attr)
+	s.log.Warn("ForkchoiceUpdatedV1 requested but only v3+ supported for recent blocks", "headBlockHash", state.HeadBlockHash)
+	return &eth.ForkchoiceUpdatedResult{
+		PayloadStatus: eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr("only v3+ supported for recent blocks"),
+		},
+	}, nil
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV2(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
+	s.log.Warn("ForkchoiceUpdatedV2 requested but preferring v3+ for recent blocks", "headBlockHash", state.HeadBlockHash)
 	return s.mockForkchoiceUpdated(ctx, state, attr)
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV3(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
+	s.log.Info("ForkchoiceUpdatedV3 requested", "headBlockHash", state.HeadBlockHash)
 	return s.mockForkchoiceUpdated(ctx, state, attr)
 }
 
@@ -280,7 +293,7 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 	}
 
 	s.log.Info("ForkchoiceUpdated validation successful", "headNumber", headBlock.NumberU64(), "safeNumber", safeBlock.NumberU64(), "finalizedNumber", finalizedBlock.NumberU64())
-	
+
 	// Return VALID status with the head block hash as latest valid
 	result := &eth.ForkchoiceUpdatedResult{
 		PayloadStatus: eth.PayloadStatusV1{
@@ -288,12 +301,23 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 			LatestValidHash: &state.HeadBlockHash,
 		},
 	}
-	
+
 	// Generate PayloadID if PayloadAttributes are provided (block building request)
 	if attr != nil {
 		payloadID := s.generateMockPayloadID(attr)
 		result.PayloadID = &payloadID
-		s.log.Info("Generated PayloadID for block building", "payloadID", payloadID, "timestamp", attr.Timestamp)
+		
+		// Store payload build job for later retrieval
+		buildJob := &PayloadBuildJob{
+			ID:              payloadID,
+			Attributes:      attr,
+			ForkchoiceState: state,
+			CreatedAt:       uint64(attr.Timestamp),
+			Built:           false,
+		}
+		s.payloadBuilds.Store(payloadID, buildJob)
+		
+		s.log.Info("Generated PayloadID for block building", "payloadID", payloadID, "timestamp", attr.Timestamp, "parent", state.HeadBlockHash, "transactions", len(attr.Transactions))
 	}
 
 	return result, nil
@@ -340,19 +364,128 @@ func (s *SyncTester) forkchoiceInvalidResult(latestValidHash common.Hash, valida
 }
 
 func (s *SyncTester) NewPayloadV1(ctx context.Context, payload *eth.ExecutionPayload) (*eth.PayloadStatusV1, error) {
-	return s.validateNewPayload(ctx, payload)
+	s.log.Warn("NewPayloadV1 requested but only v4 supported for recent blocks", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+	return &eth.PayloadStatusV1{
+		Status:          "INVALID",
+		ValidationError: stringPtr("only v4 supported for recent blocks"),
+	}, nil
 }
 
 func (s *SyncTester) NewPayloadV2(ctx context.Context, payload *eth.ExecutionPayload) (*eth.PayloadStatusV1, error) {
-	return s.validateNewPayload(ctx, payload)
+	s.log.Warn("NewPayloadV2 requested but only v4 supported for recent blocks", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+	return &eth.PayloadStatusV1{
+		Status:          "INVALID",
+		ValidationError: stringPtr("only v4 supported for recent blocks"),
+	}, nil
 }
 
 func (s *SyncTester) NewPayloadV3(ctx context.Context, payload *eth.ExecutionPayload, versionedHashes []common.Hash, beaconRoot *common.Hash) (*eth.PayloadStatusV1, error) {
-	return s.validateNewPayload(ctx, payload)
+	s.log.Warn("NewPayloadV3 requested but only v4 supported for recent blocks", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+	return &eth.PayloadStatusV1{
+		Status:          "INVALID",
+		ValidationError: stringPtr("only v4 supported for recent blocks"),
+	}, nil
 }
 
 func (s *SyncTester) NewPayloadV4(ctx context.Context, payload *eth.ExecutionPayload, versionedHashes []common.Hash, beaconRoot *common.Hash, executionRequests []hexutil.Bytes) (*eth.PayloadStatusV1, error) {
-	return s.validateNewPayload(ctx, payload)
+	return s.validateNewPayloadV4(ctx, payload, versionedHashes, beaconRoot, executionRequests)
+}
+
+// validateNewPayloadV4 comprehensively validates v4 payload and associated data
+func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.ExecutionPayload, versionedHashes []common.Hash, beaconRoot *common.Hash, executionRequests []hexutil.Bytes) (*eth.PayloadStatusV1, error) {
+	s.log.Info("Validating NewPayloadV4", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber, "parentHash", payload.ParentHash, "versionedHashes", len(versionedHashes), "executionRequests", len(executionRequests))
+
+	// 1. Validate that parent block exists in our backend
+	parentBlock, err := s.elClient.BlockByHash(ctx, payload.ParentHash)
+	if err != nil {
+		s.log.Error("Parent block not found in backend", "parentHash", payload.ParentHash, "error", err)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("parent block %s not found", payload.ParentHash)),
+		}, nil
+	}
+
+	// 2. Validate block number progression
+	expectedBlockNumber := parentBlock.NumberU64() + 1
+	actualBlockNumber := uint64(payload.BlockNumber)
+	if actualBlockNumber != expectedBlockNumber {
+		s.log.Error("Invalid block number progression", "expected", expectedBlockNumber, "actual", actualBlockNumber)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("invalid block number: expected %d, got %d", expectedBlockNumber, actualBlockNumber)),
+		}, nil
+	}
+
+	// 3. Validate timestamp progression
+	if uint64(payload.Timestamp) <= parentBlock.Time() {
+		s.log.Error("Invalid timestamp progression", "parentTime", parentBlock.Time(), "payloadTime", payload.Timestamp)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr("timestamp must be greater than parent"),
+		}, nil
+	}
+
+	// 4. Check if we built this payload ourselves (validate consistency)
+	var ourPayloadID *eth.PayloadID
+	s.payloadBuilds.Range(func(key, value interface{}) bool {
+		buildJob := value.(*PayloadBuildJob)
+		if buildJob.ForkchoiceState.HeadBlockHash == payload.ParentHash && 
+		   uint64(buildJob.Attributes.Timestamp) == uint64(payload.Timestamp) {
+			ourPayloadID = &buildJob.ID
+			return false // stop iteration
+		}
+		return true
+	})
+
+	if ourPayloadID != nil {
+		s.log.Info("Validating payload we built ourselves", "payloadID", *ourPayloadID, "blockHash", payload.BlockHash)
+		
+		// Get our build job and validate consistency
+		if buildJobInterface, exists := s.payloadBuilds.Load(*ourPayloadID); exists {
+			buildJob := buildJobInterface.(*PayloadBuildJob)
+			
+			// Validate that op-node provided same transactions we expected
+			if len(payload.Transactions) != len(buildJob.Attributes.Transactions) {
+				s.log.Error("Transaction count mismatch", "expected", len(buildJob.Attributes.Transactions), "actual", len(payload.Transactions))
+				return &eth.PayloadStatusV1{
+					Status:          "INVALID",
+					ValidationError: stringPtr("transaction count mismatch with build request"),
+				}, nil
+			}
+			
+			// Validate fee recipient
+			if payload.FeeRecipient != buildJob.Attributes.SuggestedFeeRecipient {
+				s.log.Error("Fee recipient mismatch", "expected", buildJob.Attributes.SuggestedFeeRecipient, "actual", payload.FeeRecipient)
+				return &eth.PayloadStatusV1{
+					Status:          "INVALID",
+					ValidationError: stringPtr("fee recipient mismatch with build request"),
+				}, nil
+			}
+			
+			s.log.Info("Payload validation successful - matches our build request", "payloadID", *ourPayloadID, "txCount", len(payload.Transactions))
+		}
+	} else {
+		s.log.Info("Validating externally built payload", "blockHash", payload.BlockHash)
+	}
+
+	// 5. Log detailed payload info for verification
+	s.log.Info("NewPayloadV4 validation complete", 
+		"blockHash", payload.BlockHash,
+		"blockNumber", payload.BlockNumber,
+		"parentHash", payload.ParentHash,
+		"feeRecipient", payload.FeeRecipient,
+		"gasLimit", payload.GasLimit,
+		"gasUsed", payload.GasUsed,
+		"baseFeePerGas", payload.BaseFeePerGas,
+		"txCount", len(payload.Transactions),
+		"versionedHashCount", len(versionedHashes),
+		"executionRequestCount", len(executionRequests))
+
+	// Return VALID status
+	return &eth.PayloadStatusV1{
+		Status:          "VALID",
+		LatestValidHash: &payload.BlockHash,
+	}, nil
 }
 
 // validateNewPayload validates payload against Sepolia backend and returns appropriate response
@@ -416,10 +549,83 @@ func (s *SyncTester) generateMockPayloadID(attr *eth.PayloadAttributes) eth.Payl
 	// This mimics what a real engine would do for payload building
 	hash := fmt.Sprintf("%d-%s", attr.Timestamp, common.Hash(attr.PrevRandao).Hex())
 	hashBytes := common.BytesToHash([]byte(hash))
-	
+
 	var out eth.PayloadID
 	copy(out[:], hashBytes[:8]) // PayloadID is first 8 bytes
 	return out
+}
+
+// buildMockPayload builds a mock ExecutionPayload for GetPayloadV1
+func (s *SyncTester) buildMockPayload(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
+	// Retrieve the payload build job
+	buildJobInterface, exists := s.payloadBuilds.Load(payloadID)
+	if !exists {
+		s.log.Error("PayloadID not found in build jobs", "payloadID", payloadID)
+		return nil, fmt.Errorf("payload %s not found", payloadID.String())
+	}
+
+	buildJob := buildJobInterface.(*PayloadBuildJob)
+	s.log.Info("Building mock payload", "payloadID", payloadID, "parent", buildJob.ForkchoiceState.HeadBlockHash, "timestamp", buildJob.Attributes.Timestamp)
+
+	// Get parent block for building child
+	parentBlock, err := s.elClient.BlockByHash(ctx, buildJob.ForkchoiceState.HeadBlockHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent block %s: %w", buildJob.ForkchoiceState.HeadBlockHash, err)
+	}
+
+	// Build mock payload based on parent and attributes
+	payload := &eth.ExecutionPayload{
+		ParentHash:    buildJob.ForkchoiceState.HeadBlockHash,
+		FeeRecipient:  buildJob.Attributes.SuggestedFeeRecipient,
+		StateRoot:     eth.Bytes32{}, // Mock - would be computed in real engine
+		ReceiptsRoot:  eth.Bytes32{}, // Mock - would be computed in real engine
+		LogsBloom:     eth.Bytes256{}, // Mock - would be computed in real engine
+		PrevRandao:    buildJob.Attributes.PrevRandao,
+		BlockNumber:   eth.Uint64Quantity(parentBlock.NumberU64() + 1),
+		GasLimit:      eth.Uint64Quantity(*buildJob.Attributes.GasLimit),
+		GasUsed:       eth.Uint64Quantity(0), // Mock - no gas used
+		Timestamp:     eth.Uint64Quantity(buildJob.Attributes.Timestamp),
+		ExtraData:     eth.BytesMax32{}, // Empty extra data
+		BaseFeePerGas: eth.Uint256Quantity(*uint256.MustFromBig(parentBlock.BaseFee())), // Inherit from parent
+		BlockHash:     common.Hash{}, // Would be computed from payload
+		Transactions:  buildJob.Attributes.Transactions, // Use provided transactions
+	}
+
+	// Mock block hash generation (deterministic based on payload)
+	payload.BlockHash = s.generateMockBlockHash(payload)
+
+	// Mark as built
+	buildJob.Built = true
+	s.payloadBuilds.Store(payloadID, buildJob)
+
+	s.log.Info("Mock payload built successfully", "payloadID", payloadID, "blockNumber", payload.BlockNumber, "blockHash", payload.BlockHash, "txCount", len(payload.Transactions))
+	return payload, nil
+}
+
+// buildMockPayloadV4 builds a mock ExecutionPayloadEnvelope for GetPayloadV4
+func (s *SyncTester) buildMockPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
+	// First build the basic payload
+	payload, err := s.buildMockPayload(ctx, payloadID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap in envelope with additional v4 fields
+	envelope := &eth.ExecutionPayloadEnvelope{
+		ExecutionPayload: payload,
+		// ParentBeaconBlockRoot would be set if available - mock as nil
+		ParentBeaconBlockRoot: nil,
+	}
+
+	s.log.Info("Mock payload envelope v4 built", "payloadID", payloadID, "blockHash", payload.BlockHash)
+	return envelope, nil
+}
+
+// generateMockBlockHash creates a deterministic mock block hash
+func (s *SyncTester) generateMockBlockHash(payload *eth.ExecutionPayload) common.Hash {
+	// Create a simple deterministic hash based on parent + number + timestamp
+	data := fmt.Sprintf("%s-%d-%d", payload.ParentHash.Hex(), payload.BlockNumber, payload.Timestamp)
+	return common.BytesToHash([]byte(data))
 }
 
 // stringPtr returns a pointer to the given string (helper for optional fields)
