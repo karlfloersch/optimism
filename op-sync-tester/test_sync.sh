@@ -36,8 +36,8 @@ L2_RPC_ENDPOINT="$2"
 L1_BEACON_ENDPOINT="${3:-https://ethereum-sepolia-beacon-api.publicnode.com}"
 
 # L2 endpoint (via sync-tester proxy with session)
-# latest=10, safe=5, finalized=1 (blocks behind real chain for controlled testing)
-L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=10&safe=5&finalized=1"
+# Start much further back: latest=1000, safe=500, finalized=100 (blocks behind real chain)
+L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=1000&safe=500&finalized=100"
 
 echo "🔧 Configuration:"
 echo "   L1: $L1_ENDPOINT"
@@ -143,19 +143,29 @@ for i in {1..15}; do
     sleep 3
 done
 
-# Capture starting block state
-STARTING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-    "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
+# Function to get block number for different head types
+get_block_number() {
+    local head_type="$1"
+    local response=$(curl -s -X POST -H "Content-Type: application/json" \
+        --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$head_type\",false],\"id\":1}" \
+        "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
+    
+    if [ -n "$response" ] && [ "$response" != "null" ]; then
+        echo "$response" | jq -r '.number // "0x0"' | xargs printf "%d" 2>/dev/null || echo "0"
+    else
+        echo "unknown"
+    fi
+}
 
-if [ -n "$STARTING_BLOCK_RESPONSE" ] && [ "$STARTING_BLOCK_RESPONSE" != "null" ]; then
-    STARTING_BLOCK_NUMBER=$(echo "$STARTING_BLOCK_RESPONSE" | jq -r '.number // "0x0"')
-    STARTING_BLOCK_NUM_DEC=$(printf "%d" "$STARTING_BLOCK_NUMBER" 2>/dev/null || echo "0")
-    echo "📊 Starting block: #$STARTING_BLOCK_NUM_DEC"
-else
-    echo "❌ Failed to get starting block"
-    STARTING_BLOCK_NUM_DEC="unknown"
-fi
+# Capture starting state for all head types
+echo "📊 Capturing starting head positions..."
+STARTING_LATEST=$(get_block_number "latest")
+STARTING_SAFE=$(get_block_number "safe") 
+STARTING_FINALIZED=$(get_block_number "finalized")
+
+echo "   Latest head: #$STARTING_LATEST"
+echo "   Safe head: #$STARTING_SAFE"
+echo "   Finalized head: #$STARTING_FINALIZED"
 
 # Record start time for performance calculation
 START_TIME=$(date +%s)
@@ -163,28 +173,47 @@ START_TIME=$(date +%s)
 # Sync with status checks
 echo "⏳ Syncing for 60 seconds..."
 for i in {1..4}; do
-    # Check current block
-    CURRENT_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
-        --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-        "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
-
-    if [ -n "$CURRENT_RESPONSE" ] && [ "$CURRENT_RESPONSE" != "null" ]; then
-        CURRENT_BLOCK_NUMBER=$(echo "$CURRENT_RESPONSE" | jq -r '.number // "0x0"')
-        CURRENT_BLOCK_NUM_DEC=$(printf "%d" "$CURRENT_BLOCK_NUMBER" 2>/dev/null || echo "0")
-
-        if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$CURRENT_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
-            PROGRESS=$((CURRENT_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
-            echo "   Progress: $PROGRESS blocks (current: #$CURRENT_BLOCK_NUM_DEC)"
-        fi
+    echo "   📊 Status check $i/4 (after $((i*15))s):"
+    
+    # Get current head positions
+    CURRENT_LATEST=$(get_block_number "latest")
+    CURRENT_SAFE=$(get_block_number "safe")
+    CURRENT_FINALIZED=$(get_block_number "finalized")
+    
+    # Calculate progress for each head type
+    if [ "$STARTING_LATEST" != "unknown" ] && [ "$CURRENT_LATEST" != "unknown" ] && [ "$CURRENT_LATEST" -gt "$STARTING_LATEST" ]; then
+        LATEST_PROGRESS=$((CURRENT_LATEST - STARTING_LATEST))
+        echo "      Latest: +$LATEST_PROGRESS blocks (#$CURRENT_LATEST)"
+    else
+        echo "      Latest: #$CURRENT_LATEST"
     fi
-
+    
+    if [ "$STARTING_SAFE" != "unknown" ] && [ "$CURRENT_SAFE" != "unknown" ] && [ "$CURRENT_SAFE" -gt "$STARTING_SAFE" ]; then
+        SAFE_PROGRESS=$((CURRENT_SAFE - STARTING_SAFE))
+        echo "      Safe: +$SAFE_PROGRESS blocks (#$CURRENT_SAFE)"
+    else
+        echo "      Safe: #$CURRENT_SAFE"
+    fi
+    
+    if [ "$STARTING_FINALIZED" != "unknown" ] && [ "$CURRENT_FINALIZED" != "unknown" ] && [ "$CURRENT_FINALIZED" -gt "$STARTING_FINALIZED" ]; then
+        FINALIZED_PROGRESS=$((CURRENT_FINALIZED - STARTING_FINALIZED))
+        echo "      Finalized: +$FINALIZED_PROGRESS blocks (#$CURRENT_FINALIZED)"
+    else
+        echo "      Finalized: #$CURRENT_FINALIZED"
+    fi
+    
     sleep 15
 done
 
-# Capture ending block state
-ENDING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-    "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
+# Capture ending state for all head types
+echo "📊 Capturing ending head positions..."
+ENDING_LATEST=$(get_block_number "latest")
+ENDING_SAFE=$(get_block_number "safe")
+ENDING_FINALIZED=$(get_block_number "finalized")
+
+echo "   Latest head: #$ENDING_LATEST"
+echo "   Safe head: #$ENDING_SAFE"
+echo "   Finalized head: #$ENDING_FINALIZED"
 
 # Record end time for performance calculation
 END_TIME=$(date +%s)
@@ -194,39 +223,52 @@ echo "🛑 Stopping processes..."
 kill $SYNC_TESTER_PID $OP_NODE_PID 2>/dev/null || true
 sleep 2
 
-# Calculate results
-if [ -n "$ENDING_BLOCK_RESPONSE" ] && [ "$ENDING_BLOCK_RESPONSE" != "null" ]; then
-    ENDING_BLOCK_NUMBER=$(echo "$ENDING_BLOCK_RESPONSE" | jq -r '.number // "0x0"')
-    ENDING_BLOCK_NUM_DEC=$(printf "%d" "$ENDING_BLOCK_NUMBER" 2>/dev/null || echo "0")
-    echo "📊 Ending block: #$ENDING_BLOCK_NUM_DEC"
-else
-    echo "❌ Failed to get ending block"
-    ENDING_BLOCK_NUM_DEC="unknown"
-fi
-
 echo ""
 echo "📋 SYNC TEST RESULTS"
 echo "===================="
 echo "Session ID: $SESSION_UUID"
+echo "Starting position: 1000 blocks behind (latest), 500 behind (safe), 100 behind (finalized)"
+echo ""
 
-# Calculate blocks processed and performance metrics
-if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
-    BLOCKS_PROCESSED=$((ENDING_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
-    DURATION_SECONDS=$((END_TIME - START_TIME))
+# Calculate progress for each head type
+DURATION_SECONDS=$((END_TIME - START_TIME))
 
-    # Calculate blocks per second (with 2 decimal places)
-    if [ "$DURATION_SECONDS" -gt 0 ]; then
-        BLOCKS_PER_SECOND=$(echo "scale=2; $BLOCKS_PROCESSED / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
-    else
-        BLOCKS_PER_SECOND="unknown"
-    fi
+echo "📈 HEAD PROGRESSION:"
 
-    echo "✅ Blocks processed: $BLOCKS_PROCESSED"
-    echo "⏱️  Duration: ${DURATION_SECONDS}s"
-    echo "🚀 Performance: ${BLOCKS_PER_SECOND} blocks/second"
+# Latest head progress
+if [ "$STARTING_LATEST" != "unknown" ] && [ "$ENDING_LATEST" != "unknown" ] && [ "$ENDING_LATEST" -gt "$STARTING_LATEST" ]; then
+    LATEST_BLOCKS=$((ENDING_LATEST - STARTING_LATEST))
+    LATEST_RATE=$(echo "scale=2; $LATEST_BLOCKS / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
+    echo "   🟢 Latest head: +$LATEST_BLOCKS blocks (${LATEST_RATE}/sec)"
+else
+    echo "   🔴 Latest head: Unable to calculate"
+fi
+
+# Safe head progress  
+if [ "$STARTING_SAFE" != "unknown" ] && [ "$ENDING_SAFE" != "unknown" ] && [ "$ENDING_SAFE" -gt "$STARTING_SAFE" ]; then
+    SAFE_BLOCKS=$((ENDING_SAFE - STARTING_SAFE))
+    SAFE_RATE=$(echo "scale=2; $SAFE_BLOCKS / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
+    echo "   🟡 Safe head: +$SAFE_BLOCKS blocks (${SAFE_RATE}/sec)"
+else
+    echo "   🔴 Safe head: Unable to calculate"
+fi
+
+# Finalized head progress
+if [ "$STARTING_FINALIZED" != "unknown" ] && [ "$ENDING_FINALIZED" != "unknown" ] && [ "$ENDING_FINALIZED" -gt "$STARTING_FINALIZED" ]; then
+    FINALIZED_BLOCKS=$((ENDING_FINALIZED - STARTING_FINALIZED))
+    FINALIZED_RATE=$(echo "scale=2; $FINALIZED_BLOCKS / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
+    echo "   🔵 Finalized head: +$FINALIZED_BLOCKS blocks (${FINALIZED_RATE}/sec)"
+else
+    echo "   🔴 Finalized head: Unable to calculate"
+fi
+
+echo ""
+echo "⏱️  Total duration: ${DURATION_SECONDS}s"
+
+# Overall success check
+if [ "$LATEST_BLOCKS" -gt 0 ] 2>/dev/null; then
     echo "✅ Test completed successfully"
 else
-    echo "❌ Unable to calculate blocks processed"
     echo "⚠️  Test may have encountered issues"
 fi
 
