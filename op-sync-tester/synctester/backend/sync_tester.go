@@ -38,7 +38,7 @@ type SyncTester struct {
 	elClient *ethclient.Client
 
 	sessions map[string]*Session
-	
+
 	// Payload building tracking
 	payloadBuilds sync.Map // map[eth.PayloadID]*PayloadBuildJob
 }
@@ -306,7 +306,7 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 	if attr != nil {
 		payloadID := s.generateMockPayloadID(attr)
 		result.PayloadID = &payloadID
-		
+
 		// Store payload build job for later retrieval
 		buildJob := &PayloadBuildJob{
 			ID:              payloadID,
@@ -316,7 +316,7 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 			Built:           false,
 		}
 		s.payloadBuilds.Store(payloadID, buildJob)
-		
+
 		s.log.Info("Generated PayloadID for block building", "payloadID", payloadID, "timestamp", attr.Timestamp, "parent", state.HeadBlockHash, "transactions", len(attr.Transactions))
 	}
 
@@ -429,7 +429,7 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 	var ourPayloadID *eth.PayloadID
 	s.payloadBuilds.Range(func(key, value interface{}) bool {
 		buildJob := value.(*PayloadBuildJob)
-		if buildJob.ForkchoiceState.HeadBlockHash == payload.ParentHash && 
+		if buildJob.ForkchoiceState.HeadBlockHash == payload.ParentHash &&
 		   uint64(buildJob.Attributes.Timestamp) == uint64(payload.Timestamp) {
 			ourPayloadID = &buildJob.ID
 			return false // stop iteration
@@ -439,11 +439,11 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 
 	if ourPayloadID != nil {
 		s.log.Info("Validating payload we built ourselves", "payloadID", *ourPayloadID, "blockHash", payload.BlockHash)
-		
+
 		// Get our build job and validate consistency
 		if buildJobInterface, exists := s.payloadBuilds.Load(*ourPayloadID); exists {
 			buildJob := buildJobInterface.(*PayloadBuildJob)
-			
+
 			// Validate that op-node provided same transactions we expected
 			if len(payload.Transactions) != len(buildJob.Attributes.Transactions) {
 				s.log.Error("Transaction count mismatch", "expected", len(buildJob.Attributes.Transactions), "actual", len(payload.Transactions))
@@ -452,7 +452,7 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 					ValidationError: stringPtr("transaction count mismatch with build request"),
 				}, nil
 			}
-			
+
 			// Validate fee recipient
 			if payload.FeeRecipient != buildJob.Attributes.SuggestedFeeRecipient {
 				s.log.Error("Fee recipient mismatch", "expected", buildJob.Attributes.SuggestedFeeRecipient, "actual", payload.FeeRecipient)
@@ -461,7 +461,7 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 					ValidationError: stringPtr("fee recipient mismatch with build request"),
 				}, nil
 			}
-			
+
 			s.log.Info("Payload validation successful - matches our build request", "payloadID", *ourPayloadID, "txCount", len(payload.Transactions))
 		}
 	} else {
@@ -469,7 +469,7 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 	}
 
 	// 5. Log detailed payload info for verification
-	s.log.Info("NewPayloadV4 validation complete", 
+	s.log.Info("NewPayloadV4 validation complete",
 		"blockHash", payload.BlockHash,
 		"blockNumber", payload.BlockNumber,
 		"parentHash", payload.ParentHash,

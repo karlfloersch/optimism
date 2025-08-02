@@ -149,7 +149,7 @@ get_block_number() {
     local response=$(curl -s -X POST -H "Content-Type: application/json" \
         --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$head_type\",false],\"id\":1}" \
         "$L2_ENDPOINT" 2>/dev/null | jq -r '.result // empty')
-    
+
     if [ -n "$response" ] && [ "$response" != "null" ]; then
         echo "$response" | jq -r '.number // "0x0"' | xargs printf "%d" 2>/dev/null || echo "0"
     else
@@ -160,7 +160,7 @@ get_block_number() {
 # Capture starting state for all head types
 echo "📊 Capturing starting head positions..."
 STARTING_LATEST=$(get_block_number "latest")
-STARTING_SAFE=$(get_block_number "safe") 
+STARTING_SAFE=$(get_block_number "safe")
 STARTING_FINALIZED=$(get_block_number "finalized")
 
 echo "   Latest head: #$STARTING_LATEST"
@@ -174,12 +174,12 @@ START_TIME=$(date +%s)
 echo "⏳ Syncing for 60 seconds..."
 for i in {1..4}; do
     echo "   📊 Status check $i/4 (after $((i*15))s):"
-    
+
     # Get current head positions
     CURRENT_LATEST=$(get_block_number "latest")
     CURRENT_SAFE=$(get_block_number "safe")
     CURRENT_FINALIZED=$(get_block_number "finalized")
-    
+
     # Calculate progress for each head type
     if [ "$STARTING_LATEST" != "unknown" ] && [ "$CURRENT_LATEST" != "unknown" ] && [ "$CURRENT_LATEST" -gt "$STARTING_LATEST" ]; then
         LATEST_PROGRESS=$((CURRENT_LATEST - STARTING_LATEST))
@@ -187,21 +187,21 @@ for i in {1..4}; do
     else
         echo "      Latest: #$CURRENT_LATEST"
     fi
-    
+
     if [ "$STARTING_SAFE" != "unknown" ] && [ "$CURRENT_SAFE" != "unknown" ] && [ "$CURRENT_SAFE" -gt "$STARTING_SAFE" ]; then
         SAFE_PROGRESS=$((CURRENT_SAFE - STARTING_SAFE))
         echo "      Safe: +$SAFE_PROGRESS blocks (#$CURRENT_SAFE)"
     else
         echo "      Safe: #$CURRENT_SAFE"
     fi
-    
+
     if [ "$STARTING_FINALIZED" != "unknown" ] && [ "$CURRENT_FINALIZED" != "unknown" ] && [ "$CURRENT_FINALIZED" -gt "$STARTING_FINALIZED" ]; then
         FINALIZED_PROGRESS=$((CURRENT_FINALIZED - STARTING_FINALIZED))
         echo "      Finalized: +$FINALIZED_PROGRESS blocks (#$CURRENT_FINALIZED)"
     else
         echo "      Finalized: #$CURRENT_FINALIZED"
     fi
-    
+
     sleep 15
 done
 
@@ -244,7 +244,7 @@ else
     echo "   🔴 Latest head: Unable to calculate"
 fi
 
-# Safe head progress  
+# Safe head progress
 if [ "$STARTING_SAFE" != "unknown" ] && [ "$ENDING_SAFE" != "unknown" ] && [ "$ENDING_SAFE" -gt "$STARTING_SAFE" ]; then
     SAFE_BLOCKS=$((ENDING_SAFE - STARTING_SAFE))
     SAFE_RATE=$(echo "scale=2; $SAFE_BLOCKS / $DURATION_SECONDS" | bc -l 2>/dev/null || echo "unknown")
