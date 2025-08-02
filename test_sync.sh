@@ -23,6 +23,20 @@ echo "   L2: $L2_ENDPOINT (via sync-tester proxy)"
 echo "   Session ID: $SESSION_UUID"
 echo ""
 
+# Check if sync-tester is running
+echo "🔍 Checking if sync-tester is running..."
+if curl -s -X POST -H "Content-Type: application/json" \
+    --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    http://127.0.0.1:9000/chain/11155420/synctest/test-session 2>/dev/null | grep -q "result"; then
+    echo "✅ sync-tester is running on port 9000"
+else
+    echo "❌ sync-tester is NOT running on port 9000!"
+    echo "   Please start it first:"
+    echo "   ./op-sync-tester/bin/op-sync-tester --config=op-sync-tester/sepolia_config.yaml --rpc.addr=127.0.0.1 --rpc.port=9000 --log.level=info &"
+    exit 1
+fi
+echo ""
+
 # Clean up any existing op-node processes on ports 8550-8565
 echo "🧹 Cleaning up existing op-node processes..."
 for port in {8550..8565}; do
@@ -55,9 +69,24 @@ OP_NODE_PID=$!
 echo "   op-node PID: $OP_NODE_PID"
 echo "   RPC endpoint: http://127.0.0.1:$RPC_PORT"
 
-# Wait for initialization
-echo "⏳ Waiting 45 seconds for op-node RPC to initialize..."
-sleep 45
+# Wait for initialization with periodic checks
+echo "⏳ Waiting for op-node RPC to initialize..."
+for i in {1..15}; do
+    echo "   Attempt $i/15: Checking if op-node RPC is ready..."
+    if curl -s -X POST -H "Content-Type: application/json" \
+        --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+        http://127.0.0.1:$RPC_PORT 2>/dev/null | grep -q "result"; then
+        echo "✅ op-node RPC is ready!"
+        break
+    fi
+    if [ $i -eq 15 ]; then
+        echo "❌ op-node RPC failed to initialize after 15 attempts"
+        echo "📋 Recent op-node logs:"
+        tail -10 op_node_sync_tester.log 2>/dev/null || echo "No log file found"
+        exit 1
+    fi
+    sleep 3
+done
 
 # Capture starting L2 block state
 echo "🚀 Capturing starting L2 block state..."
@@ -79,20 +108,43 @@ fi
 
 echo ""
 
-# Let it sync for 45 seconds
-echo "⏳ Syncing for 45 seconds..."
-sleep 45
+# Let it sync with periodic status checks
+echo "⏳ Syncing for 60 seconds with status checks..."
+for i in {1..4}; do
+    echo "   Status check $i/4 (after $((i*15)) seconds)..."
+    
+    # Check current block
+    CURRENT_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
+        --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
+        http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
+    
+    if [ -n "$CURRENT_RESPONSE" ] && [ "$CURRENT_RESPONSE" != "null" ]; then
+        CURRENT_BLOCK_NUMBER=$(echo "$CURRENT_RESPONSE" | jq -r '.number // "0x0"')
+        CURRENT_BLOCK_NUM_DEC=$(printf "%d" "$CURRENT_BLOCK_NUMBER" 2>/dev/null || echo "0")
+        echo "   📊 Current L2 Block: #$CURRENT_BLOCK_NUM_DEC"
+        
+        # Calculate progress so far
+        if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$CURRENT_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
+            PROGRESS=$((CURRENT_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
+            echo "   📈 Progress: $PROGRESS blocks processed so far"
+        fi
+    else
+        echo "   ❌ Failed to get current block status"
+    fi
+    
+    sleep 15
+done
+
+# Capture ending L2 block state BEFORE stopping op-node
+echo "🏁 Capturing ending L2 block state..."
+ENDING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
+    --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
+    http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
 
 # Stop op-node
 echo "🛑 Stopping op-node..."
 kill $OP_NODE_PID 2>/dev/null || true
 sleep 2
-
-# Capture ending L2 block state
-echo "🏁 Capturing ending L2 block state..."
-ENDING_BLOCK_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
-    --data '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":1}' \
-    http://127.0.0.1:$RPC_PORT 2>/dev/null | jq -r '.result // empty')
 
 if [ -n "$ENDING_BLOCK_RESPONSE" ] && [ "$ENDING_BLOCK_RESPONSE" != "null" ]; then
     ENDING_BLOCK_NUMBER=$(echo "$ENDING_BLOCK_RESPONSE" | jq -r '.number // "0x0"')
@@ -162,7 +214,7 @@ echo "📋 SYNC-TESTER INTEGRATION TEST SUMMARY"
 echo "======================================="
 echo "Session ID: $SESSION_UUID"
 echo "L2 Proxy: sync-tester with 10 block lag"
-echo "Test Duration: 90 seconds (45s init + 45s sync)"
+echo "Test Duration: ~105 seconds (45s init + 60s sync)"
 
 # Show blocks processed prominently in summary
 if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
