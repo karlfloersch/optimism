@@ -2,8 +2,8 @@
 
 set -e
 
-echo "🚀 Starting op-node SYNC TEST with FLOW TRACING"
-echo "================================================"
+echo "🚀 Starting op-node SYNC TEST"
+echo "=============================="
 
 # Generate a unique session ID for this test
 SESSION_UUID=$(uuidgen)
@@ -16,15 +16,12 @@ L1_BEACON_ENDPOINT="https://ethereum-sepolia-beacon-api.publicnode.com"
 # latest=10, safe=5, finalized=1 (blocks behind real chain for controlled testing)
 L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=10&safe=5&finalized=1"
 
-echo "🔍 Starting op-node with FLOW TRACING enabled..."
+echo "🔍 Starting op-node..."
 echo "   L1: $L1_ENDPOINT"
 echo "   L1 Beacon: $L1_BEACON_ENDPOINT"
 echo "   L2: $L2_ENDPOINT (via sync-tester proxy)"
 echo "   Session ID: $SESSION_UUID"
 echo ""
-
-# Ensure cleanup directories exist
-mkdir -p /tmp/flow-traces
 
 # Clean up any existing op-node processes on ports 8550-8565
 echo "🧹 Cleaning up existing op-node processes..."
@@ -37,8 +34,8 @@ RPC_PORT=8553
 
 echo "🔄 Starting op-node with sync-tester proxy (90 seconds test)..."
 
-# Start op-node in background with flow tracing
-OP_NODE_FLOW_TRACING=true go run ./op-node/cmd \
+# Start op-node in background
+go run ./op-node/cmd \
     --l1="$L1_ENDPOINT" \
     --l1.beacon="$L1_BEACON_ENDPOINT" \
     --l2="$L2_ENDPOINT" \
@@ -151,64 +148,13 @@ fi
 
 echo ""
 
-# Analyze flow traces
-echo "📊 FLOW TRACE ANALYSIS"
-echo "====================="
-
-LATEST_FLOW_TRACE=$(ls -t /tmp/flow-traces/flow-events-*.json 2>/dev/null | head -1)
-if [ -n "$LATEST_FLOW_TRACE" ]; then
-    echo "📁 Flow trace file: $(basename "$LATEST_FLOW_TRACE")"
-
-    # Get total events
-    TOTAL_EVENTS=$(jq -r '.metadata.total_events // 0' "$LATEST_FLOW_TRACE" 2>/dev/null)
-    echo "📊 Total events captured: $TOTAL_EVENTS"
-
-    if [ "$TOTAL_EVENTS" -gt 0 ]; then
-        echo "✅ Flow tracing is ACTIVE"
-    else
-        echo "❌ Flow tracing captured zero events"
-    fi
-
-    echo ""
-    echo "🔍 Checking for ELIMINATED engine events:"
-
-    # Check eliminated events (should be 0)
-    eliminated_events=(
-        "TryUpdateEngineEvent"
-        "ProcessUnsafePayloadEvent"
-        "ForkchoiceRequestEvent"
-        "CrossUpdateRequestEvent"
-        "InteropInvalidateBlockEvent"
-        "PromoteCrossUnsafeEvent"
-        "PendingSafeRequestEvent"
-    )
-
-    for event in "${eliminated_events[@]}"; do
-        count=$(jq -r --arg event "$event" '.events[] | select(.event_type == $event) | .event_type' "$LATEST_FLOW_TRACE" 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$count" -eq 0 ]; then
-            echo "✅ $event: 0 (ELIMINATED)"
-        else
-            echo "❌ $event: $count (NOT ELIMINATED)"
-        fi
-    done
-
-    echo ""
-    echo "🔍 Checking for expected NON-eliminated events:"
-
-    # Check some events that should still exist
-    other_events=("ResetEvent" "EngineResetEvent" "PromotePendingSafeEvent")
-
-    for event in "${other_events[@]}"; do
-        count=$(jq -r --arg event "$event" '.events[] | select(.event_type == $event) | .event_type' "$LATEST_FLOW_TRACE" 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$count" -gt 0 ]; then
-            echo "✅ $event: $count (present as expected)"
-        else
-            echo "⚠️  $event: 0 (may be normal)"
-        fi
-    done
-
+# Show op-node logs
+echo "📋 OP-NODE LOGS (last 30 lines)"
+echo "==============================="
+if [ -f "op_node_sync_tester.log" ]; then
+    tail -30 op_node_sync_tester.log
 else
-    echo "❌ No flow trace file found"
+    echo "❌ No op-node log file found"
 fi
 
 echo ""
@@ -217,21 +163,23 @@ echo "======================================="
 echo "Session ID: $SESSION_UUID"
 echo "L2 Proxy: sync-tester with 10 block lag"
 echo "Test Duration: 90 seconds (45s init + 45s sync)"
-echo "✅ sync-tester integration: SUCCESS"
 
-if [ "$TOTAL_EVENTS" -gt 0 ]; then
-    echo "✅ Flow tracing: ACTIVE"
+# Show blocks processed prominently in summary
+if [ "$STARTING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" != "unknown" ] && [ "$ENDING_BLOCK_NUM_DEC" -gt "$STARTING_BLOCK_NUM_DEC" ]; then
+    BLOCKS_PROCESSED=$((ENDING_BLOCK_NUM_DEC - STARTING_BLOCK_NUM_DEC))
+    echo "✅ Blocks Processed: $BLOCKS_PROCESSED blocks"
+    echo "✅ sync-tester integration: SUCCESS"
 else
-    echo "❌ Flow tracing: INACTIVE"
+    echo "❌ Blocks Processed: Unable to calculate"
+    echo "⚠️  sync-tester integration: May have issues"
 fi
 
 echo ""
 echo "🎯 Next steps:"
-echo "   - Verify eliminated events show 0 occurrences"
 echo "   - Compare sync performance vs direct connection"
 echo "   - Test different session parameters (latest/safe/finalized)"
+echo "   - Verify sync-tester validation logs"
 echo ""
 
 echo "📝 Log files:"
 echo "   - op-node log: op_node_sync_tester.log"
-echo "   - Flow trace: $LATEST_FLOW_TRACE"
