@@ -93,61 +93,336 @@ func (s *SyncTester) ListSessions(ctx context.Context) ([]string, error) {
 }
 
 func (s *SyncTester) GetBlockReceipts(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) ([]*types.Receipt, error) {
-	return nil, nil
+	// Direct proxy - receipts don't need session offset logic
+	return s.elClient.BlockReceipts(ctx, blockNrOrHash)
 }
 
-func (s *SyncTester) GetBlockByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
-	return nil, nil
+func (s *SyncTester) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (interface{}, error) {
+	// Direct proxy - hash lookups don't need session offset logic
+	// Use raw RPC call to preserve all JSON fields
+	var result interface{}
+	err := s.elClient.Client().CallContext(ctx, &result, "eth_getBlockByHash", hash, fullTx)
+	if err != nil {
+		s.log.Error("Failed RPC call for block by hash", "hash", hash, "error", err)
+		return nil, fmt.Errorf("failed RPC call: %w", err)
+	}
+
+	s.log.Info("Got block by hash", "hash", hash)
+	return result, nil
 }
 
-func (s *SyncTester) GetBlockByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
-	return nil, nil
+func (s *SyncTester) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (interface{}, error) {
+	// Apply session offset logic for block number requests
+	resolvedNumber, err := s.resolveBlockNumber(ctx, number)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve block number: %w", err)
+	}
+
+	// Convert resolved number to hex string for RPC call
+	var blockNumberParam string
+	if resolvedNumber == nil {
+		blockNumberParam = "latest"
+	} else {
+		blockNumberParam = fmt.Sprintf("0x%x", resolvedNumber)
+	}
+
+	s.log.Info("Making RPC call for block", "requested", number, "resolved", blockNumberParam)
+
+	// Use raw RPC call to preserve all JSON fields
+	var result interface{}
+	err = s.elClient.Client().CallContext(ctx, &result, "eth_getBlockByNumber", blockNumberParam, fullTx)
+	if err != nil {
+		s.log.Error("Failed RPC call for block", "error", err)
+		return nil, fmt.Errorf("failed RPC call: %w", err)
+	}
+
+	if result == nil {
+		return nil, fmt.Errorf("block not found")
+	}
+
+	s.log.Info("Got complete block JSON", "requested", number, "resolved", blockNumberParam)
+	return result, nil
 }
 
-func (s *SyncTester) ChainId(ctx context.Context) (eth.ChainID, error) {
-	return s.chainID, nil
+// resolveBlockNumber applies session offset logic to block number requests
+func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc.BlockNumber) (*big.Int, error) {
+	// Check if this request has a session context
+	session, hasSession := SessionFromContext(ctx)
+	if !hasSession {
+		// No session - convert rpc.BlockNumber to *big.Int and pass through
+		if requestedNumber == rpc.LatestBlockNumber {
+			return nil, nil // nil means latest for ethclient
+		} else if requestedNumber == rpc.EarliestBlockNumber {
+			return big.NewInt(0), nil
+		} else if requestedNumber == rpc.PendingBlockNumber {
+			return nil, nil // treat pending as latest for now
+		} else {
+			return big.NewInt(int64(requestedNumber)), nil
+		}
+	}
+
+	// For session requests, we need to get the current chain tip and apply offsets
+	currentBlockNumber, err := s.elClient.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current block number: %w", err)
+	}
+
+	// Handle special cases for latest/safe/finalized based on session offsets
+	if requestedNumber == rpc.LatestBlockNumber {
+		// Apply session.Latest offset to current tip
+		if currentBlockNumber >= session.Latest {
+			targetBlock := currentBlockNumber - session.Latest
+			return big.NewInt(int64(targetBlock)), nil
+		} else {
+			// If offset is larger than current block, return genesis
+			return big.NewInt(0), nil
+		}
+	} else if requestedNumber == rpc.EarliestBlockNumber {
+		return big.NewInt(0), nil
+	} else if requestedNumber == rpc.PendingBlockNumber {
+		// Apply session.Latest offset for pending too
+		if currentBlockNumber >= session.Latest {
+			targetBlock := currentBlockNumber - session.Latest
+			return big.NewInt(int64(targetBlock)), nil
+		} else {
+			return big.NewInt(0), nil
+		}
+	} else if requestedNumber == rpc.FinalizedBlockNumber {
+		// Apply session.Finalized offset
+		if currentBlockNumber >= session.Finalized {
+			targetBlock := currentBlockNumber - session.Finalized
+			return big.NewInt(int64(targetBlock)), nil
+		} else {
+			return big.NewInt(0), nil
+		}
+	} else if requestedNumber == rpc.SafeBlockNumber {
+		// Apply session.Safe offset
+		if currentBlockNumber >= session.Safe {
+			targetBlock := currentBlockNumber - session.Safe
+			return big.NewInt(int64(targetBlock)), nil
+		} else {
+			return big.NewInt(0), nil
+		}
+	} else {
+		// For specific block numbers, pass through as-is
+		return big.NewInt(int64(requestedNumber)), nil
+	}
 }
 
+func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
+	return (*hexutil.Big)(s.chainID.ToBig()), nil
+}
+
+// Engine API methods - these need to make direct RPC calls since ethclient doesn't expose them
 func (s *SyncTester) GetPayloadV1(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
-	return nil, nil
+	s.log.Info("GetPayloadV1 requested", "payloadID", payloadID)
+	// For now, return an error since we're not actually building blocks
+	// TODO: Could implement mock payload building if needed
+	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
 }
 
 func (s *SyncTester) GetPayloadV2(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	return nil, nil
+	s.log.Info("GetPayloadV2 requested", "payloadID", payloadID)
+	// For now, return an error since we're not actually building blocks
+	// TODO: Could implement mock payload building if needed
+	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
 }
 
 func (s *SyncTester) GetPayloadV3(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	return nil, nil
+	s.log.Info("GetPayloadV3 requested", "payloadID", payloadID)
+	// For now, return an error since we're not actually building blocks
+	// TODO: Could implement mock payload building if needed
+	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
 }
 
 func (s *SyncTester) GetPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	return nil, nil
+	s.log.Info("GetPayloadV4 requested", "payloadID", payloadID)
+	// For now, return an error since we're not actually building blocks
+	// TODO: Could implement mock payload building if needed
+	return nil, fmt.Errorf("payload %s not found: mock building not implemented", payloadID.String())
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV1(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
-	return nil, nil
+	return s.mockForkchoiceUpdated(ctx, state, attr)
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV2(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
-	return nil, nil
+	return s.mockForkchoiceUpdated(ctx, state, attr)
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV3(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
-	return nil, nil
+	return s.mockForkchoiceUpdated(ctx, state, attr)
+}
+
+// mockForkchoiceUpdated validates forkchoice state against Sepolia backend and returns appropriate response
+func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
+	s.log.Info("Validating ForkchoiceUpdated", "headBlockHash", state.HeadBlockHash, "safeBlockHash", state.SafeBlockHash, "finalizedBlockHash", state.FinalizedBlockHash)
+
+	// Validate all block hashes exist in the backend
+	headBlock, err := s.validateBlockExists(ctx, state.HeadBlockHash, "head")
+	if err != nil {
+		return s.forkchoiceInvalidResult(state.HeadBlockHash, err.Error()), nil
+	}
+
+	safeBlock, err := s.validateBlockExists(ctx, state.SafeBlockHash, "safe")
+	if err != nil {
+		return s.forkchoiceInvalidResult(state.SafeBlockHash, err.Error()), nil
+	}
+
+	finalizedBlock, err := s.validateBlockExists(ctx, state.FinalizedBlockHash, "finalized")
+	if err != nil {
+		return s.forkchoiceInvalidResult(state.FinalizedBlockHash, err.Error()), nil
+	}
+
+	// Validate chain relationships: head >= safe >= finalized
+	if err := s.validateForkchoiceChain(headBlock, safeBlock, finalizedBlock); err != nil {
+		return s.forkchoiceInvalidResult(state.HeadBlockHash, err.Error()), nil
+	}
+
+	s.log.Info("ForkchoiceUpdated validation successful", "headNumber", headBlock.NumberU64(), "safeNumber", safeBlock.NumberU64(), "finalizedNumber", finalizedBlock.NumberU64())
+	
+	// Return VALID status with the head block hash as latest valid
+	result := &eth.ForkchoiceUpdatedResult{
+		PayloadStatus: eth.PayloadStatusV1{
+			Status:          "VALID",
+			LatestValidHash: &state.HeadBlockHash,
+		},
+	}
+	
+	// Generate PayloadID if PayloadAttributes are provided (block building request)
+	if attr != nil {
+		payloadID := s.generateMockPayloadID(attr)
+		result.PayloadID = &payloadID
+		s.log.Info("Generated PayloadID for block building", "payloadID", payloadID, "timestamp", attr.Timestamp)
+	}
+
+	return result, nil
+}
+
+// validateBlockExists checks if a block hash exists in the Sepolia backend
+func (s *SyncTester) validateBlockExists(ctx context.Context, blockHash common.Hash, blockType string) (*types.Block, error) {
+	block, err := s.elClient.BlockByHash(ctx, blockHash)
+	if err != nil {
+		s.log.Warn("Block validation failed", "blockType", blockType, "blockHash", blockHash, "error", err)
+		return nil, fmt.Errorf("%s block %s not found: %w", blockType, blockHash.Hex(), err)
+	}
+
+	s.log.Debug("Block validation successful", "blockType", blockType, "blockHash", blockHash, "blockNumber", block.NumberU64())
+	return block, nil
+}
+
+// validateForkchoiceChain validates that head >= safe >= finalized in block numbers
+func (s *SyncTester) validateForkchoiceChain(headBlock, safeBlock, finalizedBlock *types.Block) error {
+	headNum := headBlock.NumberU64()
+	safeNum := safeBlock.NumberU64()
+	finalizedNum := finalizedBlock.NumberU64()
+
+	if headNum < safeNum {
+		return fmt.Errorf("head block number %d is less than safe block number %d", headNum, safeNum)
+	}
+
+	if safeNum < finalizedNum {
+		return fmt.Errorf("safe block number %d is less than finalized block number %d", safeNum, finalizedNum)
+	}
+
+	return nil
+}
+
+// forkchoiceInvalidResult returns an INVALID forkchoice result with error details
+func (s *SyncTester) forkchoiceInvalidResult(latestValidHash common.Hash, validationError string) *eth.ForkchoiceUpdatedResult {
+	return &eth.ForkchoiceUpdatedResult{
+		PayloadStatus: eth.PayloadStatusV1{
+			Status:          "INVALID",
+			LatestValidHash: &latestValidHash,
+			ValidationError: &validationError,
+		},
+	}
 }
 
 func (s *SyncTester) NewPayloadV1(ctx context.Context, payload *eth.ExecutionPayload) (*eth.PayloadStatusV1, error) {
-	return nil, nil
+	return s.validateNewPayload(ctx, payload)
 }
 
 func (s *SyncTester) NewPayloadV2(ctx context.Context, payload *eth.ExecutionPayload) (*eth.PayloadStatusV1, error) {
-	return nil, nil
+	return s.validateNewPayload(ctx, payload)
 }
 
 func (s *SyncTester) NewPayloadV3(ctx context.Context, payload *eth.ExecutionPayload, versionedHashes []common.Hash, beaconRoot *common.Hash) (*eth.PayloadStatusV1, error) {
-	return nil, nil
+	return s.validateNewPayload(ctx, payload)
 }
 
 func (s *SyncTester) NewPayloadV4(ctx context.Context, payload *eth.ExecutionPayload, versionedHashes []common.Hash, beaconRoot *common.Hash, executionRequests []hexutil.Bytes) (*eth.PayloadStatusV1, error) {
-	return nil, nil
+	return s.validateNewPayload(ctx, payload)
+}
+
+// validateNewPayload validates payload against Sepolia backend and returns appropriate response
+func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.ExecutionPayload) (*eth.PayloadStatusV1, error) {
+	s.log.Info("Validating NewPayload", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber, "parentHash", payload.ParentHash)
+
+	// Validate that the block exists in Sepolia
+	block, err := s.elClient.BlockByHash(ctx, payload.BlockHash)
+	if err != nil {
+		s.log.Warn("NewPayload validation failed - block not found", "blockHash", payload.BlockHash, "error", err)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("block %s not found in chain: %v", payload.BlockHash.Hex(), err)),
+		}, nil
+	}
+
+	// Validate block number matches
+	if block.NumberU64() != uint64(payload.BlockNumber) {
+		s.log.Warn("NewPayload validation failed - block number mismatch", "expectedNumber", payload.BlockNumber, "actualNumber", block.NumberU64())
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("block number mismatch: expected %d, got %d", payload.BlockNumber, block.NumberU64())),
+		}, nil
+	}
+
+	// Validate parent hash matches
+	if block.ParentHash() != payload.ParentHash {
+		s.log.Warn("NewPayload validation failed - parent hash mismatch", "expectedParent", payload.ParentHash, "actualParent", block.ParentHash())
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("parent hash mismatch: expected %s, got %s", payload.ParentHash.Hex(), block.ParentHash().Hex())),
+		}, nil
+	}
+
+	// Optional: Validate parent block exists (ensures chain continuity)
+	if payload.ParentHash != (common.Hash{}) { // Skip genesis block
+		_, err := s.elClient.BlockByHash(ctx, payload.ParentHash)
+		if err != nil {
+			s.log.Warn("NewPayload validation failed - parent block not found", "parentHash", payload.ParentHash, "error", err)
+			return &eth.PayloadStatusV1{
+				Status:          "INVALID",
+				ValidationError: stringPtr(fmt.Sprintf("parent block %s not found: %v", payload.ParentHash.Hex(), err)),
+			}, nil
+		}
+	}
+
+	s.log.Info("NewPayload validation successful", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+
+	// Return VALID status accepting the payload
+	result := &eth.PayloadStatusV1{
+		Status:          "VALID",
+		LatestValidHash: &payload.BlockHash,
+	}
+
+	return result, nil
+}
+
+// generateMockPayloadID creates a mock PayloadID based on payload attributes
+func (s *SyncTester) generateMockPayloadID(attr *eth.PayloadAttributes) eth.PayloadID {
+	// Create a deterministic but unique PayloadID based on timestamp and prevRandao
+	// This mimics what a real engine would do for payload building
+	hash := fmt.Sprintf("%d-%s", attr.Timestamp, common.Hash(attr.PrevRandao).Hex())
+	hashBytes := common.BytesToHash([]byte(hash))
+	
+	var out eth.PayloadID
+	copy(out[:], hashBytes[:8]) // PayloadID is first 8 bytes
+	return out
+}
+
+// stringPtr returns a pointer to the given string (helper for optional fields)
+func stringPtr(s string) *string {
+	return &s
 }
