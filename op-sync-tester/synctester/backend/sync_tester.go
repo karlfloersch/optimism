@@ -1,17 +1,22 @@
 package backend
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-sync-tester/metrics"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -41,6 +46,7 @@ type SyncTester struct {
 
 	// Payload building tracking
 	payloadBuilds sync.Map // map[eth.PayloadID]*PayloadBuildJob
+	payloadCache  sync.Map // map[eth.PayloadID]*eth.ExecutionPayload - for fast GetPayload lookups
 }
 
 // PayloadBuildJob tracks a payload building request
@@ -55,6 +61,12 @@ type PayloadBuildJob struct {
 var _ frontend.SyncBackend = (*SyncTester)(nil)
 var _ frontend.EngineBackend = (*SyncTester)(nil)
 var _ frontend.EthBackend = (*SyncTester)(nil)
+
+// createBackendContext creates a context for backend HTTP calls with timeout
+// This prevents request context cancellation from crashing the sync-tester
+func (s *SyncTester) createBackendContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
+}
 
 func SyncTesterFromConfig(logger log.Logger, m metrics.Metricer, stID sttypes.SyncTesterID, stCfg *config.SyncTesterEntry) (*SyncTester, error) {
 	logger = logger.New("syncTester", stID, "chain", stCfg.ChainID)
@@ -109,14 +121,23 @@ func (s *SyncTester) ListSessions(ctx context.Context) ([]string, error) {
 
 func (s *SyncTester) GetBlockReceipts(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) ([]*types.Receipt, error) {
 	// Direct proxy - receipts don't need session offset logic
-	return s.elClient.BlockReceipts(ctx, blockNrOrHash)
+	// CRITICAL FIX: Use background context with timeout for backend calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	return s.elClient.BlockReceipts(backendCtx, blockNrOrHash)
 }
 
 func (s *SyncTester) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (interface{}, error) {
 	// Direct proxy - hash lookups don't need session offset logic
 	// Use raw RPC call to preserve all JSON fields
+
+	// CRITICAL FIX: Use background context with timeout for backend calls
+	// Request context cancellation was causing sync-tester to crash!
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+
 	var result interface{}
-	err := s.elClient.Client().CallContext(ctx, &result, "eth_getBlockByHash", hash, fullTx)
+	err := s.elClient.Client().CallContext(backendCtx, &result, "eth_getBlockByHash", hash, fullTx)
 	if err != nil {
 		s.log.Error("Failed RPC call for block by hash", "hash", hash, "error", err)
 		return nil, fmt.Errorf("failed RPC call: %w", err)
@@ -143,9 +164,13 @@ func (s *SyncTester) GetBlockByNumber(ctx context.Context, number rpc.BlockNumbe
 
 	s.log.Info("Making RPC call for block", "requested", number, "resolved", blockNumberParam)
 
+	// CRITICAL FIX: Use background context with timeout for backend calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+
 	// Use raw RPC call to preserve all JSON fields
 	var result interface{}
-	err = s.elClient.Client().CallContext(ctx, &result, "eth_getBlockByNumber", blockNumberParam, fullTx)
+	err = s.elClient.Client().CallContext(backendCtx, &result, "eth_getBlockByNumber", blockNumberParam, fullTx)
 	if err != nil {
 		s.log.Error("Failed RPC call for block", "error", err)
 		return nil, fmt.Errorf("failed RPC call: %w", err)
@@ -225,7 +250,10 @@ func (s *SyncTester) initializeProgressSession(ctx context.Context, session *Ses
 	}
 
 	// Get current chain tip ONCE to set absolute starting positions
-	currentBlockNumber, err := s.elClient.BlockNumber(ctx)
+	// CRITICAL FIX: Use background context for chain tip queries
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	currentBlockNumber, err := s.elClient.BlockNumber(backendCtx)
 	if err != nil {
 		return fmt.Errorf("failed to get current block number: %w", err)
 	}
@@ -277,7 +305,10 @@ func (s *SyncTester) advanceSessionProgress(ctx context.Context, latestBlock, sa
 	}
 
 	// Get current Sepolia chain tip to avoid advancing past real chain
-	currentSepolia, err := s.elClient.BlockNumber(ctx)
+	// Use background context for chain tip queries
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	currentSepolia, err := s.elClient.BlockNumber(backendCtx)
 	if err != nil {
 		s.log.Warn("Failed to get current Sepolia tip, cannot advance progress", "error", err)
 		return
@@ -314,7 +345,7 @@ func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
 // Engine API methods - these need to make direct RPC calls since ethclient doesn't expose them
 func (s *SyncTester) GetPayloadV1(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
 	s.log.Info("GetPayloadV1 requested", "payloadID", payloadID)
-	return s.buildMockPayload(ctx, payloadID)
+	return s.buildPayload(ctx, payloadID)
 }
 
 func (s *SyncTester) GetPayloadV2(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
@@ -329,7 +360,7 @@ func (s *SyncTester) GetPayloadV3(ctx context.Context, payloadID eth.PayloadID) 
 
 func (s *SyncTester) GetPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
 	s.log.Info("GetPayloadV4 requested", "payloadID", payloadID)
-	return s.buildMockPayloadV4(ctx, payloadID)
+	return s.buildPayloadV4(ctx, payloadID)
 }
 
 func (s *SyncTester) ForkchoiceUpdatedV1(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
@@ -392,7 +423,7 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 
 	// Generate PayloadID if PayloadAttributes are provided (block building request)
 	if attr != nil {
-		payloadID := s.generateMockPayloadID(attr)
+		payloadID := s.computePayloadId(state.HeadBlockHash, attr)
 		result.PayloadID = &payloadID
 
 		// Store payload build job for later retrieval
@@ -413,7 +444,10 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 
 // validateBlockExists checks if a block hash exists in the Sepolia backend
 func (s *SyncTester) validateBlockExists(ctx context.Context, blockHash common.Hash, blockType string) (*types.Block, error) {
-	block, err := s.elClient.BlockByHash(ctx, blockHash)
+	// Use background context for backend validation calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	block, err := s.elClient.BlockByHash(backendCtx, blockHash)
 	if err != nil {
 		s.log.Warn("Block validation failed", "blockType", blockType, "blockHash", blockHash, "error", err)
 		return nil, fmt.Errorf("%s block %s not found: %w", blockType, blockHash.Hex(), err)
@@ -484,7 +518,10 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 	s.log.Info("Validating NewPayloadV4", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber, "parentHash", payload.ParentHash, "versionedHashes", len(versionedHashes), "executionRequests", len(executionRequests))
 
 	// 1. Validate that parent block exists in our backend
-	parentBlock, err := s.elClient.BlockByHash(ctx, payload.ParentHash)
+	// Use background context for backend validation calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	parentBlock, err := s.elClient.BlockByHash(backendCtx, payload.ParentHash)
 	if err != nil {
 		s.log.Error("Parent block not found in backend", "parentHash", payload.ParentHash, "error", err)
 		return &eth.PayloadStatusV1{
@@ -556,7 +593,31 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 		s.log.Info("Validating externally built payload", "blockHash", payload.BlockHash)
 	}
 
-	// 5. Log detailed payload info for verification
+	// 5. Perform comprehensive validation against real Sepolia block
+	// This catches op-node derivation bugs by comparing every field
+	validationResult, err := s.validatePayloadAgainstRealBlock(ctx, payload)
+	if err != nil {
+		s.log.Error("Comprehensive payload validation failed", "error", err)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("comprehensive validation failed: %v", err)),
+		}, nil
+	}
+
+	if !validationResult.Valid {
+		s.log.Error("Payload does not match real Sepolia block", 
+			"blockHash", payload.BlockHash,
+			"blockNumber", payload.BlockNumber,
+			"errors", validationResult.Errors)
+		
+		// Return INVALID but don't crash - this helps us catch op-node bugs
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("payload mismatch with real block: %s", validationResult.Errors[0])),
+		}, nil
+	}
+
+	// 6. Log detailed payload info for verification
 	s.log.Info("NewPayloadV4 validation complete",
 		"blockHash", payload.BlockHash,
 		"blockNumber", payload.BlockNumber,
@@ -581,7 +642,10 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 	s.log.Info("Validating NewPayload", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber, "parentHash", payload.ParentHash)
 
 	// Validate that the block exists in Sepolia
-	block, err := s.elClient.BlockByHash(ctx, payload.BlockHash)
+	// Use background context for backend validation calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	block, err := s.elClient.BlockByHash(backendCtx, payload.BlockHash)
 	if err != nil {
 		s.log.Warn("NewPayload validation failed - block not found", "blockHash", payload.BlockHash, "error", err)
 		return &eth.PayloadStatusV1{
@@ -610,7 +674,7 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 
 	// Optional: Validate parent block exists (ensures chain continuity)
 	if payload.ParentHash != (common.Hash{}) { // Skip genesis block
-		_, err := s.elClient.BlockByHash(ctx, payload.ParentHash)
+		_, err := s.elClient.BlockByHash(backendCtx, payload.ParentHash)
 		if err != nil {
 			s.log.Warn("NewPayload validation failed - parent block not found", "parentHash", payload.ParentHash, "error", err)
 			return &eth.PayloadStatusV1{
@@ -621,6 +685,30 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 	}
 
 	s.log.Info("NewPayload validation successful", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
+
+	// Perform comprehensive validation against real Sepolia block
+	// This catches op-node derivation bugs by comparing every field
+	validationResult, err := s.validatePayloadAgainstRealBlock(ctx, payload)
+	if err != nil {
+		s.log.Error("Comprehensive payload validation failed", "error", err)
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("comprehensive validation failed: %v", err)),
+		}, nil
+	}
+
+	if !validationResult.Valid {
+		s.log.Error("Payload does not match real Sepolia block",
+			"blockHash", payload.BlockHash,
+			"blockNumber", payload.BlockNumber,
+			"errors", validationResult.Errors)
+
+		// Return INVALID but don't crash - this helps us catch op-node bugs
+		return &eth.PayloadStatusV1{
+			Status:          "INVALID",
+			ValidationError: stringPtr(fmt.Sprintf("payload mismatch with real block: %s", validationResult.Errors[0])),
+		}, nil
+	}
 
 	// Note: In progress-driven mode, we don't advance session state here
 	// Only ForkchoiceUpdated (after successful derivation) advances progress
@@ -634,20 +722,173 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 	return result, nil
 }
 
-// generateMockPayloadID creates a mock PayloadID based on payload attributes
-func (s *SyncTester) generateMockPayloadID(attr *eth.PayloadAttributes) eth.PayloadID {
-	// Create a deterministic but unique PayloadID based on timestamp and prevRandao
-	// This mimics what a real engine would do for payload building
-	hash := fmt.Sprintf("%d-%s", attr.Timestamp, common.Hash(attr.PrevRandao).Hex())
-	hashBytes := common.BytesToHash([]byte(hash))
+// validatePayloadAgainstRealBlock performs comprehensive validation of payload against real Sepolia block
+// This catches op-node derivation bugs by comparing every field
+func (s *SyncTester) validatePayloadAgainstRealBlock(ctx context.Context, payload *eth.ExecutionPayload) (*PayloadValidationResult, error) {
+	s.log.Info("Comprehensive payload validation against real Sepolia block", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
 
+	// Get the real Sepolia block
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	realBlock, err := s.elClient.BlockByHash(backendCtx, payload.BlockHash)
+	if err != nil {
+		return &PayloadValidationResult{
+			Valid: false,
+			Error: fmt.Sprintf("Real Sepolia block not found: %v", err),
+		}, nil
+	}
+
+	var errors []string
+
+	// Validate all header fields
+	if payload.ParentHash != realBlock.ParentHash() {
+		errors = append(errors, fmt.Sprintf("ParentHash mismatch: payload=%s, real=%s", payload.ParentHash.Hex(), realBlock.ParentHash().Hex()))
+	}
+
+	if payload.FeeRecipient != realBlock.Coinbase() {
+		errors = append(errors, fmt.Sprintf("FeeRecipient mismatch: payload=%s, real=%s", payload.FeeRecipient.Hex(), realBlock.Coinbase().Hex()))
+	}
+
+	if payload.StateRoot != eth.Bytes32(realBlock.Root()) {
+		errors = append(errors, fmt.Sprintf("StateRoot mismatch: payload=%s, real=%s", common.Hash(payload.StateRoot).Hex(), realBlock.Root().Hex()))
+	}
+
+	if payload.ReceiptsRoot != eth.Bytes32(realBlock.ReceiptHash()) {
+		errors = append(errors, fmt.Sprintf("ReceiptsRoot mismatch: payload=%s, real=%s", common.Hash(payload.ReceiptsRoot).Hex(), realBlock.ReceiptHash().Hex()))
+	}
+
+	if payload.LogsBloom != eth.Bytes256(realBlock.Bloom()) {
+		errors = append(errors, fmt.Sprintf("LogsBloom mismatch"))
+	}
+
+	if payload.PrevRandao != eth.Bytes32(realBlock.MixDigest()) {
+		errors = append(errors, fmt.Sprintf("PrevRandao mismatch: payload=%s, real=%s", common.Hash(payload.PrevRandao).Hex(), realBlock.MixDigest().Hex()))
+	}
+
+	if uint64(payload.BlockNumber) != realBlock.NumberU64() {
+		errors = append(errors, fmt.Sprintf("BlockNumber mismatch: payload=%d, real=%d", payload.BlockNumber, realBlock.NumberU64()))
+	}
+
+	if uint64(payload.GasLimit) != realBlock.GasLimit() {
+		errors = append(errors, fmt.Sprintf("GasLimit mismatch: payload=%d, real=%d", payload.GasLimit, realBlock.GasLimit()))
+	}
+
+	if uint64(payload.GasUsed) != realBlock.GasUsed() {
+		errors = append(errors, fmt.Sprintf("GasUsed mismatch: payload=%d, real=%d", payload.GasUsed, realBlock.GasUsed()))
+	}
+
+	if uint64(payload.Timestamp) != realBlock.Time() {
+		errors = append(errors, fmt.Sprintf("Timestamp mismatch: payload=%d, real=%d", payload.Timestamp, realBlock.Time()))
+	}
+
+	// Compare ExtraData (allow flexibility for different lengths)
+	if !bytes.Equal(payload.ExtraData, realBlock.Extra()) {
+		errors = append(errors, fmt.Sprintf("ExtraData mismatch: payload=%x, real=%x", payload.ExtraData, realBlock.Extra()))
+	}
+
+	// Compare BaseFeePerGas
+	realBaseFee := uint256.MustFromBig(realBlock.BaseFee())
+	if payload.BaseFeePerGas != eth.Uint256Quantity(*realBaseFee) {
+		errors = append(errors, fmt.Sprintf("BaseFeePerGas mismatch: payload=%s, real=%s", (*uint256.Int)(&payload.BaseFeePerGas).String(), realBaseFee.String()))
+	}
+
+	if payload.BlockHash != realBlock.Hash() {
+		errors = append(errors, fmt.Sprintf("BlockHash mismatch: payload=%s, real=%s", payload.BlockHash.Hex(), realBlock.Hash().Hex()))
+	}
+
+	// Validate transactions
+	if len(payload.Transactions) != len(realBlock.Transactions()) {
+		errors = append(errors, fmt.Sprintf("Transaction count mismatch: payload=%d, real=%d", len(payload.Transactions), len(realBlock.Transactions())))
+	} else {
+		// Compare each transaction byte-by-byte
+		for i, realTx := range realBlock.Transactions() {
+			realTxBytes, err := realTx.MarshalBinary()
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Failed to marshal real transaction %d: %v", i, err))
+				continue
+			}
+
+			if !bytes.Equal(payload.Transactions[i], realTxBytes) {
+				errors = append(errors, fmt.Sprintf("Transaction %d mismatch: different bytes", i))
+
+				// Log transaction details for debugging
+				s.log.Warn("Transaction mismatch details",
+					"index", i,
+					"payloadTxHash", crypto.Keccak256Hash(payload.Transactions[i]).Hex(),
+					"realTxHash", realTx.Hash().Hex(),
+					"payloadTxLen", len(payload.Transactions[i]),
+					"realTxLen", len(realTxBytes))
+			}
+		}
+	}
+
+	result := &PayloadValidationResult{
+		Valid:           len(errors) == 0,
+		Errors:          errors,
+		BlockNumber:     uint64(payload.BlockNumber),
+		BlockHash:       payload.BlockHash,
+		RealBlockExists: true,
+	}
+
+	if len(errors) > 0 {
+		s.log.Error("Payload validation failed against real Sepolia block",
+			"blockHash", payload.BlockHash,
+			"blockNumber", payload.BlockNumber,
+			"errorCount", len(errors),
+			"errors", errors)
+	} else {
+		s.log.Info("Payload validation successful - matches real Sepolia block perfectly",
+			"blockHash", payload.BlockHash,
+			"blockNumber", payload.BlockNumber,
+			"txCount", len(payload.Transactions))
+	}
+
+	return result, nil
+}
+
+// PayloadValidationResult contains the result of comprehensive payload validation
+type PayloadValidationResult struct {
+	Valid           bool
+	Error           string   // Single error message for when Real block doesn't exist
+	Errors          []string // Multiple validation errors when comparing fields
+	BlockNumber     uint64
+	BlockHash       common.Hash
+	RealBlockExists bool
+}
+
+// computePayloadId computes a pseudo-random payloadid, based on the parameters.
+// This is the standard implementation used by op-geth and op-program.
+func (s *SyncTester) computePayloadId(headBlockHash common.Hash, attrs *eth.PayloadAttributes) eth.PayloadID {
+	// Hash
+	hasher := sha256.New()
+	hasher.Write(headBlockHash[:])
+	_ = binary.Write(hasher, binary.BigEndian, attrs.Timestamp)
+	hasher.Write(attrs.PrevRandao[:])
+	hasher.Write(attrs.SuggestedFeeRecipient[:])
+	_ = binary.Write(hasher, binary.BigEndian, attrs.NoTxPool)
+	_ = binary.Write(hasher, binary.BigEndian, uint64(len(attrs.Transactions)))
+	for _, tx := range attrs.Transactions {
+		_ = binary.Write(hasher, binary.BigEndian, uint64(len(tx))) // length-prefix to avoid collisions
+		hasher.Write(tx)
+	}
+	_ = binary.Write(hasher, binary.BigEndian, *attrs.GasLimit)
+	if attrs.EIP1559Params != nil {
+		hasher.Write(attrs.EIP1559Params[:])
+	}
 	var out eth.PayloadID
-	copy(out[:], hashBytes[:8]) // PayloadID is first 8 bytes
+	copy(out[:], hasher.Sum(nil)[:8])
 	return out
 }
 
-// buildMockPayload builds a mock ExecutionPayload for GetPayloadV1
-func (s *SyncTester) buildMockPayload(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
+// buildPayload builds an ExecutionPayload using real Sepolia block data
+func (s *SyncTester) buildPayload(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayload, error) {
+	// Check cache first for fast lookups
+	if cachedPayloadInterface, exists := s.payloadCache.Load(payloadID); exists {
+		cachedPayload := cachedPayloadInterface.(*eth.ExecutionPayload)
+		s.log.Info("Returning cached payload", "payloadID", payloadID, "blockHash", cachedPayload.BlockHash)
+		return cachedPayload, nil
+	}
+
 	// Retrieve the payload build job
 	buildJobInterface, exists := s.payloadBuilds.Load(payloadID)
 	if !exists {
@@ -656,47 +897,69 @@ func (s *SyncTester) buildMockPayload(ctx context.Context, payloadID eth.Payload
 	}
 
 	buildJob := buildJobInterface.(*PayloadBuildJob)
-	s.log.Info("Building mock payload", "payloadID", payloadID, "parent", buildJob.ForkchoiceState.HeadBlockHash, "timestamp", buildJob.Attributes.Timestamp)
+	s.log.Info("Building payload from real Sepolia block", "payloadID", payloadID, "parent", buildJob.ForkchoiceState.HeadBlockHash)
 
-	// Get parent block for building child
-	parentBlock, err := s.elClient.BlockByHash(ctx, buildJob.ForkchoiceState.HeadBlockHash)
+	// Get parent block to determine next block number
+	// Use background context for backend calls
+	backendCtx, cancel := s.createBackendContext()
+	defer cancel()
+	parentBlock, err := s.elClient.BlockByHash(backendCtx, buildJob.ForkchoiceState.HeadBlockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get parent block %s: %w", buildJob.ForkchoiceState.HeadBlockHash, err)
 	}
 
-	// Build mock payload based on parent and attributes
-	payload := &eth.ExecutionPayload{
-		ParentHash:    buildJob.ForkchoiceState.HeadBlockHash,
-		FeeRecipient:  buildJob.Attributes.SuggestedFeeRecipient,
-		StateRoot:     eth.Bytes32{},  // Mock - would be computed in real engine
-		ReceiptsRoot:  eth.Bytes32{},  // Mock - would be computed in real engine
-		LogsBloom:     eth.Bytes256{}, // Mock - would be computed in real engine
-		PrevRandao:    buildJob.Attributes.PrevRandao,
-		BlockNumber:   eth.Uint64Quantity(parentBlock.NumberU64() + 1),
-		GasLimit:      eth.Uint64Quantity(*buildJob.Attributes.GasLimit),
-		GasUsed:       eth.Uint64Quantity(0), // Mock - no gas used
-		Timestamp:     eth.Uint64Quantity(buildJob.Attributes.Timestamp),
-		ExtraData:     eth.BytesMax32{},                                                 // Empty extra data
-		BaseFeePerGas: eth.Uint256Quantity(*uint256.MustFromBig(parentBlock.BaseFee())), // Inherit from parent
-		BlockHash:     common.Hash{},                                                    // Would be computed from payload
-		Transactions:  buildJob.Attributes.Transactions,                                 // Use provided transactions
+	// Calculate the expected next block number
+	expectedBlockNumber := parentBlock.NumberU64() + 1
+
+	// Get the REAL Sepolia block at this number
+	realBlock, err := s.elClient.BlockByNumber(backendCtx, big.NewInt(int64(expectedBlockNumber)))
+	if err != nil {
+		s.log.Error("Cannot build payload - real Sepolia block not available", "blockNumber", expectedBlockNumber, "error", err)
+		return nil, eth.InputError{
+			Inner: fmt.Errorf("payload for block %d does not exist / is not available in Sepolia chain: %w", expectedBlockNumber, err),
+			Code:  eth.UnknownPayload, // -38001
+		}
 	}
 
-	// Mock block hash generation (deterministic based on payload)
-	payload.BlockHash = s.generateMockBlockHash(payload)
+	// Convert real block to ExecutionPayload format
+	transactions := make([]eth.Data, len(realBlock.Transactions()))
+	for i, tx := range realBlock.Transactions() {
+		txData, _ := tx.MarshalBinary()
+		transactions[i] = eth.Data(txData)
+	}
+
+	payload := &eth.ExecutionPayload{
+		ParentHash:    realBlock.ParentHash(),
+		FeeRecipient:  realBlock.Coinbase(),
+		StateRoot:     eth.Bytes32(realBlock.Root()),
+		ReceiptsRoot:  eth.Bytes32(realBlock.ReceiptHash()),
+		LogsBloom:     eth.Bytes256(realBlock.Bloom()),
+		PrevRandao:    eth.Bytes32(realBlock.MixDigest()),
+		BlockNumber:   eth.Uint64Quantity(realBlock.NumberU64()),
+		GasLimit:      eth.Uint64Quantity(realBlock.GasLimit()),
+		GasUsed:       eth.Uint64Quantity(realBlock.GasUsed()),
+		Timestamp:     eth.Uint64Quantity(realBlock.Time()),
+		ExtraData:     eth.BytesMax32(realBlock.Extra()),
+		BaseFeePerGas: eth.Uint256Quantity(*uint256.MustFromBig(realBlock.BaseFee())),
+		BlockHash:     realBlock.Hash(), // REAL block hash from Sepolia!
+		Transactions:  transactions,
+	}
 
 	// Mark as built
 	buildJob.Built = true
 	s.payloadBuilds.Store(payloadID, buildJob)
 
-	s.log.Info("Mock payload built successfully", "payloadID", payloadID, "blockNumber", payload.BlockNumber, "blockHash", payload.BlockHash, "txCount", len(payload.Transactions))
+	// Cache the built payload for fast future lookups
+	s.payloadCache.Store(payloadID, payload)
+
+	s.log.Info("Real Sepolia payload built successfully", "payloadID", payloadID, "blockNumber", payload.BlockNumber, "blockHash", payload.BlockHash, "txCount", len(payload.Transactions))
 	return payload, nil
 }
 
-// buildMockPayloadV4 builds a mock ExecutionPayloadEnvelope for GetPayloadV4
-func (s *SyncTester) buildMockPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
-	// First build the basic payload
-	payload, err := s.buildMockPayload(ctx, payloadID)
+// buildPayloadV4 builds an ExecutionPayloadEnvelope for GetPayloadV4 using real Sepolia block data
+func (s *SyncTester) buildPayloadV4(ctx context.Context, payloadID eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
+	// First build the basic payload using real Sepolia data
+	payload, err := s.buildPayload(ctx, payloadID)
 	if err != nil {
 		return nil, err
 	}
@@ -708,15 +971,8 @@ func (s *SyncTester) buildMockPayloadV4(ctx context.Context, payloadID eth.Paylo
 		ParentBeaconBlockRoot: nil,
 	}
 
-	s.log.Info("Mock payload envelope v4 built", "payloadID", payloadID, "blockHash", payload.BlockHash)
+	s.log.Info("Real Sepolia payload envelope v4 built", "payloadID", payloadID, "blockHash", payload.BlockHash)
 	return envelope, nil
-}
-
-// generateMockBlockHash creates a deterministic mock block hash
-func (s *SyncTester) generateMockBlockHash(payload *eth.ExecutionPayload) common.Hash {
-	// Create a simple deterministic hash based on parent + number + timestamp
-	data := fmt.Sprintf("%s-%d-%d", payload.ParentHash.Hex(), payload.BlockNumber, payload.Timestamp)
-	return common.BytesToHash([]byte(data))
 }
 
 // stringPtr returns a pointer to the given string (helper for optional fields)

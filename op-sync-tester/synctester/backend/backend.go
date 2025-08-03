@@ -60,18 +60,12 @@ func (s *Session) AdvanceProgress(latestBlock, safeBlock, finalizedBlock uint64)
 
 	// op-node successfully processed these blocks - make next block available as "latest"
 	nextLatest := latestBlock + 1
-	if nextLatest > s.AvailableLatestHead {
-		s.AvailableLatestHead = nextLatest
-	}
+	s.AvailableLatestHead = nextLatest
 
-	// Use op-node's actual safe and finalized values (not calculated!)
-	if safeBlock > s.AvailableSafeHead {
-		s.AvailableSafeHead = safeBlock
-	}
-
-	if finalizedBlock > s.AvailableFinalizedHead {
-		s.AvailableFinalizedHead = finalizedBlock
-	}
+	// FIXED: Always use op-node's actual safe and finalized values
+	// Remove "if higher" checks - op-node knows best!
+	s.AvailableSafeHead = safeBlock
+	s.AvailableFinalizedHead = finalizedBlock
 }
 
 // GetAvailableHeads safely returns current available head values

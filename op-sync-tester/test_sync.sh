@@ -38,8 +38,8 @@ L1_BEACON_ENDPOINT="$3"
 DURATION_SECONDS="${4:-60}"
 
 # L2 endpoint (via sync-tester proxy with session)
-# Realistic head progression: latest=100 (unsafe close to tip), safe=10000, finalized=10024 (way back)
-L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=100&safe=10000&finalized=10024"
+# Testing with 100 block offset (was failing before context fix)
+L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=2000&safe=2000&finalized=2100"
 
 echo "🔧 Configuration:"
 echo "   L1: $L1_ENDPOINT"
@@ -110,7 +110,13 @@ if [ ! -f "../jwt_secret.txt" ]; then
     openssl rand -hex 32 > ../jwt_secret.txt
 fi
 
-go run ../op-node/cmd \
+# Build op-node binary if it doesn't exist or is older than source
+if [ ! -f "../op-node-bin" ] || [ ../op-node/cmd/main.go -nt "../op-node-bin" ]; then
+    echo "   Building op-node binary..."
+    go build -o ../op-node-bin ../op-node/cmd
+fi
+
+../op-node-bin \
     --l1="$L1_ENDPOINT" \
     --l1.beacon="$L1_BEACON_ENDPOINT" \
     --l2="$L2_ENDPOINT" \
@@ -170,11 +176,52 @@ echo "   Latest head: #$STARTING_LATEST"
 echo "   Safe head: #$STARTING_SAFE"
 echo "   Finalized head: #$STARTING_FINALIZED"
 
-# Record start time for performance calculation
+# Wait for L1 walkback phase to complete
+echo "⏳ Waiting for L1 walkback phase to complete..."
+echo "   (This may take a while with 2000 block offset)"
+
+WALKBACK_START=$(date +%s)
+WALKBACK_TIMEOUT=300  # 5 minutes timeout for walkback
+
+while true; do
+    # Check if we're still in walkback phase
+    WALKBACK_COUNT=$(tail -20 op_node.log 2>/dev/null | grep -c "Walking back L1Block by hash" 2>/dev/null || echo "0")
+    WALKBACK_COUNT=$(echo "$WALKBACK_COUNT" | tr -d '\n' | head -1)
+
+    # If no recent walkback messages, check if derivation has started
+    if [ "$WALKBACK_COUNT" -eq 0 ]; then
+        sleep 5  # Wait a bit more to be sure
+        RECENT_WALKBACK=$(tail -30 op_node.log 2>/dev/null | grep -c "Walking back L1Block by hash" 2>/dev/null || echo "0")
+        RECENT_WALKBACK=$(echo "$RECENT_WALKBACK" | tr -d '\n' | head -1)
+
+        if [ "$RECENT_WALKBACK" -eq 0 ]; then
+            echo "✅ L1 walkback phase completed!"
+            break
+        fi
+    fi
+
+    # Check timeout
+    CURRENT_TIME=$(date +%s)
+    ELAPSED=$((CURRENT_TIME - WALKBACK_START))
+    if [ $ELAPSED -gt $WALKBACK_TIMEOUT ]; then
+        echo "⚠️  Walkback timeout reached (${WALKBACK_TIMEOUT}s) - proceeding anyway"
+        break
+    fi
+
+    # Show progress every 30 seconds
+    if [ $((ELAPSED % 30)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+        RECENT_L2_BLOCK=$(tail -5 op_node.log 2>/dev/null | grep "Walking back L1Block" | tail -1 | grep -o "l2block=0x[a-f0-9]*:[0-9]*" | cut -d: -f2 || echo "unknown")
+        echo "   Still walking back... (${ELAPSED}s elapsed, L2 block: $RECENT_L2_BLOCK)"
+    fi
+
+    sleep 3
+done
+
+# Record start time for performance calculation (after walkback completes)
 START_TIME=$(date +%s)
 
 # Sync with status checks
-echo "⏳ Syncing for ${DURATION_SECONDS} seconds..."
+echo "⏳ Now syncing for ${DURATION_SECONDS} seconds..."
 CHECKS=$((DURATION_SECONDS / 15))
 if [ $CHECKS -lt 1 ]; then CHECKS=1; fi
 for i in $(seq 1 $CHECKS); do
@@ -240,7 +287,7 @@ echo ""
 echo "📋 SYNC TEST RESULTS"
 echo "===================="
 echo "Session ID: $SESSION_UUID"
-echo "Starting position: 100 blocks behind (unsafe), 10000 behind (safe), 10024 behind (finalized)"
+echo "Starting position: 1000 blocks behind (unsafe), 5000 behind (safe), 5024 behind (finalized)"
 echo ""
 
 # Calculate progress for each head type
