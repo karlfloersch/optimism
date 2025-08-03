@@ -116,7 +116,12 @@ if [ ! -f "../op-node-bin" ] || [ ../op-node/cmd/main.go -nt "../op-node-bin" ];
     go build -o ../op-node-bin ../op-node/cmd
 fi
 
-../op-node-bin \
+# Set up flow tracing for event migration work
+echo "   Setting up event flow tracing..."
+mkdir -p /tmp/flow-traces
+export OP_NODE_FLOW_TRACING=true
+
+OP_NODE_FLOW_TRACING=true ../op-node-bin \
     --l1="$L1_ENDPOINT" \
     --l1.beacon="$L1_BEACON_ENDPOINT" \
     --l2="$L2_ENDPOINT" \
@@ -322,6 +327,19 @@ else
     echo "   🔴 Finalized head: Unable to calculate"
 fi
 
+# Validation metrics
+echo ""
+echo "🔍 VALIDATION METRICS:"
+COMPREHENSIVE_VALIDATIONS=$(grep -c "Comprehensive payload validation" sync_tester.log 2>/dev/null || echo "0")
+PERFECT_MATCHES=$(grep -c "matches real Sepolia block perfectly" sync_tester.log 2>/dev/null || echo "0")
+VALIDATION_ERRORS=$(grep -c "Payload does not match real Sepolia block" sync_tester.log 2>/dev/null || echo "0")
+FORKCHOICE_VALIDATIONS=$(grep -c "ForkchoiceUpdated validation successful" sync_tester.log 2>/dev/null || echo "0")
+
+echo "   🔬 Comprehensive validations: $COMPREHENSIVE_VALIDATIONS"
+echo "   ✅ Perfect payload matches: $PERFECT_MATCHES"
+echo "   ❌ Validation errors: $VALIDATION_ERRORS"
+echo "   🔄 ForkchoiceUpdated calls: $FORKCHOICE_VALIDATIONS"
+
 echo ""
 echo "⏱️  Total duration: ${DURATION_SECONDS}s"
 
@@ -336,3 +354,4 @@ echo ""
 echo "📝 Log files:"
 echo "   - sync-tester: sync_tester.log"
 echo "   - op-node: op_node.log"
+echo "   - flow traces: /tmp/flow-traces/"
