@@ -605,11 +605,11 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 	}
 
 	if !validationResult.Valid {
-		s.log.Error("Payload does not match real Sepolia block", 
+		s.log.Error("Payload does not match real Sepolia block",
 			"blockHash", payload.BlockHash,
 			"blockNumber", payload.BlockNumber,
 			"errors", validationResult.Errors)
-		
+
 		// Return INVALID but don't crash - this helps us catch op-node bugs
 		return &eth.PayloadStatusV1{
 			Status:          "INVALID",
