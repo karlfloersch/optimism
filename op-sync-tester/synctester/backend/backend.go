@@ -36,48 +36,41 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 
 type Session struct {
 	SessionID string
-	
+
 	// Mutex for thread-safe progress updates
 	mu sync.RWMutex
-	
+
 	// Initial offsets from real chain (for initialization)
 	InitialLatestOffset    uint64
 	InitialSafeOffset      uint64
 	InitialFinalizedOffset uint64
-	
+
 	// Progress-driven heads (op-node controls advancement)
-	AvailableLatestHead    uint64   // Highest block op-node can request for "latest"
-	AvailableSafeHead      uint64   // Highest block op-node can request for "safe"  
-	AvailableFinalizedHead uint64   // Highest block op-node can request for "finalized"
-	
-	Initialized bool   // Track if session has been initialized
+	AvailableLatestHead    uint64 // Highest block op-node can request for "latest"
+	AvailableSafeHead      uint64 // Highest block op-node can request for "safe"
+	AvailableFinalizedHead uint64 // Highest block op-node can request for "finalized"
+
+	Initialized bool // Track if session has been initialized
 }
 
-// AdvanceProgress updates available heads based on op-node's successful ForkchoiceUpdated
-func (s *Session) AdvanceProgress(processedBlock uint64) {
+// AdvanceProgress updates available heads based on op-node's actual ForkchoiceState values
+func (s *Session) AdvanceProgress(latestBlock, safeBlock, finalizedBlock uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	
-	// op-node successfully processed this block - make next block available as "latest"
-	nextBlock := processedBlock + 1
-	if nextBlock > s.AvailableLatestHead {
-		s.AvailableLatestHead = nextBlock
+	// op-node successfully processed these blocks - make next block available as "latest"
+	nextLatest := latestBlock + 1
+	if nextLatest > s.AvailableLatestHead {
+		s.AvailableLatestHead = nextLatest
 	}
 	
-	// Safe head trails latest by ~12 blocks  
-	if processedBlock >= 12 {
-		safeBlock := processedBlock - 12
-		if safeBlock > s.AvailableSafeHead {
-			s.AvailableSafeHead = safeBlock
-		}
+	// Use op-node's actual safe and finalized values (not calculated!)
+	if safeBlock > s.AvailableSafeHead {
+		s.AvailableSafeHead = safeBlock
 	}
 	
-	// Finalized head trails latest by ~24 blocks
-	if processedBlock >= 24 {
-		finalizedBlock := processedBlock - 24
-		if finalizedBlock > s.AvailableFinalizedHead {
-			s.AvailableFinalizedHead = finalizedBlock
-		}
+	if finalizedBlock > s.AvailableFinalizedHead {
+		s.AvailableFinalizedHead = finalizedBlock
 	}
 }
 

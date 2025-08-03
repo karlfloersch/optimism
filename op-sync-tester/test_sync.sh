@@ -33,9 +33,9 @@ SESSION_UUID=$(uuidgen)
 # RPC endpoints from command line arguments
 L1_ENDPOINT="$1"
 L2_RPC_ENDPOINT="$2"
-L1_BEACON_ENDPOINT="${3:-https://ethereum-sepolia-beacon-api.publicnode.com}"
+L1_BEACON_ENDPOINT="${3:-https://chaotic-dark-river.ethereum-sepolia.quiknode.pro/cfce48bb8605b8c9f7ca515e0cfd17c562b61112/}"
 
-# L2 endpoint (via sync-tester proxy with session)  
+# L2 endpoint (via sync-tester proxy with session)
 # Start far back: latest=10000, safe=10012, finalized=10024 (blocks behind real chain)
 L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=10000&safe=10012&finalized=10024"
 

@@ -80,13 +80,13 @@ func (s *SyncTester) fetchSession(ctx context.Context) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.sessions[session.SessionID]; ok {
-		s.log.Debug("🔄 Reusing persistent session", "sessionID", session.SessionID, 
+		s.log.Debug("🔄 Reusing persistent session", "sessionID", session.SessionID,
 			"latest", existing.AvailableLatestHead, "safe", existing.AvailableSafeHead, "finalized", existing.AvailableFinalizedHead)
-		return existing, nil  // Return the persistent session!
+		return existing, nil // Return the persistent session!
 	} else {
 		s.sessions[session.SessionID] = session
 		s.log.Info("💾 Created new persistent session", "sessionID", session.SessionID)
-		return session, nil  // Return the new session
+		return session, nil // Return the new session
 	}
 }
 
@@ -213,13 +213,13 @@ func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc
 func (s *SyncTester) initializeProgressSession(ctx context.Context, session *Session) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	
+
 	// Check if already initialized - this should prevent re-initialization
 	if session.Initialized {
-		s.log.Debug("Session already initialized, skipping", 
+		s.log.Debug("Session already initialized, skipping",
 			"sessionID", session.SessionID,
 			"latest", session.AvailableLatestHead,
-			"safe", session.AvailableSafeHead, 
+			"safe", session.AvailableSafeHead,
 			"finalized", session.AvailableFinalizedHead)
 		return nil
 	}
@@ -236,34 +236,34 @@ func (s *SyncTester) initializeProgressSession(ctx context.Context, session *Ses
 	} else {
 		session.AvailableLatestHead = 1 // Start from genesis if offset too large
 	}
-	
+
 	if currentBlockNumber >= session.InitialSafeOffset {
 		session.AvailableSafeHead = currentBlockNumber - session.InitialSafeOffset
 	} else {
 		session.AvailableSafeHead = 1
 	}
-	
+
 	if currentBlockNumber >= session.InitialFinalizedOffset {
 		session.AvailableFinalizedHead = currentBlockNumber - session.InitialFinalizedOffset
 	} else {
 		session.AvailableFinalizedHead = 1
 	}
-	
+
 	// Mark as initialized to prevent recalculation
 	session.Initialized = true
-	
-	s.log.Info("🎯 LOCKED-IN progress-driven session", 
+
+	s.log.Info("🎯 LOCKED-IN progress-driven session",
 		"sessionID", session.SessionID,
 		"chainTipWhenInitialized", currentBlockNumber,
-		"ABSOLUTE_startingLatest", session.AvailableLatestHead, 
-		"ABSOLUTE_startingSafe", session.AvailableSafeHead, 
+		"ABSOLUTE_startingLatest", session.AvailableLatestHead,
+		"ABSOLUTE_startingSafe", session.AvailableSafeHead,
 		"ABSOLUTE_startingFinalized", session.AvailableFinalizedHead)
-	
+
 	return nil
 }
 
-// advanceSessionProgress updates available heads when op-node successfully processes a block via ForkchoiceUpdated
-func (s *SyncTester) advanceSessionProgress(ctx context.Context, processedBlock uint64) {
+// advanceSessionProgress updates available heads when op-node successfully processes blocks via ForkchoiceUpdated
+func (s *SyncTester) advanceSessionProgress(ctx context.Context, latestBlock, safeBlock, finalizedBlock uint64) {
 	_, hasSession := SessionFromContext(ctx)
 	if !hasSession {
 		return // No session context, nothing to update
@@ -284,27 +284,27 @@ func (s *SyncTester) advanceSessionProgress(ctx context.Context, processedBlock 
 	}
 
 	// Don't advance past real chain tip
-	if processedBlock >= currentSepolia {
-		s.log.Debug("Not advancing - processed block at/past Sepolia tip", 
-			"processed", processedBlock, "sepolia_tip", currentSepolia)
+	if latestBlock >= currentSepolia {
+		s.log.Debug("Not advancing - latest block at/past Sepolia tip", 
+			"latest", latestBlock, "sepolia_tip", currentSepolia)
 		return
 	}
 
 	// Get before state for logging
 	beforeLatest, beforeSafe, beforeFinalized := session.GetAvailableHeads()
 	
-	// Advance progress based on op-node's successful processing
-	session.AdvanceProgress(processedBlock)
+	// Advance progress using op-node's actual ForkchoiceState values
+	session.AdvanceProgress(latestBlock, safeBlock, finalizedBlock)
 	
 	// Get after state for logging
 	afterLatest, afterSafe, afterFinalized := session.GetAvailableHeads()
 
-	s.log.Info("🚀 op-node progress advanced session",
+	s.log.Info("🚀 op-node ForkchoiceState advanced session",
 		"sessionID", session.SessionID,
-		"processedBlock", processedBlock,
-		"latest", fmt.Sprintf("%d→%d", beforeLatest, afterLatest),
-		"safe", fmt.Sprintf("%d→%d", beforeSafe, afterSafe),
-		"finalized", fmt.Sprintf("%d→%d", beforeFinalized, afterFinalized))
+		"opnode_latest", latestBlock, "opnode_safe", safeBlock, "opnode_finalized", finalizedBlock,
+		"available_latest", fmt.Sprintf("%d→%d", beforeLatest, afterLatest),
+		"available_safe", fmt.Sprintf("%d→%d", beforeSafe, afterSafe),
+		"available_finalized", fmt.Sprintf("%d→%d", beforeFinalized, afterFinalized))
 }
 
 func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
@@ -379,8 +379,8 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 
 	s.log.Info("ForkchoiceUpdated validation successful", "headNumber", headBlock.NumberU64(), "safeNumber", safeBlock.NumberU64(), "finalizedNumber", finalizedBlock.NumberU64())
 
-	// Advance session progress - op-node successfully processed headBlock
-	s.advanceSessionProgress(ctx, headBlock.NumberU64())
+	// Advance session progress using op-node's actual ForkchoiceState values
+	s.advanceSessionProgress(ctx, headBlock.NumberU64(), safeBlock.NumberU64(), finalizedBlock.NumberU64())
 
 	// Return VALID status with the head block hash as latest valid
 	result := &eth.ForkchoiceUpdatedResult{
