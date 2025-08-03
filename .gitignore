@@ -50,3 +50,5 @@ __pycache__
 
 # Ignore echidna artifacts
 crytic-export
+# Flow trace baseline files (large reference files)
+op-node/flow/baseline-event-trace-*.json
