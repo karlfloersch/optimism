@@ -37,52 +37,55 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 type Session struct {
 	SessionID string
 	
-	// Mutex for thread-safe head updates
+	// Mutex for thread-safe progress updates
 	mu sync.RWMutex
 	
-	// Initial offsets from real chain (set once during session creation)
-	LatestOffset    uint64
-	SafeOffset      uint64
-	FinalizedOffset uint64
+	// Initial offsets from real chain (for initialization)
+	InitialLatestOffset    uint64
+	InitialSafeOffset      uint64
+	InitialFinalizedOffset uint64
 	
-	// Current head block numbers (updated as op-node progresses)
-	LatestHead    uint64
-	SafeHead      uint64
-	FinalizedHead uint64
+	// Progress-driven heads (op-node controls advancement)
+	AvailableLatestHead    uint64   // Highest block op-node can request for "latest"
+	AvailableSafeHead      uint64   // Highest block op-node can request for "safe"  
+	AvailableFinalizedHead uint64   // Highest block op-node can request for "finalized"
+	
+	Initialized bool   // Track if session has been initialized
 }
 
-// UpdateLatestHead safely updates the latest head
-func (s *Session) UpdateLatestHead(blockNumber uint64) {
+// AdvanceProgress updates available heads based on op-node's successful ForkchoiceUpdated
+func (s *Session) AdvanceProgress(processedBlock uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if blockNumber > s.LatestHead {
-		s.LatestHead = blockNumber
+	
+	// op-node successfully processed this block - make next block available as "latest"
+	nextBlock := processedBlock + 1
+	if nextBlock > s.AvailableLatestHead {
+		s.AvailableLatestHead = nextBlock
+	}
+	
+	// Safe head trails latest by ~12 blocks  
+	if processedBlock >= 12 {
+		safeBlock := processedBlock - 12
+		if safeBlock > s.AvailableSafeHead {
+			s.AvailableSafeHead = safeBlock
+		}
+	}
+	
+	// Finalized head trails latest by ~24 blocks
+	if processedBlock >= 24 {
+		finalizedBlock := processedBlock - 24
+		if finalizedBlock > s.AvailableFinalizedHead {
+			s.AvailableFinalizedHead = finalizedBlock
+		}
 	}
 }
 
-// UpdateSafeHead safely updates the safe head
-func (s *Session) UpdateSafeHead(blockNumber uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if blockNumber > s.SafeHead {
-		s.SafeHead = blockNumber
-	}
-}
-
-// UpdateFinalizedHead safely updates the finalized head
-func (s *Session) UpdateFinalizedHead(blockNumber uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if blockNumber > s.FinalizedHead {
-		s.FinalizedHead = blockNumber
-	}
-}
-
-// GetHeads safely returns all current head values
-func (s *Session) GetHeads() (latest, safe, finalized uint64) {
+// GetAvailableHeads safely returns current available head values
+func (s *Session) GetAvailableHeads() (latest, safe, finalized uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.LatestHead, s.SafeHead, s.FinalizedHead
+	return s.AvailableLatestHead, s.AvailableSafeHead, s.AvailableFinalizedHead
 }
 
 type APIRouter interface {

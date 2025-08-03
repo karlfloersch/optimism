@@ -80,12 +80,14 @@ func (s *SyncTester) fetchSession(ctx context.Context) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.sessions[session.SessionID]; ok {
-		s.log.Info("Using existing session", "session", existing)
+		s.log.Debug("🔄 Reusing persistent session", "sessionID", session.SessionID, 
+			"latest", existing.AvailableLatestHead, "safe", existing.AvailableSafeHead, "finalized", existing.AvailableFinalizedHead)
+		return existing, nil  // Return the persistent session!
 	} else {
 		s.sessions[session.SessionID] = session
-		s.log.Info("Initialized new session", "session", session)
+		s.log.Info("💾 Created new persistent session", "sessionID", session.SessionID)
+		return session, nil  // Return the new session
 	}
-	return session, nil
 }
 
 func (s *SyncTester) GetSession(ctx context.Context) error {
@@ -157,10 +159,10 @@ func (s *SyncTester) GetBlockByNumber(ctx context.Context, number rpc.BlockNumbe
 	return result, nil
 }
 
-// resolveBlockNumber resolves block numbers based on session state
+// resolveBlockNumber resolves block numbers based on progress-driven session state
 func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc.BlockNumber) (*big.Int, error) {
-	// Check if this request has a session context
-	session, hasSession := SessionFromContext(ctx)
+	// Check if this request has a session context and get persistent session
+	_, hasSession := SessionFromContext(ctx)
 	if !hasSession {
 		// No session - convert rpc.BlockNumber to *big.Int and pass through
 		if requestedNumber == rpc.LatestBlockNumber {
@@ -174,16 +176,22 @@ func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc
 		}
 	}
 
-	// Initialize session heads if they haven't been set yet
-	err := s.initializeSessionHeads(ctx, session)
+	// Get persistent session (this handles initialization automatically)
+	session, err := s.fetchSession(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize session heads: %w", err)
+		return nil, fmt.Errorf("failed to fetch persistent session: %w", err)
 	}
 
-	// Get current head values from session
-	latest, safe, finalized := session.GetHeads()
+	// Initialize session if needed
+	err = s.initializeProgressSession(ctx, session)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize progress session: %w", err)
+	}
 
-	// Handle special cases for latest/safe/finalized based on session state
+	// Get current available heads from persistent session
+	latest, safe, finalized := session.GetAvailableHeads()
+
+	// Handle special cases for latest/safe/finalized based on available progress
 	if requestedNumber == rpc.LatestBlockNumber {
 		return big.NewInt(int64(latest)), nil
 	} else if requestedNumber == rpc.EarliestBlockNumber {
@@ -201,78 +209,102 @@ func (s *SyncTester) resolveBlockNumber(ctx context.Context, requestedNumber rpc
 	}
 }
 
-// initializeSessionHeads initializes session head positions on first use
-func (s *SyncTester) initializeSessionHeads(ctx context.Context, session *Session) error {
+// initializeProgressSession initializes session with starting block positions for progress-driven sync
+func (s *SyncTester) initializeProgressSession(ctx context.Context, session *Session) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	
-	// Check if already initialized (any non-zero head indicates initialization)
-	if session.LatestHead > 0 || session.SafeHead > 0 || session.FinalizedHead > 0 {
+	// Check if already initialized - this should prevent re-initialization
+	if session.Initialized {
+		s.log.Debug("Session already initialized, skipping", 
+			"sessionID", session.SessionID,
+			"latest", session.AvailableLatestHead,
+			"safe", session.AvailableSafeHead, 
+			"finalized", session.AvailableFinalizedHead)
 		return nil
 	}
 
-	// Get current chain tip to calculate initial positions
+	// Get current chain tip ONCE to set absolute starting positions
 	currentBlockNumber, err := s.elClient.BlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get current block number: %w", err)
 	}
 
-	// Calculate initial head positions based on offsets
-	if currentBlockNumber >= session.LatestOffset {
-		session.LatestHead = currentBlockNumber - session.LatestOffset
+	// Calculate ABSOLUTE starting positions (these won't change)
+	if currentBlockNumber >= session.InitialLatestOffset {
+		session.AvailableLatestHead = currentBlockNumber - session.InitialLatestOffset
 	} else {
-		session.LatestHead = 1 // Use 1 instead of 0 to indicate initialization
+		session.AvailableLatestHead = 1 // Start from genesis if offset too large
 	}
 	
-	if currentBlockNumber >= session.SafeOffset {
-		session.SafeHead = currentBlockNumber - session.SafeOffset
+	if currentBlockNumber >= session.InitialSafeOffset {
+		session.AvailableSafeHead = currentBlockNumber - session.InitialSafeOffset
 	} else {
-		session.SafeHead = 1 // Use 1 instead of 0 to indicate initialization
+		session.AvailableSafeHead = 1
 	}
 	
-	if currentBlockNumber >= session.FinalizedOffset {
-		session.FinalizedHead = currentBlockNumber - session.FinalizedOffset
+	if currentBlockNumber >= session.InitialFinalizedOffset {
+		session.AvailableFinalizedHead = currentBlockNumber - session.InitialFinalizedOffset
 	} else {
-		session.FinalizedHead = 1 // Use 1 instead of 0 to indicate initialization
+		session.AvailableFinalizedHead = 1
 	}
 	
-	s.log.Info("Initialized session heads", 
+	// Mark as initialized to prevent recalculation
+	session.Initialized = true
+	
+	s.log.Info("🎯 LOCKED-IN progress-driven session", 
 		"sessionID", session.SessionID,
-		"latest", session.LatestHead, 
-		"safe", session.SafeHead, 
-		"finalized", session.FinalizedHead)
+		"chainTipWhenInitialized", currentBlockNumber,
+		"ABSOLUTE_startingLatest", session.AvailableLatestHead, 
+		"ABSOLUTE_startingSafe", session.AvailableSafeHead, 
+		"ABSOLUTE_startingFinalized", session.AvailableFinalizedHead)
 	
 	return nil
 }
 
-// updateSessionHeads updates the session head positions when ForkchoiceUpdated is called
-func (s *SyncTester) updateSessionHeads(ctx context.Context, latestBlock, safeBlock, finalizedBlock uint64) {
-	session, hasSession := SessionFromContext(ctx)
+// advanceSessionProgress updates available heads when op-node successfully processes a block via ForkchoiceUpdated
+func (s *SyncTester) advanceSessionProgress(ctx context.Context, processedBlock uint64) {
+	_, hasSession := SessionFromContext(ctx)
 	if !hasSession {
 		return // No session context, nothing to update
 	}
 
-	// Update each head type
-	session.UpdateLatestHead(latestBlock)
-	session.UpdateSafeHead(safeBlock)  
-	session.UpdateFinalizedHead(finalizedBlock)
+	// Get persistent session
+	session, err := s.fetchSession(ctx)
+	if err != nil {
+		s.log.Warn("Failed to fetch persistent session for progress advancement", "error", err)
+		return
+	}
 
-	s.log.Info("Updated session heads",
+	// Get current Sepolia chain tip to avoid advancing past real chain
+	currentSepolia, err := s.elClient.BlockNumber(ctx)
+	if err != nil {
+		s.log.Warn("Failed to get current Sepolia tip, cannot advance progress", "error", err)
+		return
+	}
+
+	// Don't advance past real chain tip
+	if processedBlock >= currentSepolia {
+		s.log.Debug("Not advancing - processed block at/past Sepolia tip", 
+			"processed", processedBlock, "sepolia_tip", currentSepolia)
+		return
+	}
+
+	// Get before state for logging
+	beforeLatest, beforeSafe, beforeFinalized := session.GetAvailableHeads()
+	
+	// Advance progress based on op-node's successful processing
+	session.AdvanceProgress(processedBlock)
+	
+	// Get after state for logging
+	afterLatest, afterSafe, afterFinalized := session.GetAvailableHeads()
+
+	s.log.Info("🚀 op-node progress advanced session",
 		"sessionID", session.SessionID,
-		"latest", latestBlock,
-		"safe", safeBlock,
-		"finalized", finalizedBlock)
-}
-
-// updateLatestHead updates only the latest head when new blocks are received
-func (s *SyncTester) updateLatestHead(ctx context.Context, blockNumber uint64) {
-	session, hasSession := SessionFromContext(ctx)
-	if !hasSession {
-		return // No session context, nothing to update
-	}
-
-	session.UpdateLatestHead(blockNumber)
-	s.log.Info("Updated latest head", "sessionID", session.SessionID, "latest", blockNumber)
+		"processedBlock", processedBlock,
+		"latest", fmt.Sprintf("%d→%d", beforeLatest, afterLatest),
+		"safe", fmt.Sprintf("%d→%d", beforeSafe, afterSafe),
+		"finalized", fmt.Sprintf("%d→%d", beforeFinalized, afterFinalized))
 }
 
 func (s *SyncTester) ChainId(ctx context.Context) (*hexutil.Big, error) {
@@ -347,8 +379,8 @@ func (s *SyncTester) mockForkchoiceUpdated(ctx context.Context, state *eth.Forkc
 
 	s.log.Info("ForkchoiceUpdated validation successful", "headNumber", headBlock.NumberU64(), "safeNumber", safeBlock.NumberU64(), "finalizedNumber", finalizedBlock.NumberU64())
 
-	// Update session heads if this is a session request
-	s.updateSessionHeads(ctx, headBlock.NumberU64(), safeBlock.NumberU64(), finalizedBlock.NumberU64())
+	// Advance session progress - op-node successfully processed headBlock
+	s.advanceSessionProgress(ctx, headBlock.NumberU64())
 
 	// Return VALID status with the head block hash as latest valid
 	result := &eth.ForkchoiceUpdatedResult{
@@ -486,7 +518,7 @@ func (s *SyncTester) validateNewPayloadV4(ctx context.Context, payload *eth.Exec
 	s.payloadBuilds.Range(func(key, value interface{}) bool {
 		buildJob := value.(*PayloadBuildJob)
 		if buildJob.ForkchoiceState.HeadBlockHash == payload.ParentHash &&
-		   uint64(buildJob.Attributes.Timestamp) == uint64(payload.Timestamp) {
+			uint64(buildJob.Attributes.Timestamp) == uint64(payload.Timestamp) {
 			ourPayloadID = &buildJob.ID
 			return false // stop iteration
 		}
@@ -590,8 +622,8 @@ func (s *SyncTester) validateNewPayload(ctx context.Context, payload *eth.Execut
 
 	s.log.Info("NewPayload validation successful", "blockHash", payload.BlockHash, "blockNumber", payload.BlockNumber)
 
-	// Update latest head in session (new blocks represent latest progress)
-	s.updateLatestHead(ctx, uint64(payload.BlockNumber))
+	// Note: In progress-driven mode, we don't advance session state here
+	// Only ForkchoiceUpdated (after successful derivation) advances progress
 
 	// Return VALID status accepting the payload
 	result := &eth.PayloadStatusV1{
@@ -636,18 +668,18 @@ func (s *SyncTester) buildMockPayload(ctx context.Context, payloadID eth.Payload
 	payload := &eth.ExecutionPayload{
 		ParentHash:    buildJob.ForkchoiceState.HeadBlockHash,
 		FeeRecipient:  buildJob.Attributes.SuggestedFeeRecipient,
-		StateRoot:     eth.Bytes32{}, // Mock - would be computed in real engine
-		ReceiptsRoot:  eth.Bytes32{}, // Mock - would be computed in real engine
+		StateRoot:     eth.Bytes32{},  // Mock - would be computed in real engine
+		ReceiptsRoot:  eth.Bytes32{},  // Mock - would be computed in real engine
 		LogsBloom:     eth.Bytes256{}, // Mock - would be computed in real engine
 		PrevRandao:    buildJob.Attributes.PrevRandao,
 		BlockNumber:   eth.Uint64Quantity(parentBlock.NumberU64() + 1),
 		GasLimit:      eth.Uint64Quantity(*buildJob.Attributes.GasLimit),
 		GasUsed:       eth.Uint64Quantity(0), // Mock - no gas used
 		Timestamp:     eth.Uint64Quantity(buildJob.Attributes.Timestamp),
-		ExtraData:     eth.BytesMax32{}, // Empty extra data
+		ExtraData:     eth.BytesMax32{},                                                 // Empty extra data
 		BaseFeePerGas: eth.Uint256Quantity(*uint256.MustFromBig(parentBlock.BaseFee())), // Inherit from parent
-		BlockHash:     common.Hash{}, // Would be computed from payload
-		Transactions:  buildJob.Attributes.Transactions, // Use provided transactions
+		BlockHash:     common.Hash{},                                                    // Would be computed from payload
+		Transactions:  buildJob.Attributes.Transactions,                                 // Use provided transactions
 	}
 
 	// Mock block hash generation (deterministic based on payload)

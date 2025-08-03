@@ -63,14 +63,15 @@ func parseSession(r *http.Request, log log.Logger) (*http.Request, error) {
 			return r, err
 		}
 		session := &backend.Session{
-			SessionID:       sessionID,
-			LatestOffset:    latest,
-			SafeOffset:      safe,
-			FinalizedOffset: finalized,
-			// Head positions will be initialized on first use
-			LatestHead:    0,
-			SafeHead:      0,
-			FinalizedHead: 0,
+			SessionID:              sessionID,
+			InitialLatestOffset:    latest,
+			InitialSafeOffset:      safe,
+			InitialFinalizedOffset: finalized,
+			// Progress-driven heads will be initialized on first use
+			AvailableLatestHead:    0,
+			AvailableSafeHead:      0,
+			AvailableFinalizedHead: 0,
+			Initialized:            false,
 		}
 		ctx := backend.WithSession(r.Context(), session)
 		// remove uuid path for routing

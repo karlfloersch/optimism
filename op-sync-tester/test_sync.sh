@@ -36,8 +36,8 @@ L2_RPC_ENDPOINT="$2"
 L1_BEACON_ENDPOINT="${3:-https://ethereum-sepolia-beacon-api.publicnode.com}"
 
 # L2 endpoint (via sync-tester proxy with session)  
-# Start close to chain tip: latest=3, safe=12, finalized=24 (blocks behind real chain)
-L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=3&safe=12&finalized=24"
+# Start far back: latest=10000, safe=10012, finalized=10024 (blocks behind real chain)
+L2_ENDPOINT="http://127.0.0.1:9000/chain/11155420/synctest/${SESSION_UUID}?latest=10000&safe=10012&finalized=10024"
 
 echo "🔧 Configuration:"
 echo "   L1: $L1_ENDPOINT"
@@ -227,7 +227,7 @@ echo ""
 echo "📋 SYNC TEST RESULTS"
 echo "===================="
 echo "Session ID: $SESSION_UUID"
-echo "Starting position: 3 blocks behind (latest), 12 behind (safe), 24 behind (finalized)"
+echo "Starting position: 10000 blocks behind (latest), 10012 behind (safe), 10024 behind (finalized)"
 echo ""
 
 # Calculate progress for each head type
