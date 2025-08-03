@@ -121,6 +121,7 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
 		ExperimentalOPStackAPI: ctx.Bool(flags.ExperimentalOPStackAPI.Name),
+		FlowTracing:            ctx.Bool(flags.FlowTracingFlag.Name),
 	}
 
 	if err := cfg.LoadPersisted(log); err != nil {

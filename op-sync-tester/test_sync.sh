@@ -119,9 +119,9 @@ fi
 # Set up flow tracing for event migration work
 echo "   Setting up event flow tracing..."
 mkdir -p /tmp/flow-traces
-export OP_NODE_FLOW_TRACING=true
 
-OP_NODE_FLOW_TRACING=true ../op-node-bin \
+../op-node-bin \
+    --flow-tracing \
     --l1="$L1_ENDPOINT" \
     --l1.beacon="$L1_BEACON_ENDPOINT" \
     --l2="$L2_ENDPOINT" \

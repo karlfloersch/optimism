@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	gosync "sync"
 	"sync/atomic"
 	"time"
@@ -181,7 +180,7 @@ func (n *OpNode) initEventSystem() {
 	sys.AddTracer(event.NewMetricsTracer(n.metrics))
 
 	// Enable flow tracing for refactoring analysis
-	if os.Getenv("OP_NODE_FLOW_TRACING") == "true" {
+	if n.cfg.FlowTracing {
 		flowTracer := flow.NewFlowTracer()
 		sys.AddTracer(flowTracer)
 		n.log.Info("Flow tracing enabled - capturing events for AST generation")

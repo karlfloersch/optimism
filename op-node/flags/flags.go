@@ -414,6 +414,14 @@ var (
 		EnvVars:  prefixEnvVars("EXPERIMENTAL_SEQUENCER_API"),
 		Category: MiscCategory,
 	}
+
+	FlowTracingFlag = &cli.BoolFlag{
+		Name:     "flow-tracing",
+		Usage:    "Enable flow tracing for event system refactoring analysis. Captures events to /tmp/flow-traces/",
+		Required: false,
+		EnvVars:  prefixEnvVars("FLOW_TRACING"),
+		Category: OperationsCategory,
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -464,6 +472,7 @@ var optionalFlags = []cli.Flag{
 	InteropDependencySet,
 	IgnoreMissingPectraBlobSchedule,
 	ExperimentalOPStackAPI,
+	FlowTracingFlag,
 }
 
 var DeprecatedFlags = []cli.Flag{
