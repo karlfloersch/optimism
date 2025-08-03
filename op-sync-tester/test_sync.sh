@@ -4,21 +4,22 @@ set -e
 
 # Usage function
 usage() {
-    echo "Usage: $0 <L1_RPC_URL> <L2_RPC_URL> [L1_BEACON_URL]"
+    echo "Usage: $0 <L1_RPC_URL> <L2_RPC_URL> <L1_BEACON_URL> [DURATION_SECONDS]"
     echo ""
     echo "Examples:"
-    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY'"
-    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY' 'https://ethereum-sepolia-beacon-api.publicnode.com'"
+    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY' 'https://chaotic-dark-river.ethereum-sepolia.quiknode.pro/cfce48bb8605b8c9f7ca515e0cfd17c562b61112/'"
+    echo "  $0 'https://sepolia.infura.io/v3/YOUR_KEY' 'https://optimism-sepolia.infura.io/v3/YOUR_KEY' 'https://ethereum-sepolia-beacon-api.publicnode.com' 120"
     echo ""
     echo "Arguments:"
-    echo "  L1_RPC_URL    - Ethereum Sepolia RPC endpoint (required)"
-    echo "  L2_RPC_URL    - Optimism Sepolia RPC endpoint (required)"
-    echo "  L1_BEACON_URL - Ethereum Sepolia beacon API endpoint (optional)"
+    echo "  L1_RPC_URL      - Ethereum Sepolia RPC endpoint (required)"
+    echo "  L2_RPC_URL      - Optimism Sepolia RPC endpoint (required)"
+    echo "  L1_BEACON_URL   - Ethereum Sepolia beacon API endpoint (required)"
+    echo "  DURATION_SECONDS - Test duration in seconds (optional, default: 60)"
     exit 1
 }
 
 # Check command line arguments
-if [ $# -lt 2 ]; then
+if [ $# -lt 3 ]; then
     echo "❌ Error: Missing required arguments"
     echo ""
     usage
@@ -30,10 +31,11 @@ echo "============================="
 # Generate a unique session ID for this test
 SESSION_UUID=$(uuidgen)
 
-# RPC endpoints from command line arguments
+# RPC endpoints and configuration from command line arguments
 L1_ENDPOINT="$1"
 L2_RPC_ENDPOINT="$2"
-L1_BEACON_ENDPOINT="${3:-https://chaotic-dark-river.ethereum-sepolia.quiknode.pro/cfce48bb8605b8c9f7ca515e0cfd17c562b61112/}"
+L1_BEACON_ENDPOINT="$3"
+DURATION_SECONDS="${4:-60}"
 
 # L2 endpoint (via sync-tester proxy with session)
 # Start far back: latest=10000, safe=10012, finalized=10024 (blocks behind real chain)
@@ -43,6 +45,7 @@ echo "🔧 Configuration:"
 echo "   L1: $L1_ENDPOINT"
 echo "   L1 Beacon: $L1_BEACON_ENDPOINT"
 echo "   L2 Backend: $L2_RPC_ENDPOINT"
+echo "   Duration: ${DURATION_SECONDS}s"
 echo "   Session ID: $SESSION_UUID"
 echo ""
 
@@ -171,9 +174,11 @@ echo "   Finalized head: #$STARTING_FINALIZED"
 START_TIME=$(date +%s)
 
 # Sync with status checks
-echo "⏳ Syncing for 60 seconds..."
-for i in {1..4}; do
-    echo "   📊 Status check $i/4 (after $((i*15))s):"
+echo "⏳ Syncing for ${DURATION_SECONDS} seconds..."
+CHECKS=$((DURATION_SECONDS / 15))
+if [ $CHECKS -lt 1 ]; then CHECKS=1; fi
+for i in $(seq 1 $CHECKS); do
+    echo "   📊 Status check $i/$CHECKS (after $((i*15))s):"
 
     # Get current head positions
     CURRENT_LATEST=$(get_block_number "latest")
@@ -204,6 +209,14 @@ for i in {1..4}; do
 
     sleep 15
 done
+
+# Sleep for any remaining time
+ELAPSED_TIME=$((CHECKS * 15))
+REMAINING_TIME=$((DURATION_SECONDS - ELAPSED_TIME))
+if [ $REMAINING_TIME -gt 0 ]; then
+    echo "   ⏱️  Waiting for remaining ${REMAINING_TIME}s..."
+    sleep $REMAINING_TIME
+fi
 
 # Capture ending state for all head types
 echo "📊 Capturing ending head positions..."

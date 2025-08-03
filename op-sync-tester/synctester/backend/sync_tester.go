@@ -285,17 +285,17 @@ func (s *SyncTester) advanceSessionProgress(ctx context.Context, latestBlock, sa
 
 	// Don't advance past real chain tip
 	if latestBlock >= currentSepolia {
-		s.log.Debug("Not advancing - latest block at/past Sepolia tip", 
+		s.log.Debug("Not advancing - latest block at/past Sepolia tip",
 			"latest", latestBlock, "sepolia_tip", currentSepolia)
 		return
 	}
 
 	// Get before state for logging
 	beforeLatest, beforeSafe, beforeFinalized := session.GetAvailableHeads()
-	
+
 	// Advance progress using op-node's actual ForkchoiceState values
 	session.AdvanceProgress(latestBlock, safeBlock, finalizedBlock)
-	
+
 	// Get after state for logging
 	afterLatest, afterSafe, afterFinalized := session.GetAvailableHeads()
 

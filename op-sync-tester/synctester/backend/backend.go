@@ -57,18 +57,18 @@ type Session struct {
 func (s *Session) AdvanceProgress(latestBlock, safeBlock, finalizedBlock uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	// op-node successfully processed these blocks - make next block available as "latest"
 	nextLatest := latestBlock + 1
 	if nextLatest > s.AvailableLatestHead {
 		s.AvailableLatestHead = nextLatest
 	}
-	
+
 	// Use op-node's actual safe and finalized values (not calculated!)
 	if safeBlock > s.AvailableSafeHead {
 		s.AvailableSafeHead = safeBlock
 	}
-	
+
 	if finalizedBlock > s.AvailableFinalizedHead {
 		s.AvailableFinalizedHead = finalizedBlock
 	}
