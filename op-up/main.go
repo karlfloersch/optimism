@@ -24,11 +24,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-    "github.com/ethereum-optimism/optimism/op-service/log/logfilter"
-    oplog "github.com/ethereum-optimism/optimism/op-service/log"
-    "github.com/ethereum-optimism/optimism/op-service/sources"
-    supv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+	oplog "github.com/ethereum-optimism/optimism/op-service/log"
+	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
 	"github.com/ethereum-optimism/optimism/op-service/testreq"
+	supv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
@@ -64,11 +63,11 @@ func run() error {
 		sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
 
 		sysgo.WithDeployer(),
-		sysgo.WithDeployerOptions(
-			sysgo.WithEmbeddedContractSources(),
-			sysgo.WithCommons(ids.L1.ChainID()),
-			sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
-		),
+        sysgo.WithDeployerOptions(
+            sysgo.WithLocalContractSources(),
+            sysgo.WithCommons(ids.L1.ChainID()),
+            sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+        ),
 		sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
 
 		sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
@@ -80,7 +79,7 @@ func run() error {
 		sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil),
 
 		sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}),
-	)), presets.WithLogFilter(logfilter.DefaultMute()))
+	)), presets.WithLogFilter(logfilter.DefaultShow(logfilter.Level(log.LevelDebug).Show())))
 
 	return nil
 }
@@ -98,8 +97,13 @@ func (t testingM) Run() int {
 }
 
 func runSysgo() error {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer cancel()
+    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+    // Auto-stop after a short duration to keep local runs bounded
+    stop := time.AfterFunc(15*time.Second, cancel)
+    defer func() {
+        stop.Stop()
+        cancel()
+    }()
 
 	// Print available account.
 	hd, err := devkeys.NewMnemonicDevKeys(devkeys.TestMnemonic)
@@ -157,7 +161,7 @@ func runSysgo() error {
 		}
 	}()
 
-    // Proxy L2 EL requests.
+	// Proxy L2 EL requests.
 	go func() {
 		if err := proxyEL(elNode.L2EthClient().RPC()); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v", err)
@@ -166,24 +170,18 @@ func runSysgo() error {
 
     // Start supervisor-v2 polling against sysgo L2
     {
-        // CL (op-node) and EL endpoints
-        clRPC := l2Net.L2CLNode(match.FirstL2CL).RollupAPI().(interface{ Close() }) // for cleanup type
-        _ = clRPC
-        // We cannot access the underlying RPC directly from stack.L2CLNode RollupAPI, so reuse the EL RPC for receipts and only call rollup via sources client created earlier in sysgo.
-        // Dial fresh clients here for clarity.
-        clUserRPCClient, err := client.NewRPC(t.Ctx(), t.Logger(), l2Net.L2CLNode(match.FirstL2CL).(interface{ Client() client.RPC }).Client().(interface{ String() string }).String())
-        if err != nil { return err }
+        // Use the RollupAPI from the L2 CL shim directly and the EL RPC from the L2 EL shim
+        roll := l2Net.L2CLNode(match.FirstL2CL).RollupAPI()
         elUserRPC := elNode.L2EthClient().RPC()
 
         logCfg := oplog.DefaultCLIConfig()
         lgr := oplog.NewLogger(os.Stdout, logCfg)
-        roll := sources.NewRollupClient(clUserRPCClient)
         rcfg, err := roll.RollupConfig(t.Ctx())
         if err != nil {
             return err
         }
         s := supv2.NewSupervisor(lgr)
-        if err := s.StartPollingWithClients(clUserRPCClient, elUserRPC, rcfg, time.Second, 40); err != nil {
+        if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
             return err
         }
     }
@@ -323,9 +321,9 @@ var _ testreq.TestingT = (*testingT)(nil)
 func (t *testingT) doCleanup() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-    for i := len(t.cleanups) - 1; i >= 0; i-- {
-        t.cleanups[i]()
-    }
+	for i := len(t.cleanups) - 1; i >= 0; i-- {
+		t.cleanups[i]()
+	}
 }
 
 // Cleanup implements devtest.T.
