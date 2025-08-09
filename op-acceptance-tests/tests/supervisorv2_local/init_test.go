@@ -1,0 +1,11 @@
+package supervisorv2_local
+
+import (
+    "testing"
+
+    "github.com/ethereum-optimism/optimism/op-devstack/presets"
+)
+
+func TestMain(m *testing.M) {
+    presets.DoMain(m, presets.WithMinimal(), presets.WithSupervisorV2Sidecar())
+}

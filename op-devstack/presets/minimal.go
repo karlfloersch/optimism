@@ -49,6 +49,45 @@ func WithMinimal() stack.CommonOption {
 	return stack.MakeCommon(sysgo.DefaultMinimalSystem(&sysgo.DefaultMinimalSystemIDs{}))
 }
 
+// WithMinimalEmbedded composes a minimal single-L2 system but uses embedded artifacts
+// instead of local foundry artifacts.
+func WithMinimalEmbedded() stack.CommonOption {
+	ids := sysgo.NewDefaultMinimalSystemIDs(sysgo.DefaultL1ID, sysgo.DefaultL2AID)
+
+	opt := stack.Combine[*sysgo.Orchestrator]()
+	opt.Add(stack.BeforeDeploy(func(o *sysgo.Orchestrator) {
+		o.P().Logger().Info("Setting up")
+	}))
+
+	opt.Add(sysgo.WithMnemonicKeys(devkeys.TestMnemonic))
+
+	opt.Add(sysgo.WithDeployer(),
+		sysgo.WithDeployerOptions(
+			sysgo.WithEmbeddedContractSources(),
+			sysgo.WithCommons(ids.L1.ChainID()),
+			sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+		),
+	)
+
+	opt.Add(sysgo.WithL1Nodes(ids.L1EL, ids.L1CL))
+
+	opt.Add(sysgo.WithL2ELNode(ids.L2EL, nil))
+	opt.Add(sysgo.WithL2CLNode(ids.L2CL, true, false, ids.L1CL, ids.L1EL, ids.L2EL))
+
+	opt.Add(sysgo.WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL))
+	opt.Add(sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil))
+
+	opt.Add(sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(sysgo.WithTestSequencer(ids.TestSequencer, ids.L1CL, ids.L2CL, ids.L1EL, ids.L2EL))
+
+	opt.Add(sysgo.WithL2Challenger(ids.L2Challenger, ids.L1EL, ids.L1CL, nil, nil, &ids.L2CL, []stack.L2ELNodeID{
+		ids.L2EL,
+	}))
+
+	return stack.MakeCommon(opt)
+}
+
 func NewMinimal(t devtest.T) *Minimal {
 	system := shim.NewSystem(t)
 	orch := Orchestrator()
