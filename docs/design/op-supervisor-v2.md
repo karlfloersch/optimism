@@ -21,6 +21,14 @@ If valid, then the op-supervisor just continues. If invalid, then the supervisor
 This means that the op-node will start syncing again but this time it will skip over the block which is invalid based on the cross-safety checks. This is all that is required to support interop and doesn't require significant changes to the op-node!
 
 
+Clarifications
+- All cross-safety and local-safety persistence lives solely inside supervisor-v2. The op-node stores none of this state.
+- Minimal, backwards-compatible op-node change: add an optional denylist check in the derivation loop. If no entries are present or the feature is disabled, behavior is unchanged.
+- Denylist key: engine/execution PayloadID deterministically computed from the payload fields (i.e., everything except the post-state). Denylist is per-chain-id, persisted, and does not expire unless explicitly pruned.
+- Rollback target: the L2 block immediately before the first cross-invalid block. Order: add denylisted payload; stop op-node; roll back EL heads; clear op-node safe DB; restart op-node.
+- Use L1 confirmation depth (default 40, configurable) for determining which local-safe blocks are eligible for cross-safety checks, to avoid reorging cross-safety itself.
+
+
 Implementation plan:
 
 Note: Please work with me to come up with implementation plans for each milestone. Add a checklist of things that we need to do for each of these milestones. Also ensure that at all times:
@@ -40,13 +48,21 @@ Enable fast testing feedback by integrating op-supervisor-v2 with devstack and s
 Both of these services would of course be hooked up with an execution client (geth).
 
 Implementation plan
-- [ ] Create op-supervisor-v2 which just creates a subprocess that is a single op-node.
-- [ ] ...[todo] please fill out the next steps. Should we integrate into devstack first? Or sysgo? Or other? What are the options?
+- [ ] Create `op-supervisor-v2` process that manages a single op-node subprocess and a single L2 geth (EL) process/datadir.
+- [ ] Ingestion: poll op-node Rollup status for current local-safe head/range and fetch corresponding L2 blocks+receipts from L2 geth; persist into supervisor-v2 DBs reusing existing schemas (`events`, `fromda` local-safe, `fromda` cross-safe).
+- [ ] Gate cross-safety checks to only run on local-safe blocks whose L1 origin is ≥ confirmation depth (default 40).
+- [ ] Provide a minimal HTTP health/status endpoint with per-chain heads and last cross-safe height.
+- [ ] Bring up as a standalone sysgo scenario for fastest iteration; then add a devstack preset without affecting existing tests.
 
 
 ### 2. Introduce op-node rollbacks triggered by op-supervisor-v2
 
 Show in a test that it is possible to trigger the rollback logic in the op-supervisor-v2 using a devstack test
+
+Implementation plan
+- [ ] Define rollback API within supervisor-v2: for a given chain, stop op-node; use Engine API forkchoiceUpdated to set head/safe to the parent of the invalid block (fallback to `debug_setHead` if needed); clear op-node safe DB; restart op-node.
+- [ ] Persist denylist entry before initiating rollback to ensure op-node does not re-accept the same payload.
+- [ ] E2E: sysgo harness test that injects a known denylisted payload and verifies automatic rollback and forward progress past the height.
 
 ### 3. Add denylist
 
@@ -54,19 +70,42 @@ Create a payloadId (or blockhash) denylist BUT don't introduce any interop logic
 
 We should show this working both in the devstack tests as well as in the sysgo system that we spin up
 
+Implementation plan
+- [ ] Implement persisted per-chain denylist in supervisor-v2 keyed by `PayloadID`.
+- [ ] Add seeded-random policy to denylist 1-in-N safe blocks (fixed seed for determinism; only consider safe blocks).
+- [ ] Minimal op-node change: optional `--denylist-url` (or similar) to query supervisor before inserting a payload into EL; on deny, follow existing malformed-batch steady-derivation error path (post-holocene).
+- [ ] Tests in sysgo and devstack preset to validate denylist hit → rollback → re-sync behavior.
+
 ### 4. Add a second op-node and second execution client
 
 We've got the core logic working for one chain, to make this interesting we want to integrate the cross-safe package and that works best with two chains.
 
 Add this new two chain setup to the devstack and create a simple test making it work. Also ensure it's added to our sysgo setup.
 
+Implementation plan
+- [ ] New devstack preset (e.g., `interop2_two_chain`) with two minimal L2s, each with its own op-node and L2 geth managed by supervisor-v2.
+- [ ] Supervisor-v2 manages per-chain processes and datadirs, plus shared DBs (reusing existing supervisor schemas).
+- [ ] Basic test: both chains ingest local-safe and advance cross-safe independently.
+
 ### 5. Create a new hardfork (interop2) which deploys the pre-deploys
 
 Because we are NOT using the interop hardfork (it introduces too much complexity into the op-node), we will still need to deploy the pre-deploys. For this we will introduce a new hardfork which is interop2 that deploys the same predeploys as the normal interop system. This can be done with a `if interop OR interop2` in the pre-deploy setup bit.
 
+Implementation plan
+- [ ] Gate predeploys as `interop || interop2` in the op-node rollup config (no additional params; match interop exactly).
+- [ ] Use interop2 by default in tests that run under supervisor-v2 presets.
+- [ ] Represent interop2 in `op-node` rollup.json as a new `interop2_time` (do not set `interop_time` for interop2 networks). In `derive/attributes.go`, inject the same predeploy upgrade txs when `IsInterop2ActivationBlock(...)` is true; do not enable other interop behaviors.
+- [ ] Optionally add a CLI override flag (e.g., `--interop2-override-time`) mirroring the existing interop override to simplify testing.
+
 ### 6. Integrate cross safe
 
 This is where we integrate cross safe by populating the cross-db with all of our block data / event data. We will want to test this similarly to how interop is tested currently - creating valid and invalid executing messages which are validated or trigger reorgs.
+
+Implementation plan
+- [ ] Populate `events` DB from L2 geth logs/receipts and `fromda` local-safe DB from op-node local-safe mapping; compute cross-safe as in existing supervisor.
+- [ ] Apply L1 confirmation depth gating for cross-safe inputs.
+- [ ] Reuse existing cross-safety rulesets and tests; add cases: (a) valid executing message passes cross-safety, (b) invalid dependency fails and triggers reorg.
+- [ ] On crash/restart: reload denylist, recompute cross-safe from last known-good height, reconcile with current L2 heads.
 
 Once we've done this we are done!
 
