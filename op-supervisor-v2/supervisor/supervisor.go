@@ -10,6 +10,8 @@ import (
     "time"
 
     "github.com/ethereum/go-ethereum/log"
+    opclient "github.com/ethereum-optimism/optimism/op-service/client"
+    "github.com/ethereum-optimism/optimism/op-service/sources"
 )
 
 type Supervisor struct {
@@ -17,6 +19,9 @@ type Supervisor struct {
     mu       sync.Mutex
     cmd      *exec.Cmd
     started  time.Time
+
+    // polling
+    cancelPoll context.CancelFunc
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
@@ -47,6 +52,10 @@ func (s *Supervisor) StartOpNode(binary string, args ...string) error {
 func (s *Supervisor) Stop() {
     s.mu.Lock()
     defer s.mu.Unlock()
+    if s.cancelPoll != nil {
+        s.cancelPoll()
+        s.cancelPoll = nil
+    }
     if s.cmd != nil && s.cmd.Process != nil {
         _ = s.cmd.Process.Kill()
         s.cmd = nil
@@ -93,6 +102,74 @@ func terminateProcess(ctx context.Context, cmd *exec.Cmd) error {
     case <-done:
         return nil
     }
+}
+
+// StartPolling starts a background loop that polls op-node sync status and fetches the corresponding L2 block and receipts.
+func (s *Supervisor) StartPolling(opNodeRPC, l2RPC string, interval time.Duration, confirmDepth uint64) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    if s.cancelPoll != nil {
+        return nil
+    }
+    ctx, cancel := context.WithCancel(context.Background())
+    s.cancelPoll = cancel
+
+    // rollup client (op-node)
+    opNodeCli, err := opclient.NewRPC(ctx, s.log, opNodeRPC)
+    if err != nil {
+        cancel()
+        return err
+    }
+    roll := sources.NewRollupClient(opNodeCli)
+
+    // l2 client
+    l2Cli, err := opclient.NewRPC(ctx, s.log, l2RPC)
+    if err != nil {
+        cancel()
+        return err
+    }
+    // get rollup config from op-node to configure l2 client caches sanely
+    rcfg, err := roll.RollupConfig(ctx)
+    if err != nil {
+        cancel()
+        return err
+    }
+    l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
+    if err != nil {
+        cancel()
+        return err
+    }
+
+    go func() {
+        ticker := time.NewTicker(interval)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                st, err := roll.SyncStatus(ctx)
+                if err != nil || st == nil {
+                    s.log.Warn("poll: sync status error", "err", err)
+                    continue
+                }
+                localSafe := st.LocalSafeL2
+                // Only act on sufficiently confirmed L1 scope; for now just log head info.
+                s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+                if localSafe.Number == 0 {
+                    continue
+                }
+                // Fetch payload + receipts of local-safe head for indexing later
+                if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
+                    s.log.Debug("poll: fetch receipts error", "num", localSafe.Number, "err", err)
+                }
+                _ = rcfg
+                _ = confirmDepth
+            }
+        }
+    }()
+
+    return nil
 }
 
 

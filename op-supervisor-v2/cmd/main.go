@@ -27,6 +27,10 @@ func main() {
             &cli.StringFlag{Name: "op-node.path", Usage: "Path to op-node binary (optional)"},
             &cli.StringFlag{Name: "op-node.args", Usage: "Comma-separated arguments to pass to op-node"},
             &cli.BoolFlag{Name: "no-op-node", Usage: "Do not start op-node (useful for tests)"},
+            &cli.StringFlag{Name: "op-node.rpc", Usage: "op-node RPC endpoint (http/ws) for rollup status"},
+            &cli.StringFlag{Name: "l2.rpc", Usage: "L2 execution RPC endpoint (http/ws)"},
+            &cli.DurationFlag{Name: "poll.interval", Value: 1 * time.Second, Usage: "Polling interval for rollup status"},
+            &cli.UintFlag{Name: "confirm.depth", Value: 40, Usage: "L1 confirmation depth for cross-safety gating"},
         },
         Action: func(ctx *cli.Context) error {
             // basic logger setup using op-service/log defaults
@@ -66,6 +70,17 @@ func main() {
                 }
                 if err := sup.StartOpNode(bin, args...); err != nil {
                     return fmt.Errorf("failed to start op-node: %w", err)
+                }
+            }
+
+            // Start polling if RPCs provided
+            opNodeRPC := ctx.String("op-node.rpc")
+            l2RPC := ctx.String("l2.rpc")
+            pollInt := ctx.Duration("poll.interval")
+            confirmDepth := ctx.Uint("confirm.depth")
+            if opNodeRPC != "" && l2RPC != "" {
+                if err := sup.StartPolling(opNodeRPC, l2RPC, pollInt, uint64(confirmDepth)); err != nil {
+                    return fmt.Errorf("start polling: %w", err)
                 }
             }
 
