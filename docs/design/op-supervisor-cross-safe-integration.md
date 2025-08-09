@@ -83,6 +83,24 @@ Consider starting the supervisor-v2 implementation with the following:
 - Test!
 
 
+Aug 9 Implementation notes
+- Instead of having two op-nodes, I use a single op-node per chain.
+- The single op-node per chain tracks the local safe as safe
+- The supervisor tracks cross-safety using all of the local safe heads
+- If the supervisor realizes that one of the op-node's cross safety does not match that node's local safe, it will shut down the op-node and denylist the blockhash that has invalid initating messages. It will then rewind the op-node to before the denylist block was derived.
+- The op-node will boot up, and once it derives the denylist block it will throw it away
+  - This does mean that I need to implement the denylist thing but I think that should be pretty easy
+- Meme: I can read from solana with a special denylist
+- Need to make sure safety is queried from the supervisor instead of el now tho
+
+
+Updated execution plan
+- Create supervisor which spins up op nodes as sub processes
+- Add the denylist logic where it rolls back if a deny condition returns true
+- Make an initial deny condition be idk reading from an external RPC
+- Add cross safety package
+
+
 ---
 
 
