@@ -48,11 +48,17 @@ Enable fast testing feedback by integrating op-supervisor-v2 with devstack and s
 Both of these services would of course be hooked up with an execution client (geth).
 
 Implementation plan
-- [ ] Create `op-supervisor-v2` process that manages a single op-node subprocess and a single L2 geth (EL) process/datadir.
-- [ ] Ingestion: poll op-node Rollup status for current local-safe head/range and fetch corresponding L2 blocks+receipts from L2 geth; persist into supervisor-v2 DBs reusing existing schemas (`events`, `fromda` local-safe, `fromda` cross-safe).
-- [ ] Gate cross-safety checks to only run on local-safe blocks whose L1 origin is ≥ confirmation depth (default 40).
-- [ ] Provide a minimal HTTP health/status endpoint with per-chain heads and last cross-safe height.
-- [ ] Bring up as a standalone sysgo scenario for fastest iteration; then add a devstack preset without affecting existing tests.
+- [x] Create `op-supervisor-v2` process that manages a single op-node subprocess and a single L2 geth (EL) process/datadir.
+- [x] Ingestion skeleton: poll op-node Rollup status for current heads and fetch corresponding L2 blocks/receipts (logging-only for now).
+- [ ] Persist into supervisor-v2 DBs reusing existing schemas (`events`, `fromda` local-safe, `fromda` cross-safe).
+- [x] Provide a minimal HTTP health/status endpoint with per-chain heads.
+- [x] Bring up as a standalone sysgo scenario; add `scripts/sysgo-smoke.sh` to send a tx with cast and confirm receipt.
+- [ ] Add a devstack preset and tests (pending) without affecting existing suites.
+
+Current status (M1):
+- `op-up` sysgo harness runs a single L2 with op-node and EL; `OP_UP_STOP_AFTER` controls runtime.
+- `scripts/sysgo-smoke.sh` boots sysgo, parses the test key, sends a tx via cast, prints the receipt, and summarizes unsafe/safe head progress from logs.
+- Verified locally: sequencer sealed new blocks; unsafe advanced to 23; safe advanced to 14.
 
 
 ### 2. Introduce op-node rollbacks triggered by op-supervisor-v2

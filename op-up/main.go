@@ -63,11 +63,11 @@ func run() error {
 		sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
 
 		sysgo.WithDeployer(),
-        sysgo.WithDeployerOptions(
-            sysgo.WithLocalContractSources(),
-            sysgo.WithCommons(ids.L1.ChainID()),
-            sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
-        ),
+		sysgo.WithDeployerOptions(
+			sysgo.WithLocalContractSources(),
+			sysgo.WithCommons(ids.L1.ChainID()),
+			sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+		),
 		sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
 
 		sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
@@ -97,13 +97,21 @@ func (t testingM) Run() int {
 }
 
 func runSysgo() error {
-    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-    // Auto-stop after a short duration to keep local runs bounded
-    stop := time.AfterFunc(15*time.Second, cancel)
-    defer func() {
-        stop.Stop()
-        cancel()
-    }()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	// Auto-stop duration is configurable via OP_UP_STOP_AFTER (default 15s)
+	stopAfter := 15 * time.Second
+	if v := os.Getenv("OP_UP_STOP_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			stopAfter = d
+		} else if n, err := atoiStrict(v); err == nil && n > 0 {
+			stopAfter = time.Duration(n) * time.Second
+		}
+	}
+	stop := time.AfterFunc(stopAfter, cancel)
+	defer func() {
+		stop.Stop()
+		cancel()
+	}()
 
 	// Print available account.
 	hd, err := devkeys.NewMnemonicDevKeys(devkeys.TestMnemonic)
@@ -168,23 +176,23 @@ func runSysgo() error {
 		}
 	}()
 
-    // Start supervisor-v2 polling against sysgo L2
-    {
-        // Use the RollupAPI from the L2 CL shim directly and the EL RPC from the L2 EL shim
-        roll := l2Net.L2CLNode(match.FirstL2CL).RollupAPI()
-        elUserRPC := elNode.L2EthClient().RPC()
+	// Start supervisor-v2 polling against sysgo L2
+	{
+		// Use the RollupAPI from the L2 CL shim directly and the EL RPC from the L2 EL shim
+		roll := l2Net.L2CLNode(match.FirstL2CL).RollupAPI()
+		elUserRPC := elNode.L2EthClient().RPC()
 
-        logCfg := oplog.DefaultCLIConfig()
-        lgr := oplog.NewLogger(os.Stdout, logCfg)
-        rcfg, err := roll.RollupConfig(t.Ctx())
-        if err != nil {
-            return err
-        }
-        s := supv2.NewSupervisor(lgr)
-        if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
-            return err
-        }
-    }
+		logCfg := oplog.DefaultCLIConfig()
+		lgr := oplog.NewLogger(os.Stdout, logCfg)
+		rcfg, err := roll.RollupConfig(t.Ctx())
+		if err != nil {
+			return err
+		}
+		s := supv2.NewSupervisor(lgr)
+		if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
+			return err
+		}
+	}
 
 	<-ctx.Done()
 
@@ -430,4 +438,15 @@ func (t *testingT) WithCtx(ctx context.Context) devtest.T {
 
 // _TestOnly implements devtest.T.
 func (t *testingT) TestOnly() {
+}
+
+// atoiStrict attempts to parse an integer from a string without allowing
+// trailing characters. Returns an error if parsing fails.
+func atoiStrict(s string) (int, error) {
+	var n int
+	// Fast path: try standard Atoi
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

@@ -21,8 +21,9 @@ rm -f "$LOG_FILE"
 (
   # Run with a timeout guard in case the internal auto-stop is increased
   # Note: 'command timeouts' differ per shell; use gnu-timeout if available
+  export OP_UP_STOP_AFTER=${OP_UP_STOP_AFTER:-45s}
   if command -v timeout >/dev/null 2>&1; then
-    timeout 90s go run ./op-up 2>&1 | tee "$LOG_FILE"
+    timeout 120s go run ./op-up 2>&1 | tee "$LOG_FILE"
   else
     go run ./op-up 2>&1 | tee "$LOG_FILE"
   fi
@@ -92,16 +93,30 @@ echo "[sysgo-smoke] sender: $SENDER"
 
 # Send a self-transfer of 0 ETH (consumes gas, exercises tx path). Let node estimate fees.
 echo "[sysgo-smoke] sending tx"
-TX_HASH=$(cast send "$SENDER" --private-key "$PK" --value 0 2>/dev/null | tail -n1)
+TX_JSON=$(cast send "$SENDER" --private-key "$PK" --value 0 --json 2>/dev/null || true)
+TX_HASH=$(echo "$TX_JSON" | sed -n 's/.*"transactionHash"[[:space:]]*:[[:space:]]*"\(0x[0-9a-fA-F]\+\)".*/\1/p' | head -n1)
 if [[ -z "$TX_HASH" ]]; then
-  echo "[sysgo-smoke] failed to send tx with cast" >&2
+  # Fallback: sometimes cast prints the hash alone; try to extract any 0x... hash from last lines
+  TX_HASH=$(echo "$TX_JSON" | grep -Eo '0x[0-9a-fA-F]+' | head -n1 || true)
+fi
+if [[ -z "$TX_HASH" ]]; then
+  echo "[sysgo-smoke] failed to parse tx hash from cast output" >&2
+  echo "$TX_JSON" >&2
   exit 1
 fi
 echo "[sysgo-smoke] tx: $TX_HASH"
 
 echo "[sysgo-smoke] waiting for receipt"
-cast receipt "$TX_HASH" --poll --confirmations 1 >/dev/null
+cast receipt "$TX_HASH" --poll --confirmations 1
 echo "[sysgo-smoke] receipt confirmed"
+
+# Summarize unsafe/safe head progress from logs
+echo "[sysgo-smoke] summarizing head progression"
+UNSAFE=$(grep -n "Inserted new L2 unsafe block" "$LOG_FILE" | wc -l | tr -d ' ')
+SAFE=$(grep -n "Forkchoice update" "$LOG_FILE" | grep -Eo 'safe=0x[0-9a-fA-F]+' | wc -l | tr -d ' ')
+echo "[sysgo-smoke] unsafe blocks inserted: $UNSAFE"
+echo "[sysgo-smoke] safe head updates seen: $SAFE"
+
 
 echo "[sysgo-smoke] SUCCESS"
 
