@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -25,7 +24,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
+    "github.com/ethereum-optimism/optimism/op-service/log/logfilter"
+    oplog "github.com/ethereum-optimism/optimism/op-service/log"
+    "github.com/ethereum-optimism/optimism/op-service/sources"
+    supv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum-optimism/optimism/op-service/testreq"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -155,12 +157,36 @@ func runSysgo() error {
 		}
 	}()
 
-	// Proxy L2 EL requests.
+    // Proxy L2 EL requests.
 	go func() {
 		if err := proxyEL(elNode.L2EthClient().RPC()); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v", err)
 		}
 	}()
+
+    // Start supervisor-v2 polling against sysgo L2
+    {
+        // CL (op-node) and EL endpoints
+        clRPC := l2Net.L2CLNode(match.FirstL2CL).RollupAPI().(interface{ Close() }) // for cleanup type
+        _ = clRPC
+        // We cannot access the underlying RPC directly from stack.L2CLNode RollupAPI, so reuse the EL RPC for receipts and only call rollup via sources client created earlier in sysgo.
+        // Dial fresh clients here for clarity.
+        clUserRPCClient, err := client.NewRPC(t.Ctx(), t.Logger(), l2Net.L2CLNode(match.FirstL2CL).(interface{ Client() client.RPC }).Client().(interface{ String() string }).String())
+        if err != nil { return err }
+        elUserRPC := elNode.L2EthClient().RPC()
+
+        logCfg := oplog.DefaultCLIConfig()
+        lgr := oplog.NewLogger(os.Stdout, logCfg)
+        roll := sources.NewRollupClient(clUserRPCClient)
+        rcfg, err := roll.RollupConfig(t.Ctx())
+        if err != nil {
+            return err
+        }
+        s := supv2.NewSupervisor(lgr)
+        if err := s.StartPollingWithClients(clUserRPCClient, elUserRPC, rcfg, time.Second, 40); err != nil {
+            return err
+        }
+    }
 
 	<-ctx.Done()
 
@@ -297,9 +323,9 @@ var _ testreq.TestingT = (*testingT)(nil)
 func (t *testingT) doCleanup() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, cleanup := range slices.Backward(t.cleanups) {
-		cleanup()
-	}
+    for i := len(t.cleanups) - 1; i >= 0; i-- {
+        t.cleanups[i]()
+    }
 }
 
 // Cleanup implements devtest.T.
