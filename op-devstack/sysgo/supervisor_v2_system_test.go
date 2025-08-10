@@ -151,7 +151,9 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 	// Trigger rollback via Supervisor admin API (stops op-node, rolls back EL, restarts op-node)
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
-	reqBody, _ := json.Marshal(map[string]uint64{"back_n_blocks": 1})
+	// Roll back to an absolute block number (preRef.Number - 1)
+	toNum := preRef.Number - 1
+	reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
 	resp, err := http.Post(sv2URL+"/admin/rollback", "application/json", bytes.NewReader(reqBody))
 	t.Require().NoError(err)
 	if resp != nil {

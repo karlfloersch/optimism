@@ -123,11 +123,15 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			return
 		}
 		var req struct {
-			BackN uint64 `json:"back_n_blocks"`
+			ToBlockNumber *uint64 `json:"to_block_number"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.BackN == 0 {
-			req.BackN = 1
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.ToBlockNumber == nil {
+			http.Error(w, "missing to_block_number", http.StatusBadRequest)
+			return
 		}
 		s.mu.Lock()
 		cfg := s.managedCfg
@@ -136,7 +140,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			http.Error(w, "managed mode not running", http.StatusServiceUnavailable)
 			return
 		}
-		if err := s.performRollback(r.Context(), cfg, req.BackN); err != nil {
+		err := s.performRollback(r.Context(), cfg, *req.ToBlockNumber)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -430,9 +435,9 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 	return nil
 }
 
-// performRollback stops the managed op-node, rolls back the EL by backN blocks using debug_setHead,
+// performRollback stops the managed op-node, rolls back the EL to an absolute block number
 // then restarts the op-node and polling.
-func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, backN uint64) error {
+func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, toBlock uint64) error {
 	// Stop polling and op-node
 	s.mu.Lock()
 	if s.cancelPoll != nil {
@@ -447,8 +452,8 @@ func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, ba
 		cancel()
 	}
 
-	// Roll back EL head by backN via pluggable implementation
-	if err := rollbackEL(ctx, cfg.l2UserRPC, backN); err != nil {
+	// Roll back EL head to the absolute target via pluggable implementation
+	if err := rollbackEL(ctx, cfg.l2UserRPC, toBlock); err != nil {
 		return err
 	}
 
