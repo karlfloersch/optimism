@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 )
@@ -26,18 +27,23 @@ func rollbackELByDebugSetHead(ctx context.Context, l2UserRPC string, backN uint6
 	if err := cli.CallContext(ctx, &h, "eth_getBlockByNumber", "latest", false); err != nil {
 		return fmt.Errorf("get latest: %w", err)
 	}
-	parent := h.ParentHash
-	for i := uint64(0); i < backN; i++ {
-		// set head to parent
-		var ok bool
-		if err := cli.CallContext(ctx, &ok, "debug_setHead", parent); err != nil {
-			return fmt.Errorf("debug_setHead: %w", err)
-		}
-		// fetch new head to get next parent
-		if err := cli.CallContext(ctx, &h, "eth_getBlockByNumber", "latest", false); err != nil {
-			return fmt.Errorf("get latest after setHead: %w", err)
-		}
-		parent = h.ParentHash
+	// parse latest number (hex string like 0x...)
+	numStr := h.Number
+	if len(numStr) < 3 || numStr[:2] != "0x" {
+		return fmt.Errorf("unexpected number format: %s", numStr)
+	}
+	latestNum, err := strconv.ParseUint(numStr[2:], 16, 64)
+	if err != nil {
+		return fmt.Errorf("parse latest number: %w", err)
+	}
+	// roll back head in a single call to the exact target height
+	if backN > latestNum {
+		backN = latestNum
+	}
+	target := latestNum - backN
+	var ok bool
+	if err := cli.CallContext(ctx, &ok, "debug_setHead", fmt.Sprintf("0x%x", target)); err != nil {
+		return fmt.Errorf("debug_setHead: %w", err)
 	}
 	return nil
 }

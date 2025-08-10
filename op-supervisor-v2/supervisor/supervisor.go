@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 
@@ -41,9 +40,6 @@ type Supervisor struct {
 
 	// denylist
 	denylist *DenylistStore
-
-	// seeded 1-in-N policy for adding denylist entries (0 = disabled)
-	seedOneInN uint64
 }
 
 type managedConfig struct {
@@ -59,11 +55,6 @@ type managedConfig struct {
 
 func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l, denylist: NewDenylistStore("")}
-	if v := os.Getenv("SV2_DENYLIST_ONE_IN_N"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			s.seedOneInN = n
-		}
-	}
 	return s
 }
 
@@ -277,14 +268,6 @@ func (s *Supervisor) StartPolling(opNodeRPC, l2RPC string, interval time.Duratio
 				// Fetch payload + receipts of local-safe head for indexing later
 				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
 					s.log.Debug("poll: fetch receipts error", "num", localSafe.Number, "err", err)
-				}
-				// M3: optional random seeding of denylist using block hash as placeholder ID
-				if s.seedOneInN > 0 && (localSafe.Number%s.seedOneInN == 0) {
-					// Using block hash as placeholder for payload ID
-					if ref, err := l2.L2BlockRefByNumber(ctx, localSafe.Number); err == nil {
-						_ = s.denylist.Add(rcfg.L2ChainID.Uint64(), ref.Hash.Hex())
-						s.log.Info("denylist seeded", "at", localSafe.Number, "id", ref.Hash)
-					}
 				}
 			}
 		}
