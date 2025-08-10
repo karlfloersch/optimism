@@ -82,7 +82,7 @@ Current status (M2):
 
 ### 3. Add denylist
 
-Create a payloadId (or blockhash) denylist BUT don't introduce any interop logic yet. Instead, we just say that 1 in every 10 blocks should be added to the denylist. This way we can test out the integration of our op-node rollback logic
+Create a payloadId (or blockhash) denylist without introducing interop logic yet. Tests explicitly add denylist entries to exercise rollback and re-sync behavior.
 
 We should show this working both in the devstack tests as well as in the sysgo system that we spin up
 

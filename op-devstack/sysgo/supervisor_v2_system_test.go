@@ -27,7 +27,7 @@ import (
 // TestSupervisorV2Rollback exercises Supervisor v2 rollback + denylist behavior in a single-chain sysgo preset.
 // It performs an end-to-end flow and validates each property explicitly:
 //
-//   - Boot a minimal system with SV2 embedding an op-node; enable denylist seeding every block (1-in-1).
+//   - Boot a minimal system with SV2 embedding an op-node; tests explicitly add denylist entries.
 //   - Wait until the L2 unsafe head has advanced (>= 3), then snapshot the pre-rollback reference at height H (`preRef`).
 //   - Compute the deterministic payload header-hash (stand-in PayloadID) for H via sources.L2Client and assert SV2
 //     reports it as denylisted via GET /denylist/v1/check.
@@ -52,9 +52,6 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 	onFail, onSkipNow := exiters(gt)
 	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
 	gt.Cleanup(p.Close)
-
-	// Enable denylist seeding every block before starting SV2
-	_ = os.Setenv("SV2_DENYLIST_ONE_IN_N", "1")
 
 	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
 	stack.ApplyOptionLifecycle(opt, orch)
@@ -125,7 +122,7 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 			preParentHash = parent.Hash
 		}
 
-		// Ensure SV2 denylist contains this ID before rollback (seeded 1-in-1)
+		// Ensure SV2 denylist contains this ID before rollback
 		sv2URL := os.Getenv("SV2_DENYLIST_URL")
 		t.Require().NotEmpty(sv2URL)
 		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
