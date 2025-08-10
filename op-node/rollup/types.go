@@ -131,6 +131,11 @@ type Config struct {
 	// Active if InteropTime != nil && L2 block timestamp >= *InteropTime, inactive otherwise.
 	InteropTime *uint64 `json:"interop_time,omitempty"`
 
+    // Interop2Time sets the activation time for a predeploys-focused variant used by Supervisor v2.
+    // It deploys the same predeploys and activates the cross-L2 inbox, without enabling other interop behaviors.
+    // Active if Interop2Time != nil && L2 block timestamp >= *Interop2Time, inactive otherwise.
+    Interop2Time *uint64 `json:"interop2_time,omitempty"`
+
 	// Note: below addresses are part of the block-derivation process,
 	// and required to be the same network-wide to stay in consensus.
 
@@ -475,6 +480,11 @@ func (c *Config) IsInterop(timestamp uint64) bool {
 	return c.InteropTime != nil && timestamp >= *c.InteropTime
 }
 
+// IsInterop2 returns true if the Interop2 upgrade is active at or past the given timestamp.
+func (c *Config) IsInterop2(timestamp uint64) bool {
+    return c.Interop2Time != nil && timestamp >= *c.Interop2Time
+}
+
 func (c *Config) IsRegolithActivationBlock(l2BlockTime uint64) bool {
 	return c.IsRegolith(l2BlockTime) &&
 		l2BlockTime >= c.BlockTime &&
@@ -545,6 +555,13 @@ func (c *Config) IsInteropActivationBlock(l2BlockTime uint64) bool {
 	return c.IsInterop(l2BlockTime) &&
 		l2BlockTime >= c.BlockTime &&
 		!c.IsInterop(l2BlockTime-c.BlockTime)
+}
+
+// IsInterop2ActivationBlock returns true if the given L2 block time is the Interop2 activation block.
+func (c *Config) IsInterop2ActivationBlock(l2BlockTime uint64) bool {
+    return c.IsInterop2(l2BlockTime) &&
+        l2BlockTime >= c.BlockTime &&
+        !c.IsInterop2(l2BlockTime-c.BlockTime)
 }
 
 // IsActivationBlock returns the fork which activates at the block with time newTime if the previous
@@ -794,6 +811,7 @@ func (c *Config) forEachFork(callback func(name string, logName string, time *ui
 	callback("Isthmus", "isthmus_time", c.IsthmusTime)
 	callback("Jovian", "jovian_time", c.JovianTime)
 	callback("Interop", "interop_time", c.InteropTime)
+    callback("Interop2", "interop2_time", c.Interop2Time)
 }
 
 func (c *Config) ParseRollupConfig(in io.Reader) error {

@@ -571,6 +571,11 @@ func (d *Sequencer) startBuildingBlock() {
 		attrs.NoTxPool = true
 		d.log.Info("Sequencing Interop upgrade block")
 	}
+	// For the Interop2 activation block we also must not include any sequencer transactions.
+	if d.rollupCfg.IsInterop2ActivationBlock(uint64(attrs.Timestamp)) {
+		attrs.NoTxPool = true
+		d.log.Info("Sequencing Interop2 upgrade block")
+	}
 
 	if recoverMode {
 		attrs.NoTxPool = true

@@ -178,6 +178,23 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 	})
 }
 
+// WithInterop2ActivationOffsetForSV2 sets interop2 activation to genesis + offset
+// on all L2 rollup configs before starting SV2 in AfterDeploy.
+func WithInterop2ActivationOffsetForSV2(offset uint64) stack.Option[*Orchestrator] {
+	return stack.AfterDeploy(func(orch *Orchestrator) {
+		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
+		for _, id := range l2elIDs {
+			l2el, _ := orch.l2ELs.Get(id)
+			rcfg := l2el.l2Net.rollupCfg
+			if rcfg == nil {
+				continue
+			}
+			ts := rcfg.Genesis.L2Time + offset
+			rcfg.Interop2Time = &ts
+		}
+	})
+}
+
 // waitHTTP polls a URL until it returns 200 OK or times out.
 func waitHTTP(p devtest.P, url string) error {
 	client := &http.Client{Timeout: 500 * time.Millisecond}

@@ -21,7 +21,8 @@ const (
 	HoloceneOverrideFlagName           = "override.holocene"
 	PectraBlobScheduleOverrideFlagName = "override.pectrablobschedule"
 	IsthmusOverrideFlagName            = "override.isthmus"
-	InteropOverrideFlagName            = "override.interop"
+    InteropOverrideFlagName            = "override.interop"
+    Interop2OverrideFlagName           = "override.interop2"
 )
 
 func CLIFlags(envPrefix string, category string) []cli.Flag {
@@ -89,6 +90,13 @@ func CLIFlags(envPrefix string, category string) []cli.Flag {
 			Hidden:   false,
 			Category: category,
 		},
+        &cli.Uint64Flag{
+            Name:     Interop2OverrideFlagName,
+            Usage:    "Manually specify the Interop2 fork timestamp, overriding the bundled setting",
+            EnvVars:  opservice.PrefixEnvVar(envPrefix, "OVERRIDE_INTEROP2"),
+            Hidden:   false,
+            Category: category,
+        },
 		CLINetworkFlag(envPrefix, category),
 		CLIRollupConfigFlag(envPrefix, category),
 	}

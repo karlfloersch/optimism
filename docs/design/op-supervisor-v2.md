@@ -92,7 +92,7 @@ Implementation plan
 - [x] Tests in sysgo preset to validate denylist hit → rollback → re-sync behavior (block at height H is replaced; parent at H-1 unchanged).
 
 Notes
-- Removed the seeded 1-in-N denylist policy. Entries are now managed explicitly (e.g., by tests or future supervisor policies) via the supervisor HTTP.
+- Removed the seeded 1-in-N denylist policy. Entries are now managed explicitly by tests or future supervisor policies (no auto-seeding).
 
 Current status (M3):
 - `DenylistStore` implemented with in-memory map and optional JSON persistence; supervisor exposes `GET /denylist/v1/check?chainId=&id=`.
@@ -104,10 +104,19 @@ Current status (M3):
 Because we are NOT using the interop hardfork (it introduces too much complexity into the op-node), we will still need to deploy the pre-deploys. For this we will introduce a new hardfork which is interop2 that deploys the same predeploys as the normal interop system. This can be done with a `if interop OR interop2` in the pre-deploy setup bit.
 
 Implementation plan
-- [ ] Gate predeploys as `interop || interop2` in the op-node rollup config (no additional params; match interop exactly).
-- [ ] Use interop2 by default in tests that run under supervisor-v2 presets.
-- [ ] Represent interop2 in `op-node` rollup.json as a new `interop2_time` (do not set `interop_time` for interop2 networks). In `derive/attributes.go`, inject the same predeploy upgrade txs when `IsInterop2ActivationBlock(...)` is true; do not enable other interop behaviors.
-- [ ] Optionally add a CLI override flag (e.g., `--interop2-override-time`) mirroring the existing interop override to simplify testing.
+- [x] Add `interop2_time` to `op-node` rollup config and helpers: `IsInterop2(...)`, `IsInterop2ActivationBlock(...)`.
+- [x] At `interop2_time`, inject the same predeploy upgrade txs as interop.
+- [x] At `interop2_time`, also activate the cross-L2 inbox txs (unconditionally, no dep-set requirement).
+- [x] Sequencer: treat interop2 activation as no-txpool (same as interop).
+- [x] Add CLI override `--override.interop2` to set `interop2_time` at runtime for tests/dev.
+- [x] Use interop2 by default in SV2 sysgo presets via a small offset after genesis.
+
+Current status (M4):
+- `interop2_time` supported end-to-end with activation helpers.
+- Predeploys + cross-L2 inbox txs injected at `interop2_time`.
+- Sequencer no-txpool behavior extended to interop2 activation.
+- CLI override `--override.interop2` wired.
+- SV2: rollback/denylist test still green; added sysgo test scaffold to check predeploy code exists at activation (pre/post code assertion under iteration).
 
 ### 5. Add a second op-node and second execution client
 

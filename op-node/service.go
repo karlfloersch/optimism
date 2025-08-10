@@ -280,10 +280,14 @@ func applyOverrides(ctx *cli.Context, rollupConfig *rollup.Config) {
 		isthmus := ctx.Uint64(opflags.IsthmusOverrideFlagName)
 		rollupConfig.IsthmusTime = &isthmus
 	}
-	if ctx.IsSet(opflags.InteropOverrideFlagName) {
+    if ctx.IsSet(opflags.InteropOverrideFlagName) {
 		interop := ctx.Uint64(opflags.InteropOverrideFlagName)
 		rollupConfig.InteropTime = &interop
 	}
+    if ctx.IsSet(opflags.Interop2OverrideFlagName) {
+        interop2 := ctx.Uint64(opflags.Interop2OverrideFlagName)
+        rollupConfig.Interop2Time = &interop2
+    }
 }
 
 func NewDependencySetFromCLI(ctx *cli.Context) (depset.DependencySet, error) {

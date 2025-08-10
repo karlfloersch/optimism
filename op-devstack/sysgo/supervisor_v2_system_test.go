@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 
@@ -46,6 +47,7 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 	opt := stack.Combine[*Orchestrator](
 		DefaultMinimalSystemNoCL(&ids),
 		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
 	)
 
 	logger := testlog.Logger(gt, log.LevelInfo)
@@ -222,5 +224,77 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 		t.Require().NoError(err)
 		t.Require().NotEmpty(block.Hash)
 		t.Require().NotEqual(preRef.Hash, block.Hash)
+	}
+}
+
+// TestSupervisorV2Interop2Predeploys asserts that at interop2 activation the expected
+// predeploys (including CrossL2Inbox) are present on L2.
+func TestSupervisorV2Interop2Predeploys(gt *testing.T) {
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Net := system.L2Networks()[0]
+	el := l2Net.L2ELNode(match.FirstL2EL)
+	rcfg := l2Net.RollupConfig()
+
+	// Wait until after interop2 activation
+	ctx, cancel := context.WithTimeout(t.Ctx(), 45*time.Second)
+	defer cancel()
+	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if uint64(ref.Time) < *rcfg.Interop2Time {
+			return fmt.Errorf("waiting for interop2 activation, have %d want >= %d", ref.Time, *rcfg.Interop2Time)
+		}
+		return nil
+	})
+
+	// Check code at key predeploys (CrossL2Inbox, L2ToL2CrossDomainMessenger)
+	type addrCheck struct {
+		name string
+		addr string
+	}
+	checks := []addrCheck{
+		{"CrossL2Inbox", predeploys.CrossL2InboxAddr.Hex()},
+		{"L2toL2CrossDomainMessenger", predeploys.L2toL2CrossDomainMessengerAddr.Hex()},
+	}
+
+	// Compute activation and pre-activation block numbers
+	activationBlocks := (*rcfg.Interop2Time - rcfg.Genesis.L2Time) / rcfg.BlockTime
+	activationNum := rcfg.Genesis.L2.Number + activationBlocks
+	preActivationNum := activationNum - 1
+
+	preHex := fmt.Sprintf("0x%x", preActivationNum)
+	actHex := fmt.Sprintf("0x%x", activationNum)
+
+	for _, c := range checks {
+		// Assert no code pre-activation
+		var codeBefore string
+		err := el.L2EthClient().RPC().CallContext(ctx, &codeBefore, "eth_getCode", c.addr, preHex)
+		t.Require().NoError(err)
+		t.Require().True(codeBefore == "0x" || codeBefore == "0x0", "expected empty code pre-activation at %s (%s), got %s", c.name, c.addr, codeBefore)
+		// Assert code present at or after activation
+		var codeAt string
+		err = el.L2EthClient().RPC().CallContext(ctx, &codeAt, "eth_getCode", c.addr, actHex)
+		t.Require().NoError(err)
+		t.Require().True(len(codeAt) >= 4 && codeAt != "0x", "expected non-empty code at activation at %s (%s)", c.name, c.addr)
 	}
 }
