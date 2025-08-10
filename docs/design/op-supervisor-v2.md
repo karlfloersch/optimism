@@ -142,6 +142,9 @@ Current status (M5):
 - Tests:
   - `TestSupervisorV2TwoChainAdvance`: both chains reach ≥ N blocks (no rollback).
   - `TestSupervisorV2TwoChainRollbackIsolation`: rolling back chain A regresses then re-advances; chain B is unaffected.
+  - Single-chain rollback test remains and continues to validate absolute rollback on a single-chain setup (no `chainId` required).
+- Usage:
+  - Both two-chain tests are wired to the new preset `WithSV2TwoChainMinimal(6)` to exercise the preset end-to-end.
 - Devstack two-chain preset added: `WithSV2TwoChainMinimal(offset)` builds a minimal two-chain setup without CLs, wires SV2 across both via `WithSupervisorV2OnAllChains`, and gates `L2NetworkCount(2)`. Tests may depend on this or the sysgo option interchangeably.
 
 ### 6. Integrate cross safe
