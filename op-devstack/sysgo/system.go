@@ -85,6 +85,41 @@ func DefaultMinimalSystem(dest *DefaultMinimalSystemIDs) stack.Option[*Orchestra
 	return opt
 }
 
+// DefaultMinimalSystemNoCL sets up a minimal system like DefaultMinimalSystem but omits the L2 CL node
+// and components that depend on it (proposer, batcher, challenger, test sequencer).
+func DefaultMinimalSystemNoCL(dest *DefaultMinimalSystemIDs) stack.Option[*Orchestrator] {
+	ids := NewDefaultMinimalSystemIDs(DefaultL1ID, DefaultL2AID)
+
+	opt := stack.Combine[*Orchestrator]()
+	opt.Add(stack.BeforeDeploy(func(o *Orchestrator) {
+		o.P().Logger().Info("Setting up (no CL)")
+	}))
+
+	opt.Add(WithMnemonicKeys(devkeys.TestMnemonic))
+
+	opt.Add(WithDeployer(),
+		WithDeployerOptions(
+			WithLocalContractSources(),
+			WithCommons(ids.L1.ChainID()),
+			WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+		),
+	)
+
+	opt.Add(WithL1Nodes(ids.L1EL, ids.L1CL))
+
+	// Only EL for L2; CL will be embedded/managed by supervisor-v2
+	opt.Add(WithL2ELNode(ids.L2EL, nil))
+
+	// Faucets to fund accounts for tests
+	opt.Add(WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(stack.Finally(func(orch *Orchestrator) {
+		*dest = ids
+	}))
+
+	return opt
+}
+
 type DefaultSingleChainInteropSystemIDs struct {
 	L1   stack.L1NetworkID
 	L1EL stack.L1ELNodeID

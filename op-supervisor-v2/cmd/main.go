@@ -1,107 +1,122 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
-    "os/signal"
-    "strings"
-    "syscall"
-    "time"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
-    "github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v2"
 
-    oplog "github.com/ethereum-optimism/optimism/op-service/log"
-    "github.com/ethereum/go-ethereum/log"
-    supervisor "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	oplog "github.com/ethereum-optimism/optimism/op-service/log"
+	supervisor "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 func main() {
-    app := &cli.App{
-        Name:  "op-supervisor-v2",
-        Usage: "Supervisor v2 prototype: manages op-node subprocess and exposes health",
-        Flags: []cli.Flag{
-            &cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
-            &cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
-            &cli.StringFlag{Name: "op-node.path", Usage: "Path to op-node binary (optional)"},
-            &cli.StringFlag{Name: "op-node.args", Usage: "Comma-separated arguments to pass to op-node"},
-            &cli.BoolFlag{Name: "no-op-node", Usage: "Do not start op-node (useful for tests)"},
-            &cli.StringFlag{Name: "op-node.rpc", Usage: "op-node RPC endpoint (http/ws) for rollup status"},
-            &cli.StringFlag{Name: "l2.rpc", Usage: "L2 execution RPC endpoint (http/ws)"},
-            &cli.DurationFlag{Name: "poll.interval", Value: 1 * time.Second, Usage: "Polling interval for rollup status"},
-            &cli.UintFlag{Name: "confirm.depth", Value: 40, Usage: "L1 confirmation depth for cross-safety gating"},
-        },
-        Action: func(ctx *cli.Context) error {
-            // basic logger setup using op-service/log defaults
-            logCfg := oplog.DefaultCLIConfig()
-            lgr := oplog.NewLogger(os.Stdout, logCfg)
-            oplog.SetGlobalLogHandler(oplog.NewLogHandler(os.Stdout, logCfg))
+	app := &cli.App{
+		Name:  "op-supervisor-v2",
+		Usage: "Supervisor v2 prototype: runs embedded op-node (managed mode) and exposes health",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
+			&cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
+			&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose embedded op-node RPC under /opnode/"},
+			// Managed (embedded op-node) mode (always on)
+			&cli.StringFlag{Name: "l1.rpc", Usage: "L1 execution RPC endpoint"},
+			&cli.StringFlag{Name: "beacon.addr", Usage: "L1 beacon endpoint for blobs (e.g. http://localhost:5052)"},
+			&cli.StringFlag{Name: "l2.authrpc", Usage: "L2 execution Engine API (auth RPC) endpoint"},
+			&cli.StringFlag{Name: "l2.userrpc", Usage: "L2 execution user RPC endpoint (for reads)"},
+			&cli.StringFlag{Name: "jwt.secret", Usage: "Path to 32-byte hex JWT secret file for L2 Engine API"},
+			&cli.StringFlag{Name: "rollup.config", Usage: "Path to rollup config JSON"},
+			&cli.DurationFlag{Name: "poll.interval", Value: 1 * time.Second, Usage: "Polling interval for rollup status"},
+			&cli.UintFlag{Name: "confirm.depth", Value: 40, Usage: "L1 confirmation depth for cross-safety gating"},
+		},
+		Action: func(ctx *cli.Context) error {
+			// basic logger setup using op-service/log defaults
+			logCfg := oplog.DefaultCLIConfig()
+			lgr := oplog.NewLogger(os.Stdout, logCfg)
+			oplog.SetGlobalLogHandler(oplog.NewLogHandler(os.Stdout, logCfg))
 
-            httpAddr := ctx.String("http.addr")
-            httpPort := ctx.Int("http.port")
-            noOpNode := ctx.Bool("no-op-node")
+			httpAddr := ctx.String("http.addr")
+			httpPort := ctx.Int("http.port")
 
-            sup := supervisor.NewSupervisor(lgr)
+			sup := supervisor.NewSupervisor(lgr)
+			sup.EnableOpNodeProxy(ctx.Bool("proxy.opnode"))
 
-            // Start HTTP server
-            httpSrv := &http.Server{Addr: fmt.Sprintf("%s:%d", httpAddr, httpPort), Handler: sup.HTTPHandler()}
-            go func() {
-                log.Info("starting http server", "addr", httpSrv.Addr)
-                if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-                    log.Error("http server error", "err", err)
-                }
-            }()
+			// Start HTTP server
+			httpSrv := &http.Server{Addr: fmt.Sprintf("%s:%d", httpAddr, httpPort), Handler: sup.HTTPHandler()}
+			go func() {
+				log.Info("starting http server", "addr", httpSrv.Addr)
+				if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Error("http server error", "err", err)
+				}
+			}()
 
-            // Optionally start op-node subprocess
-            if !noOpNode {
-                bin := ctx.String("op-node.path")
-                if bin == "" {
-                    return fmt.Errorf("--op-node.path is required unless --no-op-node is set")
-                }
-                var args []string
-                if s := ctx.String("op-node.args"); s != "" {
-                    // split on commas, ignore empties
-                    for _, p := range strings.Split(s, ",") {
-                        if q := strings.TrimSpace(p); q != "" {
-                            args = append(args, q)
-                        }
-                    }
-                }
-                if err := sup.StartOpNode(bin, args...); err != nil {
-                    return fmt.Errorf("failed to start op-node: %w", err)
-                }
-            }
+			pollInt := ctx.Duration("poll.interval")
+			confirmDepth := ctx.Uint("confirm.depth")
 
-            // Start polling if RPCs provided
-            opNodeRPC := ctx.String("op-node.rpc")
-            l2RPC := ctx.String("l2.rpc")
-            pollInt := ctx.Duration("poll.interval")
-            confirmDepth := ctx.Uint("confirm.depth")
-            if opNodeRPC != "" && l2RPC != "" {
-                if err := sup.StartPolling(opNodeRPC, l2RPC, pollInt, uint64(confirmDepth)); err != nil {
-                    return fmt.Errorf("start polling: %w", err)
-                }
-            }
+			// Managed (embedded) op-node only
+			l1RPC := ctx.String("l1.rpc")
+			beacon := ctx.String("beacon.addr")
+			l2Auth := ctx.String("l2.authrpc")
+			l2User := ctx.String("l2.userrpc")
+			jwtPath := ctx.String("jwt.secret")
+			rollupPath := ctx.String("rollup.config")
+			if l1RPC == "" || beacon == "" || l2Auth == "" || l2User == "" || jwtPath == "" || rollupPath == "" {
+				return fmt.Errorf("requires --l1.rpc, --beacon.addr, --l2.authrpc, --l2.userrpc, --jwt.secret, --rollup.config")
+			}
+			// Read JWT
+			data, err := os.ReadFile(jwtPath)
+			if err != nil {
+				return fmt.Errorf("read jwt.secret: %w", err)
+			}
+			s := strings.TrimSpace(string(data))
+			s = strings.TrimPrefix(s, "0x")
+			b, err := hex.DecodeString(s)
+			if err != nil {
+				return fmt.Errorf("decode jwt.secret: %w", err)
+			}
+			if len(b) != 32 {
+				return fmt.Errorf("jwt.secret must be 32 bytes, got %d", len(b))
+			}
+			var jwt [32]byte
+			copy(jwt[:], b)
+			// Read rollup config JSON
+			cfgBytes, err := os.ReadFile(rollupPath)
+			if err != nil {
+				return fmt.Errorf("read rollup.config: %w", err)
+			}
+			var rcfg rollup.Config
+			if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
+				return fmt.Errorf("parse rollup.config: %w", err)
+			}
+			if err := sup.StartManaged(l1RPC, beacon, l2Auth, l2User, jwt, &rcfg, pollInt, uint64(confirmDepth)); err != nil {
+				return fmt.Errorf("start managed: %w", err)
+			}
 
-            // Wait for interrupt
-            sigC := make(chan os.Signal, 1)
-            signal.Notify(sigC, syscall.SIGINT, syscall.SIGTERM)
-            <-sigC
+			// Wait for interrupt
+			sigC := make(chan os.Signal, 1)
+			signal.Notify(sigC, syscall.SIGINT, syscall.SIGTERM)
+			<-sigC
 
-            // Graceful shutdown
-            shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-            defer cancel()
-            _ = httpSrv.Shutdown(shutdownCtx)
-            sup.Stop()
-            return nil
-        },
-    }
+			// Graceful shutdown
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutdownCtx)
+			sup.Stop()
+			return nil
+		},
+	}
 
-    if err := app.Run(os.Args); err != nil {
-        fmt.Fprintf(os.Stderr, "error: %v\n", err)
-        os.Exit(1)
-    }
+	if err := app.Run(os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }
-
-

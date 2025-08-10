@@ -6,7 +6,12 @@ Note: I am writing this as a draft and may contain confusing or incomplete infor
 Refactor the supervisor so that it does not require significant modifications to the op-node. Pre-interop hard fork op-node API should be sufficient for integrating this Supervisor v2 and thereby enabling interop.
 
 ## Architecture
-supervisor-v2 creates op-node subprocesses for each chain in the dependency set (note: these op-nodes DO NOT use the interop hardfork, they should be pectra op-nodes, no dependency set information should be sent to the op-node).
+supervisor-v2 embeds an op-node (managed mode) for each chain in the dependency set (note: these op-nodes DO NOT use the interop hardfork; they should be pectra op-nodes, and no dependency-set information is sent to the op-node).
+
+- Managed/embedded op-node: supervisor constructs and runs the op-node in-process using op-node libraries.
+- RPC exposure:
+  - Devstack/tests: dial the embedded op-node user RPC directly (typed client).
+  - CLI: exposes a reverse-proxy under `/opnode/` on the supervisor HTTP server (default on) for single-port UX.
 
 supervisor-v2 puts all of the safe blocks which are being synced by the op-nodes into the `local-safe` db. The cross-safe validation is then run on the latest `local-safe` block at the same block height (just like the normal op-supervisor). The `cross-safe` block is calculated. This block may either be a) valid; or b) invalid.
 
@@ -48,17 +53,17 @@ Enable fast testing feedback by integrating op-supervisor-v2 with devstack and s
 Both of these services would of course be hooked up with an execution client (geth).
 
 Implementation plan
-- [x] Create `op-supervisor-v2` process that manages a single op-node subprocess and a single L2 geth (EL) process/datadir.
+- [x] Create `op-supervisor-v2` process that manages an embedded op-node and a single L2 geth (EL) process/datadir.
 - [x] Ingestion skeleton: poll op-node Rollup status for current heads and fetch corresponding L2 blocks/receipts (logging-only for now).
 - [ ] Persist into supervisor-v2 DBs reusing existing schemas (`events`, `fromda` local-safe, `fromda` cross-safe).
 - [x] Provide a minimal HTTP health/status endpoint with per-chain heads.
 - [x] Bring up as a standalone sysgo scenario; add `scripts/sysgo-smoke.sh` to send a tx with cast and confirm receipt.
-- [ ] Add a devstack preset and tests (pending) without affecting existing suites.
+- [x] Add a devstack preset and tests without affecting existing suites.
 
 Current status (M1):
-- `op-up` sysgo harness runs a single L2 with op-node and EL; `OP_UP_STOP_AFTER` controls runtime.
-- `scripts/sysgo-smoke.sh` boots sysgo, parses the test key, sends a tx via cast, prints the receipt, and summarizes unsafe/safe head progress from logs.
-- Verified locally: sequencer sealed new blocks; unsafe advanced to 23; safe advanced to 14.
+- Managed mode implemented: supervisor embeds op-node and polls heads; CLI supports managed-only and reverse-proxies op-node RPC at `/opnode/` (default on).
+- Devstack: dedicated preset (no external CL). Supervisor v2 hydrates a typed CL frontend to the embedded op-node; smoke test passes and asserts L2 advancement.
+- Sysgo: `scripts/sysgo-smoke.sh` passes (sequencing and receipt confirmed).
 
 
 ### 2. Introduce op-node rollbacks triggered by op-supervisor-v2

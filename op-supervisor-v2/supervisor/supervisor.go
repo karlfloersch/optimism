@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+    "net/http/httputil"
+    "net/url"
 	"os"
 	"os/exec"
 	"sync"
@@ -24,6 +26,12 @@ type Supervisor struct {
 
 	// polling
 	cancelPoll context.CancelFunc
+
+	// managed-node mode
+	managedOpNodeUserRPC string
+
+    // if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
+    enableOpNodeProxy bool
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
@@ -74,16 +82,40 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		s.mu.Lock()
 		running := s.cmd != nil
 		started := s.started
+		opNodeUser := s.managedOpNodeUserRPC
 		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"op_node_running": running,
-			"started_at":      started,
+			"op_node_running":  running,
+			"started_at":       started,
+			"op_node_user_rpc": opNodeUser,
 		})
 	})
-	// placeholder denylist check endpoint (will be implemented later)
+    // placeholder denylist check endpoint (will be implemented later)
 	mux.HandleFunc("/denylist/v1/check", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": false})
 	})
+
+    if s.enableOpNodeProxy {
+        // Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/
+        mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
+            s.mu.Lock()
+            target := s.managedOpNodeUserRPC
+            s.mu.Unlock()
+            if target == "" {
+                http.Error(w, "op-node RPC not available", http.StatusServiceUnavailable)
+                return
+            }
+            u, err := url.Parse(target)
+            if err != nil {
+                http.Error(w, "bad op-node RPC URL", http.StatusInternalServerError)
+                return
+            }
+            rp := httputil.NewSingleHostReverseProxy(u)
+            // Trim prefix to forward to root
+            r.URL.Path = "/"
+            rp.ServeHTTP(w, r)
+        })
+    }
 	return mux
 }
 
@@ -145,6 +177,16 @@ func (s *Supervisor) StartPolling(opNodeRPC, l2RPC string, interval time.Duratio
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		// Wait for op-node RPC to respond before polling
+		for i := 0; i < 20; i++ {
+			ctxPing, cancelPing := context.WithTimeout(ctx, 500*time.Millisecond)
+			_, err := roll.SyncStatus(ctxPing)
+			cancelPing()
+			if err == nil {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -262,3 +304,76 @@ func (s *Supervisor) StartPollingWithRollupClient(roll apis.RollupClient, l2Cli 
 	}()
 	return nil
 }
+
+// StartManaged spawns an op-node internally and starts polling it.
+func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelPoll != nil {
+		return nil
+	}
+	// Start embedded op-node
+	userRPC, err := s.StartManagedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
+	if err != nil {
+		return err
+	}
+	s.managedOpNodeUserRPC = userRPC
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancelPoll = cancel
+
+	// Dial clients
+	opNodeCli, err := opclient.NewRPC(ctx, s.log, userRPC)
+	if err != nil {
+		cancel()
+		return err
+	}
+	// Use user RPC (no JWT) for eth_getLogs/receipts
+	l2Cli, err := opclient.NewRPC(ctx, s.log, l2UserRPC)
+	if err != nil {
+		cancel()
+		return err
+	}
+	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
+	if err != nil {
+		cancel()
+		return err
+	}
+	roll := sources.NewRollupClient(opNodeCli)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				st, err := roll.SyncStatus(ctx)
+				if err != nil || st == nil {
+					s.log.Warn("poll: sync status error", "err", err)
+					continue
+				}
+				localSafe := st.LocalSafeL2
+				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+				if localSafe.Number == 0 {
+					continue
+				}
+				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
+					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+// ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node if running.
+func (s *Supervisor) ManagedOpNodeUserRPC() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.managedOpNodeUserRPC
+}
+
+// EnableOpNodeProxy toggles the /opnode/ reverse proxy in the HTTP handler.
+func (s *Supervisor) EnableOpNodeProxy(v bool) { s.enableOpNodeProxy = v }
