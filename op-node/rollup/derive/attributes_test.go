@@ -441,6 +441,50 @@ func TestPreparePayloadAttributes(t *testing.T) {
 			}
 		})
 	})
+
+	// Interop2: predeploys + cross-L2 inbox at activation, without requiring a dependency set
+	t.Run("interop2", func(t *testing.T) {
+		prepareActivationAttributes := func(t *testing.T) *eth.PayloadAttributes {
+			cfg := mkCfg()
+			cfg.ActivateAtGenesis(rollup.Isthmus)
+			interop2Time := uint64(2000)
+			cfg.Interop2Time = &interop2Time
+			rng := rand.New(rand.NewSource(5678))
+			l1Fetcher := &testutils.MockL1Source{}
+			defer l1Fetcher.AssertExpectations(t)
+			l2Parent := testutils.RandomL2BlockRef(rng)
+			l2Parent.Time = interop2Time - cfg.BlockTime
+
+			l1CfgFetcher := &testutils.MockL2Client{}
+			l1CfgFetcher.ExpectSystemConfigByL2Hash(l2Parent.Hash, testSysCfg, nil)
+			defer l1CfgFetcher.AssertExpectations(t)
+
+			l1Info := testutils.RandomBlockInfo(rng)
+			l1Info.InfoParentHash = l2Parent.L1Origin.Hash
+			l1Info.InfoNum = l2Parent.L1Origin.Number + 1
+			l1Info.InfoTime = l2Parent.Time
+
+			epoch := l1Info.ID()
+			l1Fetcher.ExpectFetchReceipts(epoch.Hash, l1Info, nil, nil)
+			attrBuilder := NewFetchingAttributesBuilder(cfg, nil, l1Fetcher, l1CfgFetcher)
+			attrs, err := attrBuilder.PreparePayloadAttributes(context.Background(), l2Parent, epoch)
+			require.NoError(t, err)
+			return attrs
+		}
+
+		attrs := prepareActivationAttributes(t)
+		upgradeTx, err := InteropNetworkUpgradeTransactions()
+		require.NoError(t, err)
+		l2InboxTx, err := InteropActivateCrossL2InboxTransactions()
+		require.NoError(t, err)
+		expectedTx := make([]hexutil.Bytes, 0, len(upgradeTx)+len(l2InboxTx))
+		expectedTx = append(expectedTx, upgradeTx...)
+		expectedTx = append(expectedTx, l2InboxTx...)
+		require.Len(t, attrs.Transactions, len(expectedTx)+1) // +1 for L1Info tx
+		for i, tx := range expectedTx {
+			require.Equal(t, tx, attrs.Transactions[i+1])
+		}
+	})
 }
 
 func encodeDeposits(deposits []*types.DepositTx) (out []eth.Data, err error) {

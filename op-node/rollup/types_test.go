@@ -54,6 +54,9 @@ func randConfig() *Config {
 
 func TestConfigJSON(t *testing.T) {
 	config := randConfig()
+	// include interop2 in random config for round-trip
+	x := uint64(123456)
+	config.Interop2Time = &x
 	data, err := json.Marshal(config)
 	assert.NoError(t, err)
 	var roundTripped Config
@@ -310,6 +313,15 @@ func TestActivations(t *testing.T) {
 			},
 			checkEnabled: func(t uint64, c *Config) bool {
 				return c.IsInterop(t)
+			},
+		},
+		{
+			name: "Interop2",
+			setUpgradeTime: func(t *uint64, c *Config) {
+				c.Interop2Time = t
+			},
+			checkEnabled: func(t uint64, c *Config) bool {
+				return c.IsInterop2(t)
 			},
 		},
 	} {
