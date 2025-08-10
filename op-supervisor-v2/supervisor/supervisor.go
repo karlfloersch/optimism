@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-    "net/http/httputil"
-    "net/url"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"sync"
@@ -30,8 +30,8 @@ type Supervisor struct {
 	// managed-node mode
 	managedOpNodeUserRPC string
 
-    // if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
-    enableOpNodeProxy bool
+	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
+	enableOpNodeProxy bool
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
@@ -90,32 +90,32 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			"op_node_user_rpc": opNodeUser,
 		})
 	})
-    // placeholder denylist check endpoint (will be implemented later)
+	// placeholder denylist check endpoint (will be implemented later)
 	mux.HandleFunc("/denylist/v1/check", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": false})
 	})
 
-    if s.enableOpNodeProxy {
-        // Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/
-        mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
-            s.mu.Lock()
-            target := s.managedOpNodeUserRPC
-            s.mu.Unlock()
-            if target == "" {
-                http.Error(w, "op-node RPC not available", http.StatusServiceUnavailable)
-                return
-            }
-            u, err := url.Parse(target)
-            if err != nil {
-                http.Error(w, "bad op-node RPC URL", http.StatusInternalServerError)
-                return
-            }
-            rp := httputil.NewSingleHostReverseProxy(u)
-            // Trim prefix to forward to root
-            r.URL.Path = "/"
-            rp.ServeHTTP(w, r)
-        })
-    }
+	if s.enableOpNodeProxy {
+		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/
+		mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
+			s.mu.Lock()
+			target := s.managedOpNodeUserRPC
+			s.mu.Unlock()
+			if target == "" {
+				http.Error(w, "op-node RPC not available", http.StatusServiceUnavailable)
+				return
+			}
+			u, err := url.Parse(target)
+			if err != nil {
+				http.Error(w, "bad op-node RPC URL", http.StatusInternalServerError)
+				return
+			}
+			rp := httputil.NewSingleHostReverseProxy(u)
+			// Trim prefix to forward to root
+			r.URL.Path = "/"
+			rp.ServeHTTP(w, r)
+		})
+	}
 	return mux
 }
 
