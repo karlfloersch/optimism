@@ -90,7 +90,6 @@ Implementation plan
 - [x] Implement persisted per-chain denylist in supervisor-v2 keyed by `PayloadID` (deterministic header-hash of payload).
 - [x] Minimal op-node change: optional denylist check via `SV2_DENYLIST_URL` to query supervisor before inserting a payload into EL; on deny, follow existing invalid/malformed path and discard.
 - [x] Tests in sysgo preset to validate denylist hit → rollback → re-sync behavior (block at height H is replaced; parent at H-1 unchanged).
-- [ ] Acceptance tests in `op-acceptance-tests` to cover multi-chain/cross-safe once cross-safe is integrated.
 
 Notes
 - Removed the seeded 1-in-N denylist policy. Entries are now managed explicitly (e.g., by tests or future supervisor policies) via the supervisor HTTP.
@@ -100,7 +99,17 @@ Current status (M3):
 - Op-node integration added: when `SV2_DENYLIST_URL` is set, the op-node queries the supervisor denylist prior to `engine_newPayload*` acceptance.
 - System test combines rollback and denylist: computes the pre-rollback payload header-hash at height H, asserts it’s denylisted, triggers rollback, then asserts: (a) head regressed then re-advanced; (b) block hash at H changed; (c) parent hash at H-1 is unchanged.
 
-### 4. Add a second op-node and second execution client
+### 4. Create a new hardfork (interop2) which deploys the pre-deploys
+
+Because we are NOT using the interop hardfork (it introduces too much complexity into the op-node), we will still need to deploy the pre-deploys. For this we will introduce a new hardfork which is interop2 that deploys the same predeploys as the normal interop system. This can be done with a `if interop OR interop2` in the pre-deploy setup bit.
+
+Implementation plan
+- [ ] Gate predeploys as `interop || interop2` in the op-node rollup config (no additional params; match interop exactly).
+- [ ] Use interop2 by default in tests that run under supervisor-v2 presets.
+- [ ] Represent interop2 in `op-node` rollup.json as a new `interop2_time` (do not set `interop_time` for interop2 networks). In `derive/attributes.go`, inject the same predeploy upgrade txs when `IsInterop2ActivationBlock(...)` is true; do not enable other interop behaviors.
+- [ ] Optionally add a CLI override flag (e.g., `--interop2-override-time`) mirroring the existing interop override to simplify testing.
+
+### 5. Add a second op-node and second execution client
 
 We've got the core logic working for one chain, to make this interesting we want to integrate the cross-safe package and that works best with two chains.
 
@@ -110,16 +119,6 @@ Implementation plan
 - [ ] New devstack preset (e.g., `interop2_two_chain`) with two minimal L2s, each with its own op-node and L2 geth managed by supervisor-v2.
 - [ ] Supervisor-v2 manages per-chain processes and datadirs, plus shared DBs (reusing existing supervisor schemas).
 - [ ] Basic test: both chains ingest local-safe and advance cross-safe independently.
-
-### 5. Create a new hardfork (interop2) which deploys the pre-deploys
-
-Because we are NOT using the interop hardfork (it introduces too much complexity into the op-node), we will still need to deploy the pre-deploys. For this we will introduce a new hardfork which is interop2 that deploys the same predeploys as the normal interop system. This can be done with a `if interop OR interop2` in the pre-deploy setup bit.
-
-Implementation plan
-- [ ] Gate predeploys as `interop || interop2` in the op-node rollup config (no additional params; match interop exactly).
-- [ ] Use interop2 by default in tests that run under supervisor-v2 presets.
-- [ ] Represent interop2 in `op-node` rollup.json as a new `interop2_time` (do not set `interop_time` for interop2 networks). In `derive/attributes.go`, inject the same predeploy upgrade txs when `IsInterop2ActivationBlock(...)` is true; do not enable other interop behaviors.
-- [ ] Optionally add a CLI override flag (e.g., `--interop2-override-time`) mirroring the existing interop override to simplify testing.
 
 ### 6. Integrate cross safe
 
