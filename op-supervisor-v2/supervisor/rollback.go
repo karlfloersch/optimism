@@ -8,6 +8,14 @@ import (
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 )
 
+// rollbackEL is the high-level EL rollback helper used by the supervisor.
+// It currently delegates to a debug_setHead-based implementation for compatibility
+// with geth, but should be replaced with an Engine API forkchoice update to support
+// other ELs like reth.
+func rollbackEL(ctx context.Context, l2UserRPC string, backN uint64) error {
+    return rollbackELByDebugSetHead(ctx, l2UserRPC, backN)
+}
+
 // rollbackELByDebugSetHead rolls the EL back by N blocks using debug_setHead via the user RPC.
 // TODO: Replace this with Engine API forkchoice update (engine_forkchoiceUpdated) against the
 // authenticated EL RPC (JWT) to be compatible with reth and avoid relying on debug_setHead.
