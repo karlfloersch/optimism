@@ -447,8 +447,8 @@ func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, ba
 		cancel()
 	}
 
-    // Roll back EL head by backN via pluggable implementation
-    if err := rollbackEL(ctx, cfg.l2UserRPC, backN); err != nil {
+	// Roll back EL head by backN via pluggable implementation
+	if err := rollbackEL(ctx, cfg.l2UserRPC, backN); err != nil {
 		return err
 	}
 

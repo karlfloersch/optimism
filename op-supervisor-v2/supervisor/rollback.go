@@ -9,18 +9,15 @@ import (
 )
 
 // rollbackEL is the high-level EL rollback helper used by the supervisor.
-// It currently delegates to a debug_setHead-based implementation for compatibility
-// with geth, but should be replaced with an Engine API forkchoice update to support
-// other ELs like reth.
+// TODO: Replace the debug_setHead-based implementation with an Engine API
+// forkchoice update (engine_forkchoiceUpdated) against the authenticated EL RPC
+// to support ELs like reth without changing finalized.
 func rollbackEL(ctx context.Context, l2UserRPC string, backN uint64) error {
-    return rollbackELByDebugSetHead(ctx, l2UserRPC, backN)
+    return rollbackELWithDebugSetHead(ctx, l2UserRPC, backN)
 }
 
-// rollbackELByDebugSetHead rolls the EL back by N blocks using debug_setHead via the user RPC.
-// TODO: Replace this with Engine API forkchoice update (engine_forkchoiceUpdated) against the
-// authenticated EL RPC (JWT) to be compatible with reth and avoid relying on debug_setHead.
-// The forkchoice update should roll back unsafe/safe without changing finalized.
-func rollbackELByDebugSetHead(ctx context.Context, l2UserRPC string, backN uint64) error {
+// rollbackELWithDebugSetHead rolls the EL back by N blocks using debug_setHead via the user RPC.
+func rollbackELWithDebugSetHead(ctx context.Context, l2UserRPC string, backN uint64) error {
 	cli, err := opclient.NewRPC(ctx, nil, l2UserRPC)
 	if err != nil {
 		return fmt.Errorf("dial l2 user rpc: %w", err)
