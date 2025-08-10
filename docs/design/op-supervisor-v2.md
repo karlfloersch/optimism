@@ -77,7 +77,8 @@ Implementation plan
 
 Current status (M2):
 - Admin rollback endpoint implemented in `op-supervisor-v2` and managed op-node lifecycle supports replace-and-restart.
-- Sysgo preset test `TestSupervisorV2Rollback` added; asserts both rollback and recovery (regression then return-to-tip). No denylist interaction yet.
+- Sysgo preset test `TestSupervisorV2Rollback` added; asserts rollback regression below pre-height and recovery back to at least the pre-height. The test now also validates that the replaced block at height H has a different hash, and the parent at H-1 remains unchanged (chain continuity up to H-1).
+- Rollback implementation is abstracted via `rollbackEL(...)` (currently backed by `debug_setHead`). TODO: replace with Engine API `engine_forkchoiceUpdated` against the authenticated EL RPC for broader EL compatibility (e.g., reth), without changing finalized.
 
 ### 3. Add denylist
 
@@ -86,10 +87,18 @@ Create a payloadId (or blockhash) denylist BUT don't introduce any interop logic
 We should show this working both in the devstack tests as well as in the sysgo system that we spin up
 
 Implementation plan
-- [ ] Implement persisted per-chain denylist in supervisor-v2 keyed by `PayloadID`.
-- [ ] Add seeded-random policy to denylist 1-in-N safe blocks (fixed seed for determinism; only consider safe blocks).
-- [ ] Minimal op-node change: optional `--denylist-url` (or similar) to query supervisor before inserting a payload into EL; on deny, follow existing malformed-batch steady-derivation error path (post-holocene).
-- [ ] Tests in sysgo and devstack preset to validate denylist hit → rollback → re-sync behavior.
+- [x] Implement persisted per-chain denylist in supervisor-v2 keyed by `PayloadID` (deterministic header-hash of payload).
+- [x] Minimal op-node change: optional denylist check via `SV2_DENYLIST_URL` to query supervisor before inserting a payload into EL; on deny, follow existing invalid/malformed path and discard.
+- [x] Tests in sysgo preset to validate denylist hit → rollback → re-sync behavior (block at height H is replaced; parent at H-1 unchanged).
+- [ ] Acceptance tests in `op-acceptance-tests` to cover multi-chain/cross-safe once cross-safe is integrated.
+
+Notes
+- Removed the seeded 1-in-N denylist policy. Entries are now managed explicitly (e.g., by tests or future supervisor policies) via the supervisor HTTP.
+
+Current status (M3):
+- `DenylistStore` implemented with in-memory map and optional JSON persistence; supervisor exposes `GET /denylist/v1/check?chainId=&id=`.
+- Op-node integration added: when `SV2_DENYLIST_URL` is set, the op-node queries the supervisor denylist prior to `engine_newPayload*` acceptance.
+- System test combines rollback and denylist: computes the pre-rollback payload header-hash at height H, asserts it’s denylisted, triggers rollback, then asserts: (a) head regressed then re-advanced; (b) block hash at H changed; (c) parent hash at H-1 is unchanged.
 
 ### 4. Add a second op-node and second execution client
 
