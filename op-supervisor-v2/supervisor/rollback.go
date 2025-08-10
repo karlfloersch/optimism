@@ -9,7 +9,9 @@ import (
 )
 
 // rollbackELByDebugSetHead rolls the EL back by N blocks using debug_setHead via the user RPC.
-// It fetches the current head, then sets head to parent repeatedly N times.
+// TODO: Replace this with Engine API forkchoice update (engine_forkchoiceUpdated) against the
+// authenticated EL RPC (JWT) to be compatible with reth and avoid relying on debug_setHead.
+// The forkchoice update should roll back unsafe/safe without changing finalized.
 func rollbackELByDebugSetHead(ctx context.Context, l2UserRPC string, backN uint64) error {
 	cli, err := opclient.NewRPC(ctx, nil, l2UserRPC)
 	if err != nil {
