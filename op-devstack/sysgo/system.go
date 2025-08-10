@@ -120,6 +120,68 @@ func DefaultMinimalSystemNoCL(dest *DefaultMinimalSystemIDs) stack.Option[*Orche
 	return opt
 }
 
+// DefaultTwoMinimalSystemIDs defines IDs for a minimal two-chain system without CL nodes.
+type DefaultTwoMinimalSystemIDs struct {
+	L1   stack.L1NetworkID
+	L1EL stack.L1ELNodeID
+	L1CL stack.L1CLNodeID
+
+	L2A   stack.L2NetworkID
+	L2AEL stack.L2ELNodeID
+
+	L2B   stack.L2NetworkID
+	L2BEL stack.L2ELNodeID
+}
+
+func NewDefaultTwoMinimalSystemIDs(l1ID, l2AID, l2BID eth.ChainID) DefaultTwoMinimalSystemIDs {
+	ids := DefaultTwoMinimalSystemIDs{
+		L1:    stack.L1NetworkID(l1ID),
+		L1EL:  stack.NewL1ELNodeID("l1", l1ID),
+		L1CL:  stack.NewL1CLNodeID("l1", l1ID),
+		L2A:   stack.L2NetworkID(l2AID),
+		L2AEL: stack.NewL2ELNodeID("sequencer", l2AID),
+		L2B:   stack.L2NetworkID(l2BID),
+		L2BEL: stack.NewL2ELNodeID("sequencer", l2BID),
+	}
+	return ids
+}
+
+// DefaultTwoMinimalSystemNoCL sets up L1 and two L2 ELs without any CL nodes or extra services.
+func DefaultTwoMinimalSystemNoCL(dest *DefaultTwoMinimalSystemIDs) stack.Option[*Orchestrator] {
+	ids := NewDefaultTwoMinimalSystemIDs(DefaultL1ID, DefaultL2AID, DefaultL2BID)
+
+	opt := stack.Combine[*Orchestrator]()
+	opt.Add(stack.BeforeDeploy(func(o *Orchestrator) {
+		o.P().Logger().Info("Setting up two-chain (no CL)")
+	}))
+
+	opt.Add(WithMnemonicKeys(devkeys.TestMnemonic))
+
+	opt.Add(WithDeployer(),
+		WithDeployerOptions(
+			WithLocalContractSources(),
+			WithCommons(ids.L1.ChainID()),
+			WithPrefundedL2(ids.L1.ChainID(), ids.L2A.ChainID()),
+			WithPrefundedL2(ids.L1.ChainID(), ids.L2B.ChainID()),
+		),
+	)
+
+	opt.Add(WithL1Nodes(ids.L1EL, ids.L1CL))
+
+	// Only EL for L2s; CL will be embedded/managed by supervisor-v2
+	opt.Add(WithL2ELNode(ids.L2AEL, nil))
+	opt.Add(WithL2ELNode(ids.L2BEL, nil))
+
+	// Faucets for both L2s
+	opt.Add(WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2AEL, ids.L2BEL}))
+
+	opt.Add(stack.Finally(func(orch *Orchestrator) {
+		*dest = ids
+	}))
+
+	return opt
+}
+
 type DefaultSingleChainInteropSystemIDs struct {
 	L1   stack.L1NetworkID
 	L1EL stack.L1ELNodeID

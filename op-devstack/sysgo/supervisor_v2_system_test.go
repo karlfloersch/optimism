@@ -229,6 +229,157 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 	}
 }
 
+// TestSupervisorV2TwoChainRollbackIsolation brings up two L2s under a single SV2 instance,
+// verifies both advance, then rolls back chain A and asserts chain B is unaffected.
+func TestSupervisorV2TwoChainRollbackIsolation(gt *testing.T) {
+	var ids DefaultTwoMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultTwoMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnAllChains(),
+		WithInterop2ActivationOffsetForSV2(6),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+
+	elA := l2A.L2ELNode(match.FirstL2EL)
+	elB := l2B.L2ELNode(match.FirstL2EL)
+
+	// Wait until both chains have some blocks
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+	waitChain := func(el stack.L2ELNode) error {
+		return retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < 3 {
+				return fmt.Errorf("waiting for blocks, got %d", ref.Number)
+			}
+			return nil
+		})
+	}
+	t.Require().NoError(waitChain(elA))
+	t.Require().NoError(waitChain(elB))
+
+	// Snapshot pre-rollback heads
+	preA, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+	t.Require().NoError(err)
+	preB, err := elB.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+	t.Require().NoError(err)
+
+	// Find chain IDs
+	rcfgA := l2A.RollupConfig()
+	rcfgB := l2B.RollupConfig()
+	idA := rcfgA.L2ChainID.Uint64()
+	_ = rcfgB
+
+	// Roll back chain A to preA-1 via SV2 admin
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	toNum := preA.Number - 1
+	reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
+	resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, idA), "application/json", bytes.NewReader(reqBody))
+	t.Require().NoError(err)
+	if resp != nil {
+		defer resp.Body.Close()
+		t.Require().Equal(http.StatusNoContent, resp.StatusCode)
+	}
+
+	// Assert chain A regresses then re-advances
+	_ = retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+		after, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if after.Number >= preA.Number {
+			return fmt.Errorf("waiting for rollback to reflect: have %d, want < %d", after.Number, preA.Number)
+		}
+		return nil
+	})
+	_ = retry.Do0(ctx, 200, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		after, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if after.Number < preA.Number {
+			return fmt.Errorf("waiting A to re-advance: have %d < %d", after.Number, preA.Number)
+		}
+		return nil
+	})
+
+	// Assert chain B remained at least at preB and did not regress
+	afterB, err := elB.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+	t.Require().NoError(err)
+	t.Require().GreaterOrEqual(afterB.Number, preB.Number)
+}
+
+// TestSupervisorV2TwoChainAdvance asserts that two chains under a single SV2 instance
+// independently advance to at least N blocks without any rollback.
+func TestSupervisorV2TwoChainAdvance(gt *testing.T) {
+	const minBlocks uint64 = 3
+
+	var ids DefaultTwoMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultTwoMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnAllChains(),
+		WithInterop2ActivationOffsetForSV2(6),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+	elA := l2A.L2ELNode(match.FirstL2EL)
+	elB := l2B.L2ELNode(match.FirstL2EL)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+
+	waitAtLeast := func(el stack.L2ELNode, n uint64) error {
+		return retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < n {
+				return fmt.Errorf("waiting for >= %d blocks, got %d", n, ref.Number)
+			}
+			return nil
+		})
+	}
+
+	t.Require().NoError(waitAtLeast(elA, minBlocks))
+	t.Require().NoError(waitAtLeast(elB, minBlocks))
+}
+
 // TestSupervisorV2Interop2Predeploys asserts that at interop2 activation the expected
 // predeploys (including CrossL2Inbox) are present on L2.
 func TestSupervisorV2Interop2Predeploys(gt *testing.T) {

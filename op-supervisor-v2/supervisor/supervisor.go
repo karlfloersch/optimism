@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,10 @@ type Supervisor struct {
 
 	// denylist
 	denylist *DenylistStore
+
+	// multi-chain management
+	chains         map[uint64]*chainHandle
+	primaryChainID uint64
 }
 
 type managedConfig struct {
@@ -105,7 +110,37 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		var chainID uint64
+		if cidStr := q.Get("chainId"); cidStr != "" {
+			_, _ = fmt.Sscanf(cidStr, "%d", &chainID)
+		}
 		s.mu.Lock()
+		if len(s.chains) > 0 {
+			// multi-chain mode
+			if chainID == 0 {
+				chainID = s.primaryChainID
+			}
+			h := s.chains[chainID]
+			s.mu.Unlock()
+			if h == nil {
+				http.Error(w, "unknown chainId", http.StatusNotFound)
+				return
+			}
+			h.stateMu.Lock()
+			running := h.stopManagedOpNode != nil
+			started := h.started
+			opNodeUser := h.managedOpNodeUserRPC
+			h.stateMu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"chain_id":         chainID,
+				"op_node_running":  running,
+				"started_at":       started,
+				"op_node_user_rpc": opNodeUser,
+			})
+			return
+		}
+		// single-chain legacy mode
 		running := s.cmd != nil
 		started := s.started
 		opNodeUser := s.managedOpNodeUserRPC
@@ -133,14 +168,34 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			http.Error(w, "missing to_block_number", http.StatusBadRequest)
 			return
 		}
+		// chain-scoped when in multi-chain mode; legacy single-chain otherwise
 		s.mu.Lock()
-		cfg := s.managedCfg
-		s.mu.Unlock()
-		if cfg == nil {
-			http.Error(w, "managed mode not running", http.StatusServiceUnavailable)
-			return
+		multi := len(s.chains) > 0
+		var cfg *managedConfig
+		if !multi {
+			cfg = s.managedCfg
 		}
-		err := s.performRollback(r.Context(), cfg, *req.ToBlockNumber)
+		s.mu.Unlock()
+		var err error
+		if multi {
+			// require chainId in multi-chain mode
+			q := r.URL.Query()
+			var chainID uint64
+			if cidStr := q.Get("chainId"); cidStr != "" {
+				_, _ = fmt.Sscanf(cidStr, "%d", &chainID)
+			}
+			if chainID == 0 {
+				http.Error(w, "missing chainId", http.StatusBadRequest)
+				return
+			}
+			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
+		} else {
+			if cfg == nil {
+				http.Error(w, "managed mode not running", http.StatusServiceUnavailable)
+				return
+			}
+			err = s.performRollback(r.Context(), cfg, *req.ToBlockNumber)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -163,10 +218,25 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	// Entries are managed internally by supervisor policies/tests; no POST endpoint
 
 	if s.enableOpNodeProxy {
-		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/
+		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/ or /opnode/{chainId}/
 		mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			target := s.managedOpNodeUserRPC
+			// Try chain-scoped if multi-chain and a chainId segment is present
+			if len(s.chains) > 0 {
+				rest := strings.TrimPrefix(r.URL.Path, "/opnode/")
+				seg := rest
+				if i := strings.IndexByte(rest, '/'); i >= 0 {
+					seg = rest[:i]
+				}
+				if seg != "" {
+					var cid uint64
+					_, _ = fmt.Sscanf(seg, "%d", &cid)
+					if h := s.chains[cid]; h != nil {
+						target = h.managedOpNodeUserRPC
+					}
+				}
+			}
 			s.mu.Unlock()
 			if target == "" {
 				http.Error(w, "op-node RPC not available", http.StatusServiceUnavailable)
@@ -178,7 +248,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				return
 			}
 			rp := httputil.NewSingleHostReverseProxy(u)
-			// Trim prefix to forward to root
+			// Forward to root of op-node RPC
 			r.URL.Path = "/"
 			rp.ServeHTTP(w, r)
 		})
