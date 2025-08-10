@@ -223,6 +223,20 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 	})
 }
 
+// WithSV2TwoChainMinimal composes a minimal two-chain setup without CLs and starts a single SV2 across both chains.
+func WithSV2TwoChainMinimal(offset uint64) stack.Option[*Orchestrator] {
+	// Gate to assert the L2 network count after hydration
+	gateTwo := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
+		sys.T().Gate().Lenf(sys.L2Networks(), 2, "Must have exactly %v chains", 2)
+	})
+	return stack.Combine[*Orchestrator](
+		DefaultTwoMinimalSystemNoCL(&DefaultTwoMinimalSystemIDs{}),
+		WithSupervisorV2OnAllChains(),
+		WithInterop2ActivationOffsetForSV2(offset),
+		gateTwo,
+	)
+}
+
 // WithInterop2ActivationOffsetForSV2 sets interop2 activation to genesis + offset
 // on all L2 rollup configs before starting SV2 in AfterDeploy.
 func WithInterop2ActivationOffsetForSV2(offset uint64) stack.Option[*Orchestrator] {

@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
+	// use sysgo variant of the two-chain preset to avoid generics mismatch
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
@@ -232,12 +233,7 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 // TestSupervisorV2TwoChainRollbackIsolation brings up two L2s under a single SV2 instance,
 // verifies both advance, then rolls back chain A and asserts chain B is unaffected.
 func TestSupervisorV2TwoChainRollbackIsolation(gt *testing.T) {
-	var ids DefaultTwoMinimalSystemIDs
-	opt := stack.Combine[*Orchestrator](
-		DefaultTwoMinimalSystemNoCL(&ids),
-		WithSupervisorV2OnAllChains(),
-		WithInterop2ActivationOffsetForSV2(6),
-	)
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimal(6))
 
 	logger := testlog.Logger(gt, log.LevelInfo)
 	onFail, onSkipNow := exiters(gt)
@@ -334,12 +330,7 @@ func TestSupervisorV2TwoChainRollbackIsolation(gt *testing.T) {
 func TestSupervisorV2TwoChainAdvance(gt *testing.T) {
 	const minBlocks uint64 = 3
 
-	var ids DefaultTwoMinimalSystemIDs
-	opt := stack.Combine[*Orchestrator](
-		DefaultTwoMinimalSystemNoCL(&ids),
-		WithSupervisorV2OnAllChains(),
-		WithInterop2ActivationOffsetForSV2(6),
-	)
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimal(6))
 
 	logger := testlog.Logger(gt, log.LevelInfo)
 	onFail, onSkipNow := exiters(gt)
