@@ -7,7 +7,11 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
+	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 )
 
 // chainHandle tracks the managed state for a single chain.
@@ -22,6 +26,11 @@ type chainHandle struct {
 
 	// config for restart/rollback
 	managedCfg *managedConfig
+
+	// v1 DBs per chain
+	logsDB  *logsdb.DB
+	localDB *fromda.DB
+	crossDB *fromda.DB
 }
 
 // AddChain starts an embedded op-node and polling for the given rollup config and RPCs.
@@ -79,6 +88,24 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		// lazy L1 client for ingest
+		l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.managedCfg.l1RPC)
+		var l1 *sources.L1Client
+		if l1Cli != nil {
+			l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard))
+		}
+		// open DBs if not already
+		if h.logsDB == nil || h.localDB == nil || h.crossDB == nil {
+			logs, local, cross, err := s.openChainDBs(s.log, chainID, "/tmp/sv2")
+			if err == nil {
+				h.logsDB, h.localDB, h.crossDB = logs, local, cross
+			} else {
+				s.log.Warn("failed to open sv2 dbs", "err", err)
+			}
+		}
+		// register this chain in the shared linker
+		s.registerChainForLinker(eth.ChainIDFromUInt64(chainID))
+
 		for {
 			select {
 			case <-ctxPoll.Done():
@@ -94,8 +121,37 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 				if localSafe.Number == 0 {
 					continue
 				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctxPoll, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "chain", chainID, "num", localSafe.Number, "err", err)
+				// ingest from last logs height+1 up to localSafe.Number
+				if h.logsDB != nil && h.localDB != nil && l1 != nil {
+					last, ok := h.logsDB.LatestSealedBlock()
+					var start uint64 = 0
+					if ok {
+						if last.Number >= localSafe.Number { // nothing new
+							goto crosssafe
+						}
+						start = last.Number + 1
+					}
+					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, sources.L2ClientDefaultConfig(rcfg, true), start, localSafe.Number); err != nil {
+						s.log.Warn("ingest error", "err", err)
+					}
+				}
+			crosssafe:
+				// drive one step of cross-safe update
+				if h.logsDB != nil && h.localDB != nil && h.crossDB != nil {
+					adapter := &crosssafeAdapter{
+						logger:         s.log,
+						chainID:        eth.ChainIDFromUInt64(chainID),
+						logs:           h.logsDB,
+						local:          h.localDB,
+						cross:          h.crossDB,
+						reads:          reads.NewRegistry(s.log),
+						l1:             l1,
+						l2:             l2,
+						addDenylist:    func(cid uint64, id string) error { return s.denylist.Add(cid, id) },
+						rollback:       s.RollbackChain,
+						l1ConfirmDepth: h.managedCfg.confirmDepth,
+					}
+					_ = adapter.runCrossSafeOnce(s.log, s.getLinker())
 				}
 			}
 		}

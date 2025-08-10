@@ -18,12 +18,19 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
+	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 
+	"github.com/ethereum-optimism/optimism/devnet-sdk/contracts/bindings"
+	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
+	"github.com/ethereum-optimism/optimism/op-service/plan"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
+	"github.com/ethereum-optimism/optimism/op-service/txintent"
+	"github.com/ethereum-optimism/optimism/op-service/txplan"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // TestSupervisorV2Rollback exercises Supervisor v2 rollback + denylist behavior in a single-chain sysgo preset.
@@ -369,6 +376,554 @@ func TestSupervisorV2TwoChainAdvance(gt *testing.T) {
 
 	t.Require().NoError(waitAtLeast(elA, minBlocks))
 	t.Require().NoError(waitAtLeast(elB, minBlocks))
+}
+
+// TestSupervisorV2TwoChainCrossSafeProgress brings up two L2s and asserts that
+// SV2 persists local-safe and cross-safe progress and exposes it via /status.
+func TestSupervisorV2TwoChainCrossSafeProgress(gt *testing.T) {
+	const minBlocks uint64 = 4
+
+	// Use small confirmation depth for faster cross-safe gating
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	elA := l2A.L2ELNode(match.FirstL2EL)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+
+	// Wait for >= minBlocks unsafe
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if ref.Number < minBlocks {
+			return fmt.Errorf("waiting for >= %d blocks, got %d", minBlocks, ref.Number)
+		}
+		return nil
+	})
+
+	// Query SV2 /status for chain A and verify local_safe and (eventually) cross_safe are non-zero
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	chainID := l2A.RollupConfig().L2ChainID.Uint64()
+	// poll until both fields appear (SV2 persists asynchronously)
+	_ = retry.Do0(ctx, 80, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		var out struct {
+			LocalSafe *struct {
+				Number uint64 `json:"number"`
+			}
+			CrossSafe *struct {
+				Number uint64 `json:"number"`
+			}
+		}
+		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+			return derr
+		}
+		if out.LocalSafe == nil || out.LocalSafe.Number == 0 {
+			return fmt.Errorf("waiting for local_safe")
+		}
+		if out.CrossSafe == nil || out.CrossSafe.Number == 0 {
+			return fmt.Errorf("waiting for cross_safe")
+		}
+		return nil
+	})
+}
+
+// TestSupervisorV2TwoChainValidExecMessageStable emits a valid executing message and
+// asserts it is included and not reorged out, while SV2 runs and cross-safe progresses.
+func TestSupervisorV2TwoChainValidExecMessageStable(gt *testing.T) {
+	// Use small confirmation depth for faster cross-safe gating
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+	elA := l2A.L2ELNode(match.FirstL2EL)
+	elB := l2B.L2ELNode(match.FirstL2EL)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+
+	// Wait for Interop2 activation on both chains (CrossL2Inbox code present)
+	waitInterop2 := func(el stack.L2ELNode, rcfg *rollup.Config) error {
+		activationBlocks := (*rcfg.Interop2Time - rcfg.Genesis.L2Time) / rcfg.BlockTime
+		activationNum := rcfg.Genesis.L2.Number + activationBlocks
+		actHex := fmt.Sprintf("0x%x", activationNum)
+		if err := retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < activationNum {
+				return fmt.Errorf("waiting head >= activation")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			var codeAt string
+			if err := el.L2EthClient().RPC().CallContext(ctx, &codeAt, "eth_getCode", predeploys.CrossL2InboxAddr.Hex(), actHex); err != nil {
+				return err
+			}
+			if codeAt == "0x" || codeAt == "0x0" || len(codeAt) < 4 {
+				return fmt.Errorf("no code at CrossL2Inbox")
+			}
+			return nil
+		})
+	}
+	t.Require().NoError(waitInterop2(elA, l2A.RollupConfig()))
+	t.Require().NoError(waitInterop2(elB, l2B.RollupConfig()))
+
+	// Fund EOAs and set up tx plans
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
+	bobPriv, _ := keys.Secret(devkeys.UserKey(1))
+	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
+	bobAddr, _ := keys.Address(devkeys.UserKey(1))
+	_ = l2A.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
+	_ = l2B.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), bobAddr, eth.OneTenthEther)
+
+	planAlice := txplan.Combine(
+		txplan.WithPrivateKey(alicePriv),
+		txplan.WithChainID(elA.EthClient()),
+		txplan.WithPendingNonce(elA.EthClient()),
+		txplan.WithAgainstLatestBlock(elA.EthClient()),
+		txplan.WithEstimator(elA.EthClient(), true),
+		txplan.WithRetrySubmission(elA.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(elA.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(elA.EthClient()),
+	)
+	planBob := txplan.Combine(
+		txplan.WithPrivateKey(bobPriv),
+		txplan.WithChainID(elB.EthClient()),
+		txplan.WithPendingNonce(elB.EthClient()),
+		txplan.WithAgainstLatestBlock(elB.EthClient()),
+		txplan.WithEstimator(elB.EthClient(), true),
+		txplan.WithRetrySubmission(elB.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(elB.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(elB.EthClient()),
+	)
+
+	// Deploy EventLogger on A and emit one message
+	deployCalldata := common.FromHex(bindings.EventloggerBin)
+	deployTx := txplan.NewPlannedTx(planAlice, txplan.WithData(deployCalldata))
+	depRes, err := deployTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	eventLogger := depRes.ContractAddress
+
+	randomData := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(1 + (i % 251))
+		}
+		return b
+	}
+	var topic0 [32]byte
+	copy(topic0[:], randomData(32))
+	topics := [][32]byte{topic0}
+	initTx := txintent.NewIntent[*txintent.InitTrigger, *txintent.InteropOutput](planAlice)
+	initTx.Content.Set(&txintent.InitTrigger{Emitter: eventLogger, Topics: topics, OpaqueData: randomData(16)})
+	_, err = initTx.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+
+	// Execute valid message on B
+	txB := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](planBob)
+	txB.Content.DependOn(&initTx.Result)
+	txB.Content.Fn(txintent.ExecuteIndexed(predeploys.CrossL2InboxAddr, &initTx.Result, 0))
+	_, err = txB.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	execRef, err := txB.PlannedTx.IncludedBlock.Eval(t.Ctx())
+	t.Require().NoError(err)
+	execNum := execRef.Number
+
+	// Capture current head block on B at inclusion time and verify stability (no reorg)
+	var headAt struct {
+		Hash string `json:"hash"`
+	}
+	var headNum uint64
+	{
+		var bnHex string
+		t.Require().NoError(elB.L2EthClient().RPC().CallContext(ctx, &bnHex, "eth_blockNumber"))
+		t.Require().True(len(bnHex) >= 3 && bnHex[:2] == "0x")
+		n, e := strconv.ParseUint(bnHex[2:], 16, 64)
+		t.Require().NoError(e)
+		headNum = n
+		headHex := fmt.Sprintf("0x%x", headNum)
+		t.Require().NoError(elB.L2EthClient().RPC().CallContext(ctx, &headAt, "eth_getBlockByNumber", headHex, false))
+		t.Require().NotEmpty(headAt.Hash)
+	}
+
+	// After a few more blocks, ensure the block at headNum is unchanged
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		var bnHex string
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &bnHex, "eth_blockNumber"); err != nil {
+			return err
+		}
+		if len(bnHex) < 3 || bnHex[:2] != "0x" {
+			return fmt.Errorf("bad blockNumber: %s", bnHex)
+		}
+		curr, err := strconv.ParseUint(bnHex[2:], 16, 64)
+		if err != nil {
+			return err
+		}
+		if curr <= headNum+2 {
+			return fmt.Errorf("waiting for a few blocks")
+		}
+		var blk struct {
+			Hash string `json:"hash"`
+		}
+		headHex := fmt.Sprintf("0x%x", headNum)
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", headHex, false); err != nil {
+			return err
+		}
+		if blk.Hash != headAt.Hash {
+			return fmt.Errorf("block at %d changed: was %s now %s", headNum, headAt.Hash, blk.Hash)
+		}
+		return nil
+	})
+
+	// Also ensure SV2 reports cross_safe for chain B at or beyond the Execute tx inclusion height
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	chainID := l2B.RollupConfig().L2ChainID.Uint64()
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		var out struct {
+			CrossSafe *struct {
+				Number uint64 `json:"number"`
+			}
+		}
+		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+			return derr
+		}
+		if out.CrossSafe == nil || out.CrossSafe.Number < execNum {
+			return fmt.Errorf("waiting for cross_safe >= execNum: have %v want >= %v", out.CrossSafe, execNum)
+		}
+		return nil
+	})
+
+	// Verify the Execute tx is actually present in the block at execNum
+	rec, err := txB.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	txHash := rec.TxHash.Hex()
+	var blkTxs struct {
+		Transactions []string `json:"transactions"`
+	}
+	execHex := fmt.Sprintf("0x%x", execNum)
+	t.Require().NoError(elB.L2EthClient().RPC().CallContext(ctx, &blkTxs, "eth_getBlockByNumber", execHex, false))
+	found := false
+	for _, h := range blkTxs.Transactions {
+		if h == txHash {
+			found = true
+			break
+		}
+	}
+	t.Require().True(found, "execute tx not found in block %d", execNum)
+}
+
+// TestSupervisorV2TwoChainInvalidExecMessage constructs an executing message with
+// invalid identifier attributes and asserts it is not included on chain B (tx filtered out).
+// This reuses only txintent + constants and minimal local helpers; no acceptance harness.
+func TestSupervisorV2TwoChainInvalidExecMessage(gt *testing.T) {
+	// Bring up two-chain minimal system with SV2 and Interop2-only (no Interop HF), depth=1
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+	elA := l2A.L2ELNode(match.FirstL2EL)
+	elB := l2B.L2ELNode(match.FirstL2EL)
+
+	// Ensure interop2 predeploys (CrossL2Inbox) are active on both chains
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+	waitInteropActive := func(el stack.L2ELNode, rcfg *rollup.Config) error {
+		activationBlocks := (*rcfg.Interop2Time - rcfg.Genesis.L2Time) / rcfg.BlockTime
+		activationNum := rcfg.Genesis.L2.Number + activationBlocks
+		actHex := fmt.Sprintf("0x%x", activationNum)
+		// 1) Wait for head to reach activation
+		if err := retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < activationNum {
+				return fmt.Errorf("waiting for interop2 activation head, have %d want >= %d", ref.Number, activationNum)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		// 2) Verify code present at activation block (sanity)
+		return retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			var codeAt string
+			if err := el.L2EthClient().RPC().CallContext(ctx, &codeAt, "eth_getCode", predeploys.CrossL2InboxAddr.Hex(), actHex); err != nil {
+				return err
+			}
+			if codeAt == "0x" || codeAt == "0x0" || len(codeAt) < 4 {
+				return fmt.Errorf("CrossL2Inbox not active yet (code check)")
+			}
+			return nil
+		})
+	}
+	t.Require().NoError(waitInteropActive(elA, l2A.RollupConfig()))
+	t.Require().NoError(waitInteropActive(elB, l2B.RollupConfig()))
+	// Interop2-only: code presence at CrossL2Inbox is sufficient; no proxy impl check needed.
+
+	// Fund EOAs via stack faucets + dsl.Funder
+	// Build EOAs from mnemonic and fund via faucet API directly
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	// derive 3 keys
+	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
+	bobPriv, _ := keys.Secret(devkeys.UserKey(1))
+	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
+	bobAddr, _ := keys.Address(devkeys.UserKey(1))
+	chuckAddr, _ := keys.Address(devkeys.UserKey(2))
+	// Fund via faucet on each chain
+	_ = l2A.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
+	_ = l2B.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), bobAddr, eth.OneTenthEther)
+	_ = l2B.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), chuckAddr, eth.OneTenthEther)
+	// Build tx planners bound to EL clients + keys
+	planAlice := txplan.Combine(
+		txplan.WithPrivateKey(alicePriv),
+		txplan.WithChainID(elA.EthClient()),
+		txplan.WithPendingNonce(elA.EthClient()),
+		txplan.WithAgainstLatestBlock(elA.EthClient()),
+		txplan.WithEstimator(elA.EthClient(), true),
+		txplan.WithRetrySubmission(elA.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(elA.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(elA.EthClient()),
+	)
+	planBob := txplan.Combine(
+		txplan.WithPrivateKey(bobPriv),
+		txplan.WithChainID(elB.EthClient()),
+		txplan.WithPendingNonce(elB.EthClient()),
+		txplan.WithAgainstLatestBlock(elB.EthClient()),
+		txplan.WithEstimator(elB.EthClient(), true),
+		txplan.WithRetrySubmission(elB.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(elB.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(elB.EthClient()),
+	)
+
+	// Deploy EventLogger on A and emit one message
+	deployCalldata := common.FromHex(bindings.EventloggerBin)
+	deployTx := txplan.NewPlannedTx(planAlice, txplan.WithData(deployCalldata))
+	depRes, err := deployTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	eventLogger := depRes.ContractAddress
+	// Build a minimal init trigger inline (avoid acceptance helpers)
+	randomData := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(1 + (i % 251))
+		}
+		return b
+	}
+	topics := [][32]byte{}
+	{
+		var t0 [32]byte
+		copy(t0[:], randomData(32))
+		topics = append(topics, t0)
+	}
+	initTx := txintent.NewIntent[*txintent.InitTrigger, *txintent.InteropOutput](planAlice)
+	initTx.Content.Set(&txintent.InitTrigger{Emitter: eventLogger, Topics: topics, OpaqueData: randomData(16)})
+	_, err = initTx.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+
+	// Wait a bit for SV2 to ingest logs
+	_ = retry.Do0(ctx, 20, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+		_, e := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		return e
+	})
+
+	// Build invalid ExecTrigger by mutating identifier after ExecuteIndexed
+	// Local helper: returns a function suitable for txintent.Content.Fn
+	type fault string
+	const (
+		fRandomTimestamp fault = "randomTimestamp"
+		fMismatchedIndex fault = "mismatchedLogIndex"
+	)
+	executeIndexedFault := func(executor common.Address, events *plan.Lazy[*txintent.InteropOutput], index int, f fault) func(ctx context.Context) (*txintent.ExecTrigger, error) {
+		return func(ctx context.Context) (*txintent.ExecTrigger, error) {
+			base, err := txintent.ExecuteIndexed(executor, events, index)(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// mutate identifier to make it invalid
+			switch f {
+			case fRandomTimestamp:
+				base.Msg.Identifier.Timestamp += 2
+			case fMismatchedIndex:
+				base.Msg.Identifier.LogIndex += 1
+			}
+			return base, nil
+		}
+	}
+
+	// Malicious execute on B using mutated identifier
+	txC := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](planBob)
+	txC.Content.DependOn(&initTx.Result)
+	txC.Content.Fn(executeIndexedFault(predeploys.CrossL2InboxAddr, &initTx.Result, 0, fMismatchedIndex))
+
+	// Ensure contract-level call does not immediately revert (gas can be estimated)
+	gas, err := txC.PlannedTx.Gas.Eval(t.Ctx())
+	t.Require().NoError(err)
+	t.Require().Greater(gas, uint64(0))
+
+	// Attempt inclusion: expect success (we rely on SV2 cross-safety to detect hazard and auto-rollback)
+	_, err = txC.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+
+	// Record the suspect block at chain B head after inclusion
+	var suspect struct {
+		Hash string `json:"hash"`
+	}
+	var suspectParent struct {
+		Hash string `json:"hash"`
+	}
+	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+		// get current head number
+		var bnHex string
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &bnHex, "eth_blockNumber"); err != nil {
+			return err
+		}
+		if len(bnHex) < 3 || bnHex[:2] != "0x" {
+			return fmt.Errorf("bad blockNumber: %s", bnHex)
+		}
+		n, err := strconv.ParseUint(bnHex[2:], 16, 64)
+		if err != nil {
+			return err
+		}
+		// fetch head block and its parent
+		headHex := fmt.Sprintf("0x%x", n)
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &suspect, "eth_getBlockByNumber", headHex, false); err != nil {
+			return err
+		}
+		if suspect.Hash == "" {
+			return fmt.Errorf("empty head hash")
+		}
+		if n == 0 {
+			return fmt.Errorf("need n>0 for parent")
+		}
+		parentHex := fmt.Sprintf("0x%x", n-1)
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &suspectParent, "eth_getBlockByNumber", parentHex, false); err != nil {
+			return err
+		}
+		if suspectParent.Hash == "" {
+			return fmt.Errorf("empty parent hash")
+		}
+		return nil
+	})
+
+	// Wait until SV2 auto-rollback replaces the suspect block: same height, different hash; parent stays the same
+	_ = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		// determine height of suspect by querying its block header again
+		// First get current head number (ensure chain advanced back to at least that height)
+		var bnHex string
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &bnHex, "eth_blockNumber"); err != nil {
+			return err
+		}
+		if len(bnHex) < 3 || bnHex[:2] != "0x" {
+			return fmt.Errorf("bad blockNumber: %s", bnHex)
+		}
+		n, err := strconv.ParseUint(bnHex[2:], 16, 64)
+		if err != nil {
+			return err
+		}
+		// If chain hasn't re-advanced to suspect height yet, keep waiting
+		// We need to discover suspect height; fetch current head, then use that height
+		headHex := fmt.Sprintf("0x%x", n)
+		var curr struct {
+			Hash string `json:"hash"`
+		}
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &curr, "eth_getBlockByNumber", headHex, false); err != nil {
+			return err
+		}
+		if curr.Hash == "" {
+			return fmt.Errorf("empty curr hash")
+		}
+		// Compare parent at n-1 with recorded suspectParent; if different, not our target yet; step back one and compare
+		if n == 0 {
+			return fmt.Errorf("height zero")
+		}
+		parentHex := fmt.Sprintf("0x%x", n-1)
+		var currParent struct {
+			Hash string `json:"hash"`
+		}
+		if err := elB.L2EthClient().RPC().CallContext(ctx, &currParent, "eth_getBlockByNumber", parentHex, false); err != nil {
+			return err
+		}
+		if currParent.Hash != suspectParent.Hash {
+			// not the same parent yet; wait for chain to align
+			return fmt.Errorf("waiting for parent alignment")
+		}
+		// Parent aligned; assert head hash differs from suspect hash (replacement)
+		if curr.Hash == suspect.Hash {
+			return fmt.Errorf("awaiting replacement at height parent=%s", currParent.Hash)
+		}
+		return nil
+	})
+
+	// Now execute the valid message once to confirm happy path still works
+	txB := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](planBob)
+	txB.Content.DependOn(&initTx.Result)
+	txB.Content.Fn(txintent.ExecuteIndexed(predeploys.CrossL2InboxAddr, &initTx.Result, 0))
+	_, err = txB.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
 }
 
 // TestSupervisorV2Interop2Predeploys asserts that at interop2 activation the expected

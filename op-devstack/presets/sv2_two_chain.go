@@ -20,6 +20,16 @@ func WithSV2TwoChainMinimal(offset uint64) stack.CommonOption {
 	)
 }
 
+// WithSV2TwoChainMinimalDepth composes the minimal two-chain preset and adds SV2 with a custom confirm depth.
+func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.CommonOption {
+	return stack.Combine[stack.Orchestrator](
+		stack.MakeCommon(sysgo.DefaultTwoMinimalSystemNoCL(&sysgo.DefaultTwoMinimalSystemIDs{})),
+		stack.MakeCommon(sysgo.WithSupervisorV2OnAllChainsConfirmDepth(depth)),
+		stack.MakeCommon(sysgo.WithInterop2ActivationOffsetForSV2(offset)),
+		WithL2NetworkCount(2),
+	)
+}
+
 // SV2TwoChainMinimal is a convenience wrapper to construct and access a two-chain SV2 minimal system.
 type SV2TwoChainMinimal struct {
 	Log          log.Logger

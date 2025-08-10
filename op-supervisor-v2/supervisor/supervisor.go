@@ -13,10 +13,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum-optimism/optimism/op-node/params"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/apis"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -45,6 +48,15 @@ type Supervisor struct {
 	// multi-chain management
 	chains         map[uint64]*chainHandle
 	primaryChainID uint64
+
+	// shared linker across all chains for cross-safety checks
+	linkMu       sync.Mutex
+	linkChains   map[eth.ChainID]struct{}
+	expiryWindow uint64
+	linkChecker  depset.LinkChecker
+
+	// L1 scope label used for cross-safe L1 confirmation depth gating (default: eth.Safe; tests may override to eth.Unsafe)
+	l1ScopeLabel eth.BlockLabel
 }
 
 type managedConfig struct {
@@ -60,7 +72,59 @@ type managedConfig struct {
 
 func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l, denylist: NewDenylistStore("")}
+	// initialize shared linker state
+	s.linkChains = make(map[eth.ChainID]struct{})
+	s.expiryWindow = params.MessageExpiryTimeSecondsInterop
+	s.linkChecker = depset.LinkCheckFn(func(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
+		// with no chains registered yet, nothing can execute
+		if _, ok := s.linkChains[execInChain]; !ok {
+			return false
+		}
+		if _, ok := s.linkChains[initChain]; !ok {
+			return false
+		}
+		if initTs > execTs {
+			return false
+		}
+		// expiry check
+		if execTs > initTs+s.expiryWindow {
+			return false
+		}
+		return true
+	})
+	// default production scope label
+	s.l1ScopeLabel = eth.Safe
 	return s
+}
+
+// registerChainForLinker registers a chain ID into the shared linker set.
+func (s *Supervisor) registerChainForLinker(id eth.ChainID) {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	if s.linkChains == nil {
+		s.linkChains = make(map[eth.ChainID]struct{})
+	}
+	s.linkChains[id] = struct{}{}
+}
+
+// getLinker returns the shared LinkChecker.
+func (s *Supervisor) getLinker() depset.LinkChecker {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	return s.linkChecker
+}
+
+// SetL1ScopeLabel overrides the L1 scope label (e.g., eth.Unsafe in tests).
+func (s *Supervisor) SetL1ScopeLabel(label eth.BlockLabel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.l1ScopeLabel = label
+}
+
+func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.l1ScopeLabel
 }
 
 func (s *Supervisor) StartOpNode(binary string, args ...string) error {
@@ -131,12 +195,25 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			running := h.stopManagedOpNode != nil
 			started := h.started
 			opNodeUser := h.managedOpNodeUserRPC
+			var localSafe, crossSafe any
+			if h.localDB != nil {
+				if ls, err := h.localDB.Last(); err == nil {
+					localSafe = ls.Derived
+				}
+			}
+			if h.crossDB != nil {
+				if cs, err := h.crossDB.Last(); err == nil {
+					crossSafe = cs.Derived
+				}
+			}
 			h.stateMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"chain_id":         chainID,
 				"op_node_running":  running,
 				"started_at":       started,
 				"op_node_user_rpc": opNodeUser,
+				"local_safe":       localSafe,
+				"cross_safe":       crossSafe,
 			})
 			return
 		}

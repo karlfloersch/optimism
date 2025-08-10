@@ -223,6 +223,68 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 	})
 }
 
+// WithSupervisorV2OnAllChainsConfirmDepth starts a single Supervisor v2 and registers all L2 ELs as chains,
+// using a custom L1 confirmation depth for cross-safety gating.
+func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchestrator] {
+	return stack.AfterDeploy(func(orch *Orchestrator) {
+		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
+		// pick first L1 EL and L1 CL (shared across chains)
+		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
+		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
+		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
+
+		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
+		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
+
+		// Create SV2 with HTTP server once
+		id := stack.SupervisorID("sv2-all")
+		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
+		orch.p.Cleanup(s.Stop)
+		s.Start("", "")
+		fmt.Printf("[sv2] http: %s\n", s.HTTP())
+		_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
+
+		for _, l2id := range l2elIDs {
+			l2el, _ := orch.l2ELs.Get(l2id)
+			// Read JWT secret for this EL
+			jwtHex, err := os.ReadFile(l2el.jwtPath)
+			orch.p.Require().NoError(err)
+			var jwtSecret [32]byte
+			b, err := hex.DecodeString(string(jwtHex)[2:])
+			orch.p.Require().NoError(err)
+			copy(jwtSecret[:], b)
+
+			// Add chain to supervisor with custom confirm depth
+			_, err = s.sup.AddChain(l1el.userRPC, l1cl.beacon.BeaconAddr(), l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
+			orch.p.Require().NoError(err)
+		}
+
+		// Wait for HTTP
+		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
+		})
+		orch.P().Require().NoError(err)
+	})
+}
+
+// WithSV2TwoChainMinimalDepth composes a minimal two-chain setup without CLs and starts a single SV2 across both chains,
+// using a custom L1 confirmation depth for cross-safety gating.
+func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orchestrator] {
+	// Gate to assert the L2 network count after hydration
+	gateTwo := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
+		sys.T().Gate().Lenf(sys.L2Networks(), 2, "Must have exactly %v chains", 2)
+	})
+	return stack.Combine[*Orchestrator](
+		DefaultTwoMinimalSystemNoCL(&DefaultTwoMinimalSystemIDs{}),
+		// ensure Interop2 activation is configured on rollup cfgs before SV2 starts
+		WithInterop2ActivationOffsetForSV2(offset),
+		WithSupervisorV2OnAllChainsConfirmDepth(depth),
+		gateTwo,
+	)
+}
+
 // WithSV2TwoChainMinimal composes a minimal two-chain setup without CLs and starts a single SV2 across both chains.
 func WithSV2TwoChainMinimal(offset uint64) stack.Option[*Orchestrator] {
 	// Gate to assert the L2 network count after hydration
@@ -231,8 +293,9 @@ func WithSV2TwoChainMinimal(offset uint64) stack.Option[*Orchestrator] {
 	})
 	return stack.Combine[*Orchestrator](
 		DefaultTwoMinimalSystemNoCL(&DefaultTwoMinimalSystemIDs{}),
-		WithSupervisorV2OnAllChains(),
+		// ensure Interop2 activation is configured on rollup cfgs before SV2 starts
 		WithInterop2ActivationOffsetForSV2(offset),
+		WithSupervisorV2OnAllChains(),
 		gateTwo,
 	)
 }
