@@ -13,7 +13,7 @@ import (
 // forkchoice update (engine_forkchoiceUpdated) against the authenticated EL RPC
 // to support ELs like reth without changing finalized.
 func rollbackEL(ctx context.Context, l2UserRPC string, backN uint64) error {
-    return rollbackELWithDebugSetHead(ctx, l2UserRPC, backN)
+	return rollbackELWithDebugSetHead(ctx, l2UserRPC, backN)
 }
 
 // rollbackELWithDebugSetHead rolls the EL back by N blocks using debug_setHead via the user RPC.
