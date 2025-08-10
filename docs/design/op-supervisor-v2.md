@@ -126,7 +126,7 @@ We've got the core logic working for one chain, to make this interesting we want
 Add this new two chain setup to the devstack and create a simple test making it work. Also ensure it's added to our sysgo setup.
 
 Implementation plan
-- [ ] New devstack preset (e.g., `interop2_two_chain`) with two minimal L2s, each with its own op-node and L2 geth managed by supervisor-v2.
+- [x] New devstack preset (e.g., `interop2_two_chain`) with two minimal L2s, each with its own op-node and L2 geth managed by supervisor-v2. (Added as `WithSV2TwoChainMinimal`)
 - [x] Supervisor-v2 manages multiple chains in a single process via per-chain handles (one embedded op-node + poller per chain) and exposes chain-scoped HTTP.
 - [x] Sysgo option to start SV2 for all L2 ELs and register each chain (`WithSupervisorV2OnAllChains`).
 - [x] Minimal two-chain system option (no CL) to avoid interop coupling; used by tests.
