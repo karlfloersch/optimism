@@ -79,6 +79,7 @@ Current status (M2):
 - Admin rollback endpoint implemented in `op-supervisor-v2` and managed op-node lifecycle supports replace-and-restart.
 - Sysgo preset test `TestSupervisorV2Rollback` added; asserts rollback regression below pre-height and recovery back to at least the pre-height. The test now also validates that the replaced block at height H has a different hash, and the parent at H-1 remains unchanged (chain continuity up to H-1).
 - Rollback implementation is abstracted via `rollbackEL(...)` (currently backed by `debug_setHead`). TODO: replace with Engine API `engine_forkchoiceUpdated` against the authenticated EL RPC for broader EL compatibility (e.g., reth), without changing finalized.
+- Rollback API is now absolute-only (`to_block_number`). In multi-chain mode, the endpoint requires `?chainId=` to scope the operation.
 
 ### 3. Add denylist
 
@@ -126,8 +127,22 @@ Add this new two chain setup to the devstack and create a simple test making it 
 
 Implementation plan
 - [ ] New devstack preset (e.g., `interop2_two_chain`) with two minimal L2s, each with its own op-node and L2 geth managed by supervisor-v2.
-- [ ] Supervisor-v2 manages per-chain processes and datadirs, plus shared DBs (reusing existing supervisor schemas).
-- [ ] Basic test: both chains ingest local-safe and advance cross-safe independently.
+- [x] Supervisor-v2 manages multiple chains in a single process via per-chain handles (one embedded op-node + poller per chain) and exposes chain-scoped HTTP.
+- [x] Sysgo option to start SV2 for all L2 ELs and register each chain (`WithSupervisorV2OnAllChains`).
+- [x] Minimal two-chain system option (no CL) to avoid interop coupling; used by tests.
+- [x] Basic tests: two chains independently advance; rollback on chain A does not affect chain B.
+
+Current status (M5):
+- Multi-chain supervisor scaffolding implemented:
+  - `chains` map with per-chain `chainHandle` (embedded op-node, restart config, poll cancel, started timestamp).
+  - Chain-scoped HTTP: `/status?chainId=`, `POST /admin/rollback?chainId=` (absolute-only body), and `/opnode/{chainId}/` reverse proxy.
+- Sysgo integration:
+  - `WithSupervisorV2OnAllChains` starts one supervisor instance and calls `AddChain(...)` for each L2 EL.
+  - `DefaultTwoMinimalSystemNoCL` brings up L1 and two L2 ELs without CL/process overhead for fast tests.
+- Tests:
+  - `TestSupervisorV2TwoChainAdvance`: both chains reach ≥ N blocks (no rollback).
+  - `TestSupervisorV2TwoChainRollbackIsolation`: rolling back chain A regresses then re-advances; chain B is unaffected.
+- Devstack two-chain preset added: `WithSV2TwoChainMinimal(offset)` builds a minimal two-chain setup without CLs, wires SV2 across both via `WithSupervisorV2OnAllChains`, and gates `L2NetworkCount(2)`. Tests may depend on this or the sysgo option interchangeably.
 
 ### 6. Integrate cross safe
 
@@ -138,6 +153,10 @@ Implementation plan
 - [ ] Apply L1 confirmation depth gating for cross-safe inputs.
 - [ ] Reuse existing cross-safety rulesets and tests; add cases: (a) valid executing message passes cross-safety, (b) invalid dependency fails and triggers reorg.
 - [ ] On crash/restart: reload denylist, recompute cross-safe from last known-good height, reconcile with current L2 heads.
+
+Notes for M6 planning:
+- Absolute rollback and denylist integration are in place; multi-chain lifecycle is isolated per chain via `chainHandle` locks.
+- Next step is DB ingestion/persistence inside SV2 (events/local-safe/cross-safe) without changing op-node storage.
 
 Once we've done this we are done!
 
