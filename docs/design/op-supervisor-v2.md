@@ -12,6 +12,7 @@ supervisor-v2 embeds an op-node (managed mode) for each chain in the dependency 
 - RPC exposure:
   - Devstack/tests: dial the embedded op-node user RPC directly (typed client).
   - CLI: exposes a reverse-proxy under `/opnode/` on the supervisor HTTP server (default on) for single-port UX.
+  - Important: the `/opnode/` reverse proxy is currently broken; until it is fixed, consumers should dial the embedded op-node user RPC directly. Devstack/sysgo paths already do this.
 
 supervisor-v2 puts all of the safe blocks which are being synced by the op-nodes into the `local-safe` db. The cross-safe validation is then run on the latest `local-safe` block at the same block height (just like the normal op-supervisor). The `cross-safe` block is calculated. This block may either be a) valid; or b) invalid.
 
@@ -71,9 +72,13 @@ Current status (M1):
 Show in a test that it is possible to trigger the rollback logic in the op-supervisor-v2 using a devstack test
 
 Implementation plan
-- [ ] Define rollback API within supervisor-v2: for a given chain, stop op-node; use Engine API forkchoiceUpdated to set head/safe to the parent of the invalid block (fallback to `debug_setHead` if needed); clear op-node safe DB; restart op-node.
+- [x] Define rollback API within supervisor-v2: dev-only `POST /admin/rollback { back_n_blocks }`; stop embedded op-node; roll back EL via `debug_setHead` (fallback path); restart a fresh embedded op-node with empty safe DB; resume polling.
 - [ ] Persist denylist entry before initiating rollback to ensure op-node does not re-accept the same payload.
-- [ ] E2E: sysgo harness test that injects a known denylisted payload and verifies automatic rollback and forward progress past the height.
+- [x] System test: sysgo-based test validates mechanics — head regresses immediately after rollback and re-advances back to at least the pre-rollback height (no denylist yet, so it returns to the same tip).
+
+Current status (M2):
+- Admin rollback endpoint implemented in `op-supervisor-v2` and managed op-node lifecycle supports replace-and-restart.
+- Sysgo preset test `TestSupervisorV2Rollback` added; asserts both rollback and recovery (regression then return-to-tip). No denylist interaction yet.
 
 ### 3. Add denylist
 

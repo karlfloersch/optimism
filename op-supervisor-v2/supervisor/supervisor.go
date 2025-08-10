@@ -29,9 +29,24 @@ type Supervisor struct {
 
 	// managed-node mode
 	managedOpNodeUserRPC string
+	stopManagedOpNode    func(ctx context.Context) error
+
+	// restart context
+	managedCfg *managedConfig
 
 	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
 	enableOpNodeProxy bool
+}
+
+type managedConfig struct {
+	l1RPC        string
+	beaconAddr   string
+	l2AuthRPC    string
+	l2UserRPC    string
+	jwtSecret    [32]byte
+	rcfg         *rollup.Config
+	interval     time.Duration
+	confirmDepth uint64
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
@@ -66,6 +81,12 @@ func (s *Supervisor) Stop() {
 		s.cancelPoll()
 		s.cancelPoll = nil
 	}
+	if s.stopManagedOpNode != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.stopManagedOpNode(ctx)
+		cancel()
+		s.stopManagedOpNode = nil
+	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 		s.cmd = nil
@@ -89,6 +110,32 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			"started_at":       started,
 			"op_node_user_rpc": opNodeUser,
 		})
+	})
+	// dev-only admin rollback endpoint: POST /admin/rollback { back_n_blocks?: uint64 }
+	mux.HandleFunc("/admin/rollback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			BackN uint64 `json:"back_n_blocks"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.BackN == 0 {
+			req.BackN = 1
+		}
+		s.mu.Lock()
+		cfg := s.managedCfg
+		s.mu.Unlock()
+		if cfg == nil {
+			http.Error(w, "managed mode not running", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.performRollback(r.Context(), cfg, req.BackN); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	// placeholder denylist check endpoint (will be implemented later)
 	mux.HandleFunc("/denylist/v1/check", func(w http.ResponseWriter, r *http.Request) {
@@ -313,11 +360,13 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 		return nil
 	}
 	// Start embedded op-node
-	userRPC, err := s.StartManagedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
+	userRPC, stopFn, err := s.StartManagedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
 	if err != nil {
 		return err
 	}
 	s.managedOpNodeUserRPC = userRPC
+	s.stopManagedOpNode = stopFn
+	s.managedCfg = &managedConfig{l1RPC: l1RPC, beaconAddr: beaconAddr, l2AuthRPC: l2AuthRPC, l2UserRPC: l2UserRPC, jwtSecret: jwtSecret, rcfg: rcfg, interval: interval, confirmDepth: confirmDepth}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelPoll = cancel
@@ -360,6 +409,86 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 					continue
 				}
 				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
+					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+// performRollback stops the managed op-node, rolls back the EL by backN blocks using debug_setHead,
+// then restarts the op-node and polling.
+func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, backN uint64) error {
+	// Stop polling and op-node
+	s.mu.Lock()
+	if s.cancelPoll != nil {
+		s.cancelPoll()
+		s.cancelPoll = nil
+	}
+	stopFn := s.stopManagedOpNode
+	s.mu.Unlock()
+	if stopFn != nil {
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = stopFn(c)
+		cancel()
+	}
+
+	// Roll back EL head by backN via debug_setHead
+	if err := rollbackELByDebugSetHead(ctx, cfg.l2UserRPC, backN); err != nil {
+		return err
+	}
+
+	// Restart managed op-node and polling
+	s.mu.Lock()
+	userRPC, stopFn2, err := s.StartManagedOpNode(cfg.l1RPC, cfg.beaconAddr, cfg.l2AuthRPC, cfg.jwtSecret, cfg.rcfg)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.managedOpNodeUserRPC = userRPC
+	s.stopManagedOpNode = stopFn2
+	ctxPoll, cancel := context.WithCancel(context.Background())
+	s.cancelPoll = cancel
+	s.mu.Unlock()
+
+	// Dial clients for polling
+	opNodeCli, err := opclient.NewRPC(ctxPoll, s.log, userRPC)
+	if err != nil {
+		cancel()
+		return err
+	}
+	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, cfg.l2UserRPC)
+	if err != nil {
+		cancel()
+		return err
+	}
+	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(cfg.rcfg, true))
+	if err != nil {
+		cancel()
+		return err
+	}
+	roll := sources.NewRollupClient(opNodeCli)
+
+	go func() {
+		ticker := time.NewTicker(cfg.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctxPoll.Done():
+				return
+			case <-ticker.C:
+				st, err := roll.SyncStatus(ctxPoll)
+				if err != nil || st == nil {
+					s.log.Warn("poll: sync status error", "err", err)
+					continue
+				}
+				localSafe := st.LocalSafeL2
+				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+				if localSafe.Number == 0 {
+					continue
+				}
+				if _, _, err := l2.FetchReceiptsByNumber(ctxPoll, localSafe.Number); err != nil {
 					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
 				}
 			}

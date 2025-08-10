@@ -126,8 +126,10 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		s.ln = ln
 		s.httpURL = "http://" + ln.Addr().String()
 		s.sup = sv2.NewSupervisor(s.logger)
-		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
+    s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
 		go func() { _ = s.srv.Serve(ln) }()
+    // Expose the HTTP URL in logs for external consumers (e.g. smoke tests)
+    fmt.Printf("[sv2] http: %s\n", s.HTTP())
 	}
 	// Read JWT secret from geth jwt file written earlier
 	jwtHex, err := os.ReadFile(l2EL.jwtPath)

@@ -1,12 +1,13 @@
 package supervisor
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"time"
 
 	altda "github.com/ethereum-optimism/optimism/op-alt-da"
-	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/opnode"
+	e2eopnode "github.com/ethereum-optimism/optimism/op-e2e/e2eutils/opnode"
 	opNodeConfig "github.com/ethereum-optimism/optimism/op-node/config"
 	opNodeFlags "github.com/ethereum-optimism/optimism/op-node/flags"
 	p2pcli "github.com/ethereum-optimism/optimism/op-node/p2p/cli"
@@ -21,9 +22,9 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// StartManagedOpNode starts an op-node in-process with minimal configuration and returns the user-RPC URL.
-// The node is configured as a sequencer with local RPCs and no external P2P.
-func (s *Supervisor) StartManagedOpNode(l1RPC string, beaconAddr string, l2AuthRPC string, jwtSecret [32]byte, rcfg *rollup.Config) (string, error) {
+// StartManagedOpNode starts an op-node in-process with minimal configuration and returns the user-RPC URL
+// and a function to stop the managed op-node. The node is configured as a sequencer with local RPCs and no external P2P.
+func (s *Supervisor) StartManagedOpNode(l1RPC string, beaconAddr string, l2AuthRPC string, jwtSecret [32]byte, rcfg *rollup.Config) (string, func(context.Context) error, error) {
 	// Minimal P2P config (memory-only, local addresses)
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	for _, f := range opNodeFlags.P2PFlags(opNodeFlags.EnvVarPrefix) {
@@ -77,15 +78,16 @@ func (s *Supervisor) StartManagedOpNode(l1RPC string, beaconAddr string, l2AuthR
 		ExperimentalOPStackAPI:          true,
 	}
 
-	opNode, err := opnode.NewOpnode(s.log, nodeCfg, func(err error) {
+	opNode, err := e2eopnode.NewOpnode(s.log, nodeCfg, func(err error) {
 		if err != nil {
 			s.log.Error("embedded op-node error", "err", err)
 		}
 	})
 	if err != nil {
-		return "", fmt.Errorf("start managed op-node: %w", err)
+		return "", nil, fmt.Errorf("start managed op-node: %w", err)
 	}
 
 	// Return user RPC endpoint for polling
-	return opNode.UserRPC().RPC(), nil
+	stopFn := func(ctx context.Context) error { return opNode.Stop(ctx) }
+	return opNode.UserRPC().RPC(), stopFn, nil
 }
