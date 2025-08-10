@@ -3,11 +3,13 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -36,6 +38,12 @@ type Supervisor struct {
 
 	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
 	enableOpNodeProxy bool
+
+	// denylist
+	denylist *DenylistStore
+
+	// seeded 1-in-N policy for adding denylist entries (0 = disabled)
+	seedOneInN uint64
 }
 
 type managedConfig struct {
@@ -50,7 +58,13 @@ type managedConfig struct {
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
-	return &Supervisor{log: l}
+	s := &Supervisor{log: l, denylist: NewDenylistStore("")}
+	if v := os.Getenv("SV2_DENYLIST_ONE_IN_N"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			s.seedOneInN = n
+		}
+	}
+	return s
 }
 
 func (s *Supervisor) StartOpNode(binary string, args ...string) error {
@@ -139,8 +153,18 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	})
 	// placeholder denylist check endpoint (will be implemented later)
 	mux.HandleFunc("/denylist/v1/check", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": false})
+		// GET /denylist/v1/check?chainId=&id=
+		q := r.URL.Query()
+		chainIDStr := q.Get("chainId")
+		id := q.Get("id")
+		var cid uint64
+		if chainIDStr != "" {
+			_, _ = fmt.Sscanf(chainIDStr, "%d", &cid)
+		}
+		deny := s.denylist != nil && id != "" && s.denylist.Has(cid, id)
+		_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": deny})
 	})
+	// Entries are managed internally by supervisor policies/tests; no POST endpoint
 
 	if s.enableOpNodeProxy {
 		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/
@@ -254,8 +278,14 @@ func (s *Supervisor) StartPolling(opNodeRPC, l2RPC string, interval time.Duratio
 				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
 					s.log.Debug("poll: fetch receipts error", "num", localSafe.Number, "err", err)
 				}
-				_ = rcfg
-				_ = confirmDepth
+				// M3: optional random seeding of denylist using block hash as placeholder ID
+				if s.seedOneInN > 0 && (localSafe.Number%s.seedOneInN == 0) {
+					// Using block hash as placeholder for payload ID
+					if ref, err := l2.L2BlockRefByNumber(ctx, localSafe.Number); err == nil {
+						_ = s.denylist.Add(rcfg.L2ChainID.Uint64(), ref.Hash.Hex())
+						s.log.Info("denylist seeded", "at", localSafe.Number, "id", ref.Hash)
+					}
+				}
 			}
 		}
 	}()

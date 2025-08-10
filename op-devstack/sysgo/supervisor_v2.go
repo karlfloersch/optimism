@@ -14,9 +14,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
+	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 // SupervisorV2 runs the Supervisor v2 prototype in-process with an HTTP server
@@ -25,7 +25,7 @@ type SupervisorV2 struct {
 	mu sync.Mutex
 
 	id     stack.SupervisorID
-	logger log.Logger
+	logger oplog.Logger
 	p      devtest.P
 
 	srv     *http.Server
@@ -126,10 +126,10 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		s.ln = ln
 		s.httpURL = "http://" + ln.Addr().String()
 		s.sup = sv2.NewSupervisor(s.logger)
-    s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
+		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
 		go func() { _ = s.srv.Serve(ln) }()
-    // Expose the HTTP URL in logs for external consumers (e.g. smoke tests)
-    fmt.Printf("[sv2] http: %s\n", s.HTTP())
+		// Expose the HTTP URL in logs for external consumers (e.g. smoke tests)
+		fmt.Printf("[sv2] http: %s\n", s.HTTP())
 	}
 	// Read JWT secret from geth jwt file written earlier
 	jwtHex, err := os.ReadFile(l2EL.jwtPath)

@@ -73,7 +73,6 @@ Show in a test that it is possible to trigger the rollback logic in the op-super
 
 Implementation plan
 - [x] Define rollback API within supervisor-v2: dev-only `POST /admin/rollback { back_n_blocks }`; stop embedded op-node; roll back EL via `debug_setHead` (fallback path); restart a fresh embedded op-node with empty safe DB; resume polling.
-- [ ] Persist denylist entry before initiating rollback to ensure op-node does not re-accept the same payload.
 - [x] System test: sysgo-based test validates mechanics — head regresses immediately after rollback and re-advances back to at least the pre-rollback height (no denylist yet, so it returns to the same tip).
 
 Current status (M2):
