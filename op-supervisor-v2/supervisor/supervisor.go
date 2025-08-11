@@ -57,6 +57,9 @@ type Supervisor struct {
 
 	// L1 scope label used for cross-safe L1 confirmation depth gating (default: eth.Safe; tests may override to eth.Unsafe)
 	l1ScopeLabel eth.BlockLabel
+
+	// per-instance data directory for DBs
+	dataDir string
 }
 
 type managedConfig struct {
@@ -94,8 +97,13 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	})
 	// default production scope label
 	s.l1ScopeLabel = eth.Safe
+	// unique temp dir per instance
+	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	return s
 }
+
+// getDataDir returns the base data directory for chain DBs
+func (s *Supervisor) getDataDir() string { return s.dataDir }
 
 // registerChainForLinker registers a chain ID into the shared linker set.
 func (s *Supervisor) registerChainForLinker(id eth.ChainID) {
@@ -196,6 +204,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			started := h.started
 			opNodeUser := h.managedOpNodeUserRPC
 			var localSafe, crossSafe any
+			var unsafeHead, safeHead, finalizedHead any
 			if h.localDB != nil {
 				if ls, err := h.localDB.Last(); err == nil {
 					localSafe = ls.Derived
@@ -206,12 +215,27 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 					crossSafe = cs.Derived
 				}
 			}
+			// Also include current op-node heads (best-effort) for observability
+			if opNodeUser != "" {
+				if cli, err := opclient.NewRPC(r.Context(), s.log, opNodeUser, opclient.WithLazyDial()); err == nil {
+					roll := sources.NewRollupClient(cli)
+					if st, err := roll.SyncStatus(r.Context()); err == nil && st != nil {
+						unsafeHead = st.UnsafeL2
+						safeHead = st.SafeL2
+						finalizedHead = st.FinalizedL2
+					}
+					cli.Close()
+				}
+			}
 			h.stateMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"chain_id":         chainID,
 				"op_node_running":  running,
 				"started_at":       started,
 				"op_node_user_rpc": opNodeUser,
+				"unsafe":           unsafeHead,
+				"safe":             safeHead,
+				"finalized":        finalizedHead,
 				"local_safe":       localSafe,
 				"cross_safe":       crossSafe,
 			})

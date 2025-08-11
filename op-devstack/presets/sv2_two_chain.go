@@ -52,3 +52,5 @@ func NewSV2TwoChainMinimal(t devtest.T, offset uint64) *SV2TwoChainMinimal {
 		System:       system,
 	}
 }
+
+// (batcher-related presets moved to sysgo to avoid generic type mismatches.)

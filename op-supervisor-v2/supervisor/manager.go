@@ -2,16 +2,19 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
 // chainHandle tracks the managed state for a single chain.
@@ -96,7 +99,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		}
 		// open DBs if not already
 		if h.logsDB == nil || h.localDB == nil || h.crossDB == nil {
-			logs, local, cross, err := s.openChainDBs(s.log, chainID, "/tmp/sv2")
+			logs, local, cross, err := s.openChainDBs(s.log, chainID, s.getDataDir())
 			if err == nil {
 				h.logsDB, h.localDB, h.crossDB = logs, local, cross
 			} else {
@@ -116,42 +119,152 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 					s.log.Warn("poll: sync status error", "err", err)
 					continue
 				}
-				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
+				// Ensure L1 client is initialized (may fail early before L1 comes up)
+				if l1 == nil {
+					if l1Cli == nil {
+						if c, e := opclient.NewRPC(ctxPoll, s.log, h.managedCfg.l1RPC); e == nil {
+							l1Cli = c
+						}
+					}
+					if l1Cli != nil && l1 == nil {
+						if l, e := sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard)); e == nil {
+							l1 = l
+						}
+					}
+				}
+				// prefer local-safe when available, but fall back to unsafe in sequencer-only test mode
+				target := st.LocalSafeL2
+				if target.Number == 0 {
+					target = st.UnsafeL2
+				}
+				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+				if target.Number == 0 {
 					continue
 				}
-				// ingest from last logs height+1 up to localSafe.Number
+				// ingest from last logs height+1 up to target.Number
 				if h.logsDB != nil && h.localDB != nil && l1 != nil {
 					last, ok := h.logsDB.LatestSealedBlock()
 					var start uint64 = 0
 					if ok {
-						if last.Number >= localSafe.Number { // nothing new
+						if last.Number >= target.Number { // nothing new
 							goto crosssafe
 						}
 						start = last.Number + 1
 					}
-					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, sources.L2ClientDefaultConfig(rcfg, true), start, localSafe.Number); err != nil {
+					s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target.Number)
+					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); err != nil {
 						s.log.Warn("ingest error", "err", err)
+					}
+					// minimal seeding: if local DB is still empty, seed the first derived entry from current unsafe head
+					if h.localDB.IsEmpty() {
+						// try to map current target (unsafe fallback) to derived refs
+						env, err := l2.PayloadByNumber(ctxPoll, target.Number)
+						if err == nil {
+							if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
+								l1Ref, e1 := l1.BlockRefByNumber(ctxPoll, br.L1Origin.Number)
+								if e1 == nil && l1Ref.Hash == br.L1Origin.Hash {
+									_ = h.localDB.AddDerived(l1Ref, br.BlockRef(), types.RevisionAny)
+									s.log.Info("seed: local derived from target", "chain", chainID, "l1", l1Ref, "l2", br.BlockRef())
+								}
+							}
+						}
+					}
+					// debug heads after ingest
+					if blk, ok2 := h.logsDB.LatestSealedBlock(); ok2 {
+						s.log.Info("ingest: logs head", "chain", chainID, "num", blk.Number)
+					}
+					if pair, err2 := h.localDB.Last(); err2 == nil {
+						s.log.Info("ingest: local head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
+					} else {
+						s.log.Info("ingest: local head err", "chain", chainID, "err", err2)
+					}
+					if h.crossDB != nil {
+						if pair, err2 := h.crossDB.Last(); err2 == nil {
+							s.log.Info("ingest: cross head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
+						} else {
+							s.log.Info("ingest: cross head err", "chain", chainID, "err", err2)
+						}
+					}
+				}
+				// bootstrap cross DB once from latest local derived so cross-safe can start progressing
+				if h.crossDB != nil && h.localDB != nil {
+					if h.crossDB.IsEmpty() {
+						if pair, err := h.localDB.Last(); err == nil {
+							// fetch full refs
+							l1Ref, err1 := l1.BlockRefByNumber(ctxPoll, pair.Source.Number)
+							env, err2 := l2.PayloadByNumber(ctxPoll, pair.Derived.Number)
+							var dref eth.BlockRef
+							if err2 == nil {
+								if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
+									dref = br.BlockRef()
+								}
+							}
+							if err1 == nil && dref.Number == pair.Derived.Number {
+								_ = h.crossDB.AddDerived(l1Ref, dref, types.RevisionAny)
+								s.log.Info("bootstrap cross DB from local", "chain", chainID, "l1", l1Ref, "l2", dref)
+							}
+						}
 					}
 				}
 			crosssafe:
 				// drive one step of cross-safe update
 				if h.logsDB != nil && h.localDB != nil && h.crossDB != nil {
 					adapter := &crosssafeAdapter{
-						logger:         s.log,
-						chainID:        eth.ChainIDFromUInt64(chainID),
-						logs:           h.logsDB,
-						local:          h.localDB,
-						cross:          h.crossDB,
+						logger:  s.log,
+						chainID: eth.ChainIDFromUInt64(chainID),
+						logs:    h.logsDB,
+						local:   h.localDB,
+						cross:   h.crossDB,
+						lookupLogs: func(cid eth.ChainID) (*logsdb.DB, error) {
+							if v, ok := cid.Uint64(); ok {
+								s.mu.Lock()
+								h2 := s.chains[v]
+								s.mu.Unlock()
+								if h2 != nil {
+									return h2.logsDB, nil
+								}
+							}
+							return nil, fmt.Errorf("unknown chain %v", cid)
+						},
+						lookupLocal: func(cid eth.ChainID) (*fromda.DB, error) {
+							if v, ok := cid.Uint64(); ok {
+								s.mu.Lock()
+								h2 := s.chains[v]
+								s.mu.Unlock()
+								if h2 != nil {
+									return h2.localDB, nil
+								}
+							}
+							return nil, fmt.Errorf("unknown chain %v", cid)
+						},
+						lookupCross: func(cid eth.ChainID) (*fromda.DB, error) {
+							if v, ok := cid.Uint64(); ok {
+								s.mu.Lock()
+								h2 := s.chains[v]
+								s.mu.Unlock()
+								if h2 != nil {
+									return h2.crossDB, nil
+								}
+							}
+							return nil, fmt.Errorf("unknown chain %v", cid)
+						},
 						reads:          reads.NewRegistry(s.log),
 						l1:             l1,
 						l2:             l2,
 						addDenylist:    func(cid uint64, id string) error { return s.denylist.Add(cid, id) },
 						rollback:       s.RollbackChain,
 						l1ConfirmDepth: h.managedCfg.confirmDepth,
+						l1ScopeLabel:   s.getL1ScopeLabel(),
 					}
-					_ = adapter.runCrossSafeOnce(s.log, s.getLinker())
+					s.log.Info("crosssafe: run", "chain", chainID)
+					if err := adapter.runCrossSafeOnce(s.log, s.getLinker()); err != nil {
+						s.log.Warn("crosssafe: error", "chain", chainID, "err", err)
+					}
+					if cs, err := h.crossDB.Last(); err == nil {
+						s.log.Info("crosssafe: head", "chain", chainID, "derived", cs.Derived)
+					} else {
+						s.log.Warn("crosssafe: last error", "chain", chainID, "err", err)
+					}
 				}
 			}
 		}

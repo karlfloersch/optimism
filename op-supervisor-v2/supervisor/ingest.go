@@ -34,9 +34,12 @@ func (s *Supervisor) openChainDBs(logger log.Logger, chainID uint64, dataDir str
 	return logDB, localDB, crossDB, nil
 }
 
-// ingestRange fetches payload, receipts and appends logs + local-safe link for [start,end] (inclusive).
-func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client, logs *logsdb.DB, local *fromda.DB, rollupCfg *sources.L2ClientConfig, start, end uint64) error {
+// ingestRange fetches payload, receipts and appends logs + local-safe link (and optionally cross-safe mirror) for [start,end] (inclusive).
+func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client, logs *logsdb.DB, local *fromda.DB, cross *fromda.DB, rollupCfg *sources.L2ClientConfig, start, end uint64) error {
 	for n := start; n <= end; n++ {
+		// debug
+		// Note: keep logs lightweight to avoid noise; this helps confirm ingest actually runs.
+		// fmt.Printf("[sv2] ingest block %d\n", n)
 		env, err := l2.PayloadByNumber(ctx, n)
 		if err != nil {
 			return err
@@ -90,8 +93,12 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 		if l1Ref.Hash != l1Source.Hash {
 			return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
 		}
-		if err := local.AddDerived(l1Ref, ref.BlockRef(), types.RevisionAny); err != nil {
+		derivedRef := ref.BlockRef()
+		if err := local.AddDerived(l1Ref, derivedRef, types.RevisionAny); err != nil {
 			return err
+		}
+		if cross != nil {
+			_ = cross.AddDerived(l1Ref, derivedRef, types.RevisionAny)
 		}
 	}
 	return nil
