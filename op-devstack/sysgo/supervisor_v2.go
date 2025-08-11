@@ -10,10 +10,13 @@ import (
 	"sync"
 	"time"
 
+	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
+	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum/go-ethereum/log"
@@ -38,34 +41,31 @@ type SupervisorV2 struct {
 }
 
 func (s *SupervisorV2) hydrate(sys stack.ExtensibleSystem) {
-	// Register a typed L2CL frontend against the embedded op-node RPC for DSL usage.
+	// Register typed L2CL frontends against the per-chain embedded op-node RPC via SV2 HTTP reverse proxy.
 	if s.sup == nil {
 		return
 	}
-	userRPC := s.sup.ManagedOpNodeUserRPC()
-	if userRPC == "" {
-		return
-	}
-	cli, err := opclient.NewRPC(sys.T().Ctx(), sys.Logger(), userRPC, opclient.WithLazyDial())
-	sys.T().Require().NoError(err)
-	sys.T().Cleanup(cli.Close)
-
-	// Build a shim L2CL and link it to the existing EL
-	// We don't have chain ID on supervisor ID; discover from existing L2 networks and attach to the first one.
 	l2Nets := sys.L2Networks()
 	if len(l2Nets) == 0 {
 		return
 	}
-	l2Net := l2Nets[0]
-	clID := stack.NewL2CLNodeID("embedded", l2Net.ID().ChainID())
-	clShim := shim.NewL2CLNode(shim.L2CLNodeConfig{
-		CommonConfig: shim.NewCommonConfig(sys.T()),
-		ID:           clID,
-		Client:       cli,
-	})
-	// Link to the first EL in this network, if present
-	clShim.(stack.LinkableL2CLNode).LinkEL(l2Net.L2ELNode(stack.NewL2ELNodeID("sequencer", l2Net.ID().ChainID())))
-	l2Net.(stack.ExtensibleL2Network).AddL2CLNode(clShim)
+	base := s.HTTP()
+	for _, net := range l2Nets {
+		cid, _ := net.ID().ChainID().Uint64()
+		url := fmt.Sprintf("%s/opnode/%d/", base, cid)
+		cli, err := opclient.NewRPC(sys.T().Ctx(), sys.Logger(), url, opclient.WithLazyDial())
+		sys.T().Require().NoError(err)
+		sys.T().Cleanup(cli.Close)
+		clID := stack.NewL2CLNodeID("embedded", net.ID().ChainID())
+		clShim := shim.NewL2CLNode(shim.L2CLNodeConfig{
+			CommonConfig: shim.NewCommonConfig(sys.T()),
+			ID:           clID,
+			Client:       cli,
+		})
+		// Link to the EL in this network and register
+		clShim.(stack.LinkableL2CLNode).LinkEL(net.L2ELNode(stack.NewL2ELNodeID("sequencer", net.ID().ChainID())))
+		net.(stack.ExtensibleL2Network).AddL2CLNode(clShim)
+	}
 }
 
 func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
@@ -78,6 +78,10 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 
 	// Create Supervisor instance
 	s.sup = sv2.NewSupervisor(s.logger)
+	// In tests, gate cross-safe against L1 Unsafe to progress quickly
+	s.sup.SetL1ScopeLabel(eth.Unsafe)
+	// Expose embedded op-node user RPC via HTTP reverse proxy for tests
+	s.sup.EnableOpNodeProxy(true)
 
 	// Start HTTP server on ephemeral port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -126,6 +130,10 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		s.ln = ln
 		s.httpURL = "http://" + ln.Addr().String()
 		s.sup = sv2.NewSupervisor(s.logger)
+		// In tests, gate cross-safe against L1 Unsafe to progress quickly
+		s.sup.SetL1ScopeLabel(eth.Unsafe)
+		// Expose embedded op-node user RPC via HTTP reverse proxy for tests
+		s.sup.EnableOpNodeProxy(true)
 		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
 		go func() { _ = s.srv.Serve(ln) }()
 		// Expose the HTTP URL in logs for external consumers (e.g. smoke tests)
@@ -152,7 +160,11 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 
 // WithSupervisorV2OnFirstChain starts Supervisor v2 for the first L2 EL, embedding an op-node internally.
 func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
-	return stack.AfterDeploy(func(orch *Orchestrator) {
+	// Capture orchestrator so we can register a lightweight CL handle for batcher wiring
+	var captured *Orchestrator
+	// Start SV2 in AfterDeploy; register CL shim in PostHydrate when we have a stack.System (devtest.T)
+	after := stack.AfterDeploy(func(orch *Orchestrator) {
+		captured = orch
 		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
 		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
 		// pick first L1 EL and L1 CL
@@ -171,11 +183,65 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 
 		s.StartEmbeddedFromSys(l1el, l1cl, l2el)
 
+		// Wait for SV2 HTTP to be ready
 		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
 			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
 		})
 		orch.P().Require().NoError(err)
+		// Register a lightweight CL handle in the orchestrator map so components (e.g., batcher) can resolve it
+		url := s.HTTP()
+		clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
+		if _, ok := orch.l2CLs.Get(clID); !ok {
+			orch.l2CLs.Set(clID, &L2CLNode{
+				id:      clID,
+				userRPC: url + "/opnode/",
+				p:       orch.P(),
+				logger:  orch.P().Logger(),
+				el:      l2el.id,
+			})
+		}
 	})
+
+	post := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
+		// Build CL shim against SV2 proxy for first L2 network
+		nets := sys.L2Networks()
+		if len(nets) == 0 {
+			return
+		}
+		net := nets[0]
+		url := os.Getenv("SV2_DENYLIST_URL")
+		if url == "" {
+			return
+		}
+		cli, err := opclient.NewRPC(sys.T().Ctx(), sys.Logger(), fmt.Sprintf("%s/opnode/", url), opclient.WithLazyDial())
+		if err != nil {
+			return
+		}
+		clID := stack.NewL2CLNodeID("embedded", net.ID().ChainID())
+		clShim := shim.NewL2CLNode(shim.L2CLNodeConfig{CommonConfig: shim.NewCommonConfig(sys.T()), ID: clID, Client: cli})
+		el := net.L2ELNode(match.FirstL2EL)
+		clShim.(stack.LinkableL2CLNode).LinkEL(el)
+		net.(stack.ExtensibleL2Network).AddL2CLNode(clShim)
+
+		// Also register a minimal CL handle in the orchestrator map so components started after hydration
+		// (like the batcher) can look it up by ID and reuse the SV2 proxy URL as Rollup RPC.
+		if captured != nil {
+			// Populate only the fields needed by WithBatcher (userRPC and IDs). Do not start a real op-node here.
+			l2elID := el.ID()
+			// Avoid double registration if already present
+			if _, ok := captured.l2CLs.Get(clID); !ok {
+				captured.l2CLs.Set(clID, &L2CLNode{
+					id:      clID,
+					userRPC: fmt.Sprintf("%s/opnode/", url),
+					p:       captured.P(),
+					logger:  captured.P().Logger(),
+					el:      l2elID,
+				})
+			}
+		}
+	})
+
+	return stack.Combine[*Orchestrator](after, post)
 }
 
 // WithSupervisorV2OnAllChains starts a single Supervisor v2 and registers all L2 ELs as chains.
@@ -220,6 +286,8 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
 		})
 		orch.P().Require().NoError(err)
+
+		// Note: L2CL shims are registered during system hydration (see SupervisorV2.hydrate).
 	})
 }
 
@@ -266,12 +334,18 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
 		})
 		orch.P().Require().NoError(err)
+
+		// Note: L2CL shims are registered during hydration; batchers will be started post-hydrate.
+
+		// Batchers are started in WithSV2TwoChainMinimalDepth PostHydrate hook
 	})
 }
 
 // WithSV2TwoChainMinimalDepth composes a minimal two-chain setup without CLs and starts a single SV2 across both chains,
 // using a custom L1 confirmation depth for cross-safety gating.
 func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orchestrator] {
+	// capture orchestrator for later PostHydrate batcher start
+	var captured *Orchestrator
 	// Gate to assert the L2 network count after hydration
 	gateTwo := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
 		sys.T().Gate().Lenf(sys.L2Networks(), 2, "Must have exactly %v chains", 2)
@@ -281,6 +355,26 @@ func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orch
 		// ensure Interop2 activation is configured on rollup cfgs before SV2 starts
 		WithInterop2ActivationOffsetForSV2(offset),
 		WithSupervisorV2OnAllChainsConfirmDepth(depth),
+		// Configure batchers to use SV2 /opnode/{chainId}/ proxy (set RollupRpc override)
+		WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
+			if v, ok := id.ChainID().Uint64(); ok {
+				sv2URL := os.Getenv("SV2_DENYLIST_URL")
+				cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2URL, v)}
+			}
+		}),
+		// capture orchestrator pointer
+		stack.AfterDeploy(func(orch *Orchestrator) { captured = orch }),
+		// Start batchers for both default chains after hydration (when CL shims are registered)
+		stack.PostHydrate[*Orchestrator](func(sys stack.System) {
+			sys.T().Logger().Info("Starting batchers for SV2 two-chain (post-hydrate)")
+			if captured == nil {
+				return
+			}
+			optA := WithBatcher(stack.NewL2BatcherID("main", DefaultL2AID), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", DefaultL2AID), stack.NewL2ELNodeID("sequencer", DefaultL2AID))
+			optA.AfterDeploy(captured)
+			optB := WithBatcher(stack.NewL2BatcherID("main", DefaultL2BID), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", DefaultL2BID), stack.NewL2ELNodeID("sequencer", DefaultL2BID))
+			optB.AfterDeploy(captured)
+		}),
 		gateTwo,
 	)
 }

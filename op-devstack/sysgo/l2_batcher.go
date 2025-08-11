@@ -2,6 +2,7 @@ package sysgo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -78,6 +79,9 @@ func WithBatcher(batcherID stack.L2BatcherID, l1ELID stack.L1ELNodeID, l2CLID st
 		l2EL, ok := orch.l2ELs.Get(l2ELID)
 		require.True(ok)
 
+		// Debug: surface batcher wiring
+		fmt.Printf("[batcher] wiring chain=%v l1=%s l2el=%s rollup=%s\n", batcherID.ChainID(), l1EL.userRPC, l2EL.userRPC, l2CL.userRPC)
+
 		batcherSecret, err := orch.keys.Secret(devkeys.BatcherRole.Key(l2ELID.ChainID().ToBig()))
 		require.NoError(err)
 
@@ -99,7 +103,7 @@ func WithBatcher(batcherID stack.L2BatcherID, l1ELID stack.L1ELNodeID, l2CLID st
 			PollInterval:             500 * time.Millisecond,
 			TxMgrConfig:              setuputils.NewTxMgrConfig(endpoint.URL(l1EL.userRPC), batcherSecret),
 			LogConfig: oplog.CLIConfig{
-				Level:  log.LevelInfo,
+				Level:  log.LevelDebug,
 				Format: oplog.FormatText,
 			},
 			Stopped:               false,
@@ -119,6 +123,9 @@ func WithBatcher(batcherID stack.L2BatcherID, l1ELID stack.L1ELNodeID, l2CLID st
 			p.Ctx(), "0.0.1", batcherCLIConfig,
 			logger)
 		require.NoError(err)
+		logger.Info("Starting batcher", "chain", batcherID.ChainID(), "l1", batcherCLIConfig.L1EthRpc, "l2el", batcherCLIConfig.L2EthRpc, "rollup", batcherCLIConfig.RollupRpc)
+		// Explicit stdout line to make it easy to grep in tests regardless of log routing
+		fmt.Printf("[batcher] start chain=%v l1=%s rollup=%v\n", batcherID.ChainID(), batcherCLIConfig.L1EthRpc, batcherCLIConfig.RollupRpc)
 		require.NoError(batcher.Start(p.Ctx()))
 		p.Cleanup(func() {
 			ctx, cancel := context.WithCancel(p.Ctx())

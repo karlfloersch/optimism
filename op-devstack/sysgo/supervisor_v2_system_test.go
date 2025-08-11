@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/predeploys"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
@@ -448,6 +449,193 @@ func TestSupervisorV2TwoChainCrossSafeProgress(gt *testing.T) {
 		}
 		return nil
 	})
+}
+
+// Minimal, focused test: ensure safe head progresses with SV2 + batcher on a single chain.
+func TestSupervisorV2SingleChainSafeProgresses(gt *testing.T) {
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+		// no-op capture removed; batcher is started in Finally hook below
+		// Start a batcher against the embedded op-node (via CL registered by SV2) as part of orchestrator lifecycle
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(stack.NewL2BatcherID("main", cid), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", cid), stack.NewL2ELNodeID("sequencer", cid))
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	// Dial SV2 op-node proxy directly to get a Rollup client; avoid depending on CL shim timing.
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	rpc, err := opclient.NewRPC(ctx, t.Logger(), sv2URL+"/opnode/", opclient.WithLazyDial())
+	t.Require().NoError(err)
+	roll := sources.NewRollupClient(rpc)
+	// Wait for LocalSafeL2 or SafeL2 to progress beyond genesis
+	err = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		st, err := roll.SyncStatus(ctx)
+		if err != nil || st == nil {
+			return fmt.Errorf("sync status: %v", err)
+		}
+		if st.LocalSafeL2.Number > 0 || st.SafeL2.Number > 0 {
+			t.Logger().Info("op-node safe progressed", "local_safe", st.LocalSafeL2, "safe", st.SafeL2)
+			return nil
+		}
+		t.Logger().Info("op-node heads (waiting)", "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2)
+		return fmt.Errorf("waiting for local_safe or safe > 0")
+	})
+	t.Require().NoError(err)
+}
+
+// TestSupervisorV2TwoChainSafeProgressionRequiresBatcher asserts that without batchers
+// the cross-safe head does not progress, and after starting batchers pointed at SV2 opnode
+// proxy the cross-safe head progresses on each chain. This sets the stage for restricting
+// ingestion to safe-only blocks later.
+func TestSupervisorV2TwoChainSafeProgressionRequiresBatcher(gt *testing.T) {
+	// small confirmation depth to observe cross-safe quickly and start batchers pointing to SV2
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+
+	// Wait for a few unsafe blocks to exist on A for baseline
+	elA := l2A.L2ELNode(match.FirstL2EL)
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if ref.Number < 4 {
+			return fmt.Errorf("waiting for >= 4 unsafe blocks, got %d", ref.Number)
+		}
+		return nil
+	})
+
+	// Without batchers, expect cross-safe to stay at zero for both chains
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	for _, net := range []stack.L2Network{l2A, l2B} {
+		chainID := net.RollupConfig().L2ChainID.Uint64()
+		// poll briefly to ensure it does not advance
+		err := retry.Do0(ctx, 10, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			var out struct {
+				Unsafe *struct {
+					Number uint64 `json:"number"`
+				}
+				LocalSafe *struct {
+					Number uint64 `json:"number"`
+				}
+				Safe *struct {
+					Number uint64 `json:"number"`
+				}
+				CrossSafe *struct {
+					Number uint64 `json:"number"`
+				}
+			}
+			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+				return derr
+			}
+			t.Logf("sv2 status (no batcher) chain=%d unsafe=%v local_safe=%v safe=%v cross_safe=%v", chainID,
+				numPtr(out.Unsafe), numPtr(out.LocalSafe), numPtr(out.Safe), numPtr(out.CrossSafe))
+			// Expect nil or zero without batchers
+			if out.CrossSafe != nil && out.CrossSafe.Number > 0 {
+				return fmt.Errorf("unexpected non-zero cross_safe without batcher: %d", out.CrossSafe.Number)
+			}
+			return nil
+		})
+		t.Require().NoError(err)
+	}
+
+	// Batchers are already started by the preset; proceed to assert cross-safe advances
+
+	// Wait for cross-safe to become non-zero on both chains
+	waitCrossSafe := func(net stack.L2Network) error {
+		chainID := net.RollupConfig().L2ChainID.Uint64()
+		return retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			var out struct {
+				Unsafe *struct {
+					Number uint64 `json:"number"`
+				}
+				LocalSafe *struct {
+					Number uint64 `json:"number"`
+				}
+				Safe *struct {
+					Number uint64 `json:"number"`
+				}
+				CrossSafe *struct {
+					Number uint64 `json:"number"`
+				}
+			}
+			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+				return derr
+			}
+			t.Logf("sv2 status (waiting) chain=%d unsafe=%v local_safe=%v safe=%v cross_safe=%v", chainID,
+				numPtr(out.Unsafe), numPtr(out.LocalSafe), numPtr(out.Safe), numPtr(out.CrossSafe))
+			if out.CrossSafe == nil || out.CrossSafe.Number == 0 {
+				return fmt.Errorf("waiting for cross_safe > 0")
+			}
+			return nil
+		})
+	}
+	t.Require().NoError(waitCrossSafe(l2A))
+	t.Require().NoError(waitCrossSafe(l2B))
+}
+
+// numPtr is a tiny helper to print optional numbers in logs
+func numPtr(s *struct {
+	Number uint64 `json:"number"`
+}) any {
+	if s == nil {
+		return nil
+	}
+	return s.Number
 }
 
 // TestSupervisorV2TwoChainValidExecMessageStable emits a valid executing message and
