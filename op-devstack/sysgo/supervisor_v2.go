@@ -11,6 +11,7 @@ import (
 	"time"
 
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
+	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
@@ -376,6 +377,41 @@ func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orch
 			optB.AfterDeploy(captured)
 		}),
 		gateTwo,
+	)
+}
+
+// WithSV2TwoChainReady composes a readable two-chain preset with:
+// - Interop2 activation, SV2 across both chains with confirmation depth
+// - Two batchers (one per chain) wired to SV2 /opnode/{chainId}/
+// - Funded dev accounts on both chains for convenient testing
+func WithSV2TwoChainReady(offset uint64, depth uint64, fundCount int) stack.Option[*Orchestrator] {
+	var captured *Orchestrator
+	return stack.Combine[*Orchestrator](
+		WithSV2TwoChainMinimalDepth(offset, depth),
+		// Capture orchestrator to fund accounts post-hydrate
+		stack.AfterDeploy(func(orch *Orchestrator) { captured = orch }),
+		stack.PostHydrate[*Orchestrator](func(sys stack.System) {
+			// Fund N accounts per chain using deterministic dev keys + faucet
+			if captured == nil || fundCount <= 0 {
+				return
+			}
+			nets := sys.L2Networks()
+			if len(nets) < 2 {
+				return
+			}
+			keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+			if err != nil {
+				sys.T().Logger().Warn("devkeys init failed; skipping faucet funding", "err", err)
+				return
+			}
+			for _, net := range nets {
+				faucet := net.Faucet(match.FirstFaucet)
+				for i := 0; i < fundCount; i++ {
+					addr, _ := keys.Address(devkeys.UserKey(i))
+					_ = faucet.API().RequestETH(sys.T().Ctx(), addr, eth.OneTenthEther)
+				}
+			}
+		}),
 	)
 }
 

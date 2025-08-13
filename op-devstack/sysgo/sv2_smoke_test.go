@@ -237,8 +237,8 @@ func TestSV2RollbackSingleChain(gt *testing.T) {
 
 // TestSV2TwoChainSingleRollbackAfterSafe: bring up two chains; roll back only chain A; chain B must not regress.
 func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
-	// Two-chain preset with SV2 managing both chains and batchers started for both (depth=1 for speed)
-	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+	// Readable preset: two chains, SV2 across both, batchers started, a few funded accounts
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainReady(6, 1, 2))
 
 	logger := testlog.Logger(gt, log.LevelInfo)
 	onFail, onSkipNow := exiters(gt)
@@ -459,7 +459,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 // but perform the denylist+rollback flow on chain B to prove either chain
 // can be rolled back independently under one SV2 instance.
 func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
-	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(6, 1))
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainReady(6, 1, 2))
 
 	logger := testlog.Logger(gt, log.LevelInfo)
 	onFail, onSkipNow := exiters(gt)
