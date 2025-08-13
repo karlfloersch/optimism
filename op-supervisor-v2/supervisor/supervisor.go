@@ -60,6 +60,10 @@ type Supervisor struct {
 
 	// per-instance data directory for DBs
 	dataDir string
+
+    // finalized runner state
+    cancelFinalized context.CancelFunc
+    crossFinalized  uint64
 }
 
 type managedConfig struct {
@@ -95,8 +99,16 @@ func NewSupervisor(l log.Logger) *Supervisor {
 		}
 		return true
 	})
-	// default production scope label
+	// default scope label; can be overridden via env SV2_L1_SCOPE
 	s.l1ScopeLabel = eth.Safe
+	switch strings.ToLower(os.Getenv("SV2_L1_SCOPE")) {
+	case "unsafe":
+		s.l1ScopeLabel = eth.Unsafe
+	case "safe":
+		s.l1ScopeLabel = eth.Safe
+	case "finalized":
+		s.l1ScopeLabel = eth.Finalized
+	}
 	// unique temp dir per instance
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	return s
@@ -238,6 +250,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				"finalized":        finalizedHead,
 				"local_safe":       localSafe,
 				"cross_safe":       crossSafe,
+                "cross_finalized":  s.getCrossFinalized(),
 			})
 			return
 		}
@@ -246,10 +259,11 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		started := s.started
 		opNodeUser := s.managedOpNodeUserRPC
 		s.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{
+        _ = json.NewEncoder(w).Encode(map[string]any{
 			"op_node_running":  running,
 			"started_at":       started,
 			"op_node_user_rpc": opNodeUser,
+            "cross_finalized":  s.getCrossFinalized(),
 		})
 	})
 	// dev-only admin rollback endpoint: POST /admin/rollback { back_n_blocks?: uint64 }

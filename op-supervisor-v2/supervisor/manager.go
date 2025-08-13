@@ -270,6 +270,9 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		}
 	}()
 
+    // Start finalized runner if this is the first chain registered
+    s.maybeStartFinalizedRunner()
+
 	// Register handle
 	s.mu.Lock()
 	if s.chains == nil {
@@ -282,6 +285,80 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	s.mu.Unlock()
 
 	return chainID, nil
+}
+
+// getCrossFinalized returns the last computed cross-finalized height.
+func (s *Supervisor) getCrossFinalized() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+    return s.crossFinalized
+}
+
+// maybeStartFinalizedRunner starts a background loop that computes the minimum FinalizedL2 height across chains.
+// It is intentionally simple and read-only; later we will plug in checkers and denylist/rollback execution.
+func (s *Supervisor) maybeStartFinalizedRunner() {
+	s.mu.Lock()
+    already := s.cancelFinalized != nil
+	hasChains := len(s.chains) > 0
+	s.mu.Unlock()
+	if already || !hasChains {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+    s.cancelFinalized = cancel
+	s.mu.Unlock()
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+                var minFinalized uint64
+                minFinalized = 0
+                // compute min over all chains of FinalizedL2.Number
+				s.mu.Lock()
+				for cid, h := range s.chains {
+					_ = cid
+					// fetch rollup status best-effort
+					h.stateMu.Lock()
+					rpc := h.managedOpNodeUserRPC
+					h.stateMu.Unlock()
+					if rpc == "" {
+						continue
+					}
+					// best-effort dial with timeout
+					func() {
+						ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
+						defer cancel2()
+						cli, err := opclient.NewRPC(ctx2, s.log, rpc)
+						if err != nil {
+							return
+						}
+						roll := sources.NewRollupClient(cli)
+						st, err := roll.SyncStatus(ctx2)
+						if err == nil && st != nil {
+                            num := st.FinalizedL2.Number
+							if num != 0 {
+                                if minFinalized == 0 || num < minFinalized {
+                                    minFinalized = num
+								}
+							}
+						}
+						cli.Close()
+					}()
+				}
+				s.mu.Unlock()
+                if minFinalized != 0 {
+					s.mu.Lock()
+                    s.crossFinalized = minFinalized
+					s.mu.Unlock()
+				}
+			}
+		}
+	}()
 }
 
 // RemoveChain stops and unregisters a chain by ID.

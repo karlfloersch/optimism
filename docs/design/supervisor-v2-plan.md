@@ -202,6 +202,10 @@ Implementation checklist (TODOs / caveats):
   - finalized: eligible only if L1 origin ≤ finalized L1
 - l1_conf_depth (optional): only used if l1_scope = safe and no explicit L1 safe head is exposed
 
+- Operational notes:
+  - The process reads `SV2_L1_SCOPE` env var to set the L1 scope label at startup (`unsafe|safe|finalized`).
+  - The `/status` endpoint includes `cross_finalized` as the current minimum finalized height across managed chains.
+
 - Tests:
   - Mode=finalized: finalized-gated rollback (single/two-chain)
   - Mode=safe: with l1_conf_depth=N, assert eligibility respects depth
@@ -210,7 +214,7 @@ Implementation checklist (TODOs / caveats):
 
 ### Status and metrics
 
-- Status (initial): per-chain L2 heads (unsafe/safe/finalized), eligible local-safe per configured L1 scope, cross-finalized, L1 heads, last action summary, denylist count
+- Status (initial): per-chain L2 heads (unsafe/safe/finalized), eligible local-safe per configured L1 scope, cross-finalized (`cross_finalized`), L1 heads, last action summary, denylist count
 - Omit "next target H" for now (optional later)
 - Metrics: Prometheus-compatible counters/gauges for loop latency, proposals, executed actions, per-chain cooldowns
 
@@ -236,6 +240,7 @@ Implementation checklist (TODOs / caveats):
 - [ ] Phase 3 status/metrics + stability
 - [ ] Phase 4 external check (optional)
 - [ ] Phase 5 denylist persistence + audits
+- [ ] Phase 6 backwards-compatibility validation
 
 
 ### Open questions
@@ -246,4 +251,30 @@ Implementation checklist (TODOs / caveats):
 4) Status surface: which fields do you want first (for dashboards/alerts)?
 5) Test infra: run finalized-only tests in CI for both single-chain and two-chain?
 
+
+
+### Phase 6 – Backwards-compatibility validation (OP Mainnet, Unichain, delayed interop devnet)
+
+- Objective: demonstrate SV2 works against existing networks and pre-interop configurations.
+
+- Scope:
+  - Run SV2 in read-only enforcement mode against OP Mainnet and Unichain:
+    - Use public RPCs or internal mirrors for L1/L2 reads.
+    - Compute cross-finalized and run checkers; do not issue rollbacks (dry-run) in production.
+    - Verify denylist remains empty and no false positives are proposed.
+  - Stand up an interop devnet with Interop hardfork activation delayed until block N:
+    - Ensure SV2 operates with pre-interop op-node config until activation.
+    - After activation, confirm continuous operation with the same SV2 binaries/configs.
+
+- Deliverables:
+  - Scripts/configs to point SV2 at OP Mainnet and Unichain (read-only mode), with metrics and status pages.
+  - Devnet composition for delayed interop activation and a short runbook to validate behavior before/after activation.
+  - Report summarizing cross-finalized progression, checker decisions (expected to be no-ops), and any observed discrepancies.
+
+- Implementation checklist (TODOs / caveats):
+  - [ ] Add a "dry-run"/read-only flag to disable rollback execution while still computing proposals.
+  - [ ] Parameterize network configs (OP Mainnet, Unichain): L1/L2 RPCs, JWT if needed, rollup config.
+  - [ ] Add dashboards/metrics panels for cross-finalized, per-chain heads, and proposal counts.
+  - [ ] Compose an interop devnet with delayed activation height; document how to set N.
+  - Caveats: never execute rollbacks against production networks; limit rate and scope of external RPC polling.
 
