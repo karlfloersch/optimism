@@ -1,20 +1,22 @@
 package supervisor
 
 import (
-	"context"
-	"fmt"
-	"sync"
-	"time"
+    "context"
+    "fmt"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
-	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
-	opclient "github.com/ethereum-optimism/optimism/op-service/client"
-	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/sources"
-	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
-	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
+    "github.com/ethereum-optimism/optimism/op-node/rollup"
+    "github.com/ethereum-optimism/optimism/op-node/rollup/derive"
+    opclient "github.com/ethereum-optimism/optimism/op-service/client"
+    "github.com/ethereum-optimism/optimism/op-service/eth"
+    "github.com/ethereum-optimism/optimism/op-service/sources"
+    fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
+    logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
+    "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
+    "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
 // chainHandle tracks the managed state for a single chain.
@@ -308,9 +310,11 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 	s.mu.Lock()
 	s.cancelFinalized = cancel
 	s.mu.Unlock()
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
+    go func() {
+        ticker := time.NewTicker(s.runnerInterval)
 		defer ticker.Stop()
+        // feature flag: disable proposals by default until wired
+        enableProposals := strings.ToLower(os.Getenv("SV2_ENABLE_CHECKERS")) == "true"
 		for {
 			select {
 			case <-ctx.Done():
@@ -320,6 +324,8 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 				minFinalized = 0
 				// compute min over all chains of FinalizedL2.Number
 				s.mu.Lock()
+                // also build a minimal snapshot per tick
+                snap := Snapshot{PerChain: make(map[uint64]ChainSnapshot)}
 				for cid, h := range s.chains {
 					_ = cid
 					// fetch rollup status best-effort
@@ -330,32 +336,50 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 						continue
 					}
 					// best-effort dial with timeout
-					func() {
-						ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
-						defer cancel2()
-						cli, err := opclient.NewRPC(ctx2, s.log, rpc)
-						if err != nil {
-							return
-						}
-						roll := sources.NewRollupClient(cli)
-						st, err := roll.SyncStatus(ctx2)
+                    func() {
+                        ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
+                        defer cancel2()
+                        st, err := s.fetchSyncStatus(ctx2, rpc)
 						if err == nil && st != nil {
 							num := st.FinalizedL2.Number
-							if num != 0 {
-								if minFinalized == 0 || num < minFinalized {
-									minFinalized = num
-								}
-							}
+                            if num != 0 {
+                                if minFinalized == 0 || num < minFinalized {
+                                    minFinalized = num
+                                }
+                                snap.PerChain[cid] = ChainSnapshot{Finalized: num}
+                            }
 						}
-						cli.Close()
 					}()
 				}
 				s.mu.Unlock()
 				if minFinalized != 0 {
 					s.mu.Lock()
 					s.crossFinalized = minFinalized
+                    snap.CrossFinalized = minFinalized
 					s.mu.Unlock()
 				}
+                if enableProposals && minFinalized != 0 {
+                    // Evaluate registered checkers with the current snapshot
+                    for _, chk := range s.getCheckers() {
+                        if props, err := chk.Evaluate(ctx, snap); err != nil {
+                            s.log.Warn("checker error", "err", err)
+                        } else if len(props) > 0 {
+                            // Execute proposals: add denylist + rollback
+                            for _, p := range props {
+                                if p.PayloadID != "" {
+                                    _ = s.denylist.Add(p.ChainID, p.PayloadID)
+                                }
+                                if s.rollbackFn != nil && p.ToBlock > 0 && p.ChainID != 0 {
+                                    if err := s.rollbackFn(ctx, p.ChainID, p.ToBlock); err != nil {
+                                        s.log.Warn("rollback failed", "chain", p.ChainID, "to", p.ToBlock, "err", err)
+                                    } else {
+                                        s.log.Info("rollback executed", "chain", p.ChainID, "to", p.ToBlock, "reason", p.Reason)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 			}
 		}
 	}()

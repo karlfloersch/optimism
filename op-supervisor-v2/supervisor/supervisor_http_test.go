@@ -1,14 +1,10 @@
 package supervisor
 
 import (
-	"encoding/json"
-	"io"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"testing"
-
-	"github.com/ethereum/go-ethereum/log"
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
 )
 
 func TestDenylistHTTP(t *testing.T) {
@@ -44,5 +40,4 @@ func TestDenylistHTTP(t *testing.T) {
 	}
 }
 
-// testLogger returns a minimal logger that discards output.
-func testLogger() log.Logger { return log.NewLogger(slog.NewTextHandler(io.Discard, nil)) }
+// uses package-level testLogger from testutil_logger.go
