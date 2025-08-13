@@ -61,9 +61,9 @@ type Supervisor struct {
 	// per-instance data directory for DBs
 	dataDir string
 
-    // finalized runner state
-    cancelFinalized context.CancelFunc
-    crossFinalized  uint64
+	// finalized runner state
+	cancelFinalized context.CancelFunc
+	crossFinalized  uint64
 }
 
 type managedConfig struct {
@@ -250,7 +250,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				"finalized":        finalizedHead,
 				"local_safe":       localSafe,
 				"cross_safe":       crossSafe,
-                "cross_finalized":  s.getCrossFinalized(),
+				"cross_finalized":  s.getCrossFinalized(),
 			})
 			return
 		}
@@ -259,11 +259,11 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		started := s.started
 		opNodeUser := s.managedOpNodeUserRPC
 		s.mu.Unlock()
-        _ = json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"op_node_running":  running,
 			"started_at":       started,
 			"op_node_user_rpc": opNodeUser,
-            "cross_finalized":  s.getCrossFinalized(),
+			"cross_finalized":  s.getCrossFinalized(),
 		})
 	})
 	// dev-only admin rollback endpoint: POST /admin/rollback { back_n_blocks?: uint64 }

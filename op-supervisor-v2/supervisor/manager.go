@@ -270,8 +270,8 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		}
 	}()
 
-    // Start finalized runner if this is the first chain registered
-    s.maybeStartFinalizedRunner()
+	// Start finalized runner if this is the first chain registered
+	s.maybeStartFinalizedRunner()
 
 	// Register handle
 	s.mu.Lock()
@@ -291,14 +291,14 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 func (s *Supervisor) getCrossFinalized() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-    return s.crossFinalized
+	return s.crossFinalized
 }
 
 // maybeStartFinalizedRunner starts a background loop that computes the minimum FinalizedL2 height across chains.
 // It is intentionally simple and read-only; later we will plug in checkers and denylist/rollback execution.
 func (s *Supervisor) maybeStartFinalizedRunner() {
 	s.mu.Lock()
-    already := s.cancelFinalized != nil
+	already := s.cancelFinalized != nil
 	hasChains := len(s.chains) > 0
 	s.mu.Unlock()
 	if already || !hasChains {
@@ -306,7 +306,7 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-    s.cancelFinalized = cancel
+	s.cancelFinalized = cancel
 	s.mu.Unlock()
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -316,9 +316,9 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-                var minFinalized uint64
-                minFinalized = 0
-                // compute min over all chains of FinalizedL2.Number
+				var minFinalized uint64
+				minFinalized = 0
+				// compute min over all chains of FinalizedL2.Number
 				s.mu.Lock()
 				for cid, h := range s.chains {
 					_ = cid
@@ -340,10 +340,10 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 						roll := sources.NewRollupClient(cli)
 						st, err := roll.SyncStatus(ctx2)
 						if err == nil && st != nil {
-                            num := st.FinalizedL2.Number
+							num := st.FinalizedL2.Number
 							if num != 0 {
-                                if minFinalized == 0 || num < minFinalized {
-                                    minFinalized = num
+								if minFinalized == 0 || num < minFinalized {
+									minFinalized = num
 								}
 							}
 						}
@@ -351,9 +351,9 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 					}()
 				}
 				s.mu.Unlock()
-                if minFinalized != 0 {
+				if minFinalized != 0 {
 					s.mu.Lock()
-                    s.crossFinalized = minFinalized
+					s.crossFinalized = minFinalized
 					s.mu.Unlock()
 				}
 			}
