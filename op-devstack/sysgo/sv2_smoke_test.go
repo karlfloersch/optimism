@@ -1032,11 +1032,15 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 		if cs, ok := out["cross_safe"].(map[string]any); ok {
 			if v, ok2 := cs["Number"].(float64); ok2 {
 				crossN = uint64(v)
+			} else if v2, ok3 := cs["number"].(float64); ok3 {
+				crossN = uint64(v2)
 			}
 		}
 		if ls, ok := out["local_safe"].(map[string]any); ok {
 			if v, ok2 := ls["Number"].(float64); ok2 {
 				localN = uint64(v)
+			} else if v2, ok3 := ls["number"].(float64); ok3 {
+				localN = uint64(v2)
 			}
 		}
 		return crossN, localN, nil
