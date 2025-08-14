@@ -143,15 +143,26 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 				if target.Number == 0 {
 					continue
 				}
-				// ingest from last logs height+1 up to target.Number
+				// ingest from the earliest missing height across logs/local up to target.Number
 				if h.logsDB != nil && h.localDB != nil && l1 != nil {
-					last, ok := h.logsDB.LatestSealedBlock()
-					var start uint64 = 0
-					if ok {
-						if last.Number >= target.Number { // nothing new
+					var startLogs uint64 = 0
+					if last, ok := h.logsDB.LatestSealedBlock(); ok {
+						startLogs = last.Number + 1
+						if last.Number >= target.Number { // nothing new at all
 							goto crosssafe
 						}
-						start = last.Number + 1
+					}
+					var startLocal uint64 = 0
+					if pair, err := h.localDB.Last(); err == nil {
+						startLocal = pair.Derived.Number + 1
+					}
+					// choose the minimum start to backfill any gaps (local may lag logs)
+					start := startLogs
+					if startLocal < start {
+						start = startLocal
+					}
+					if start > target.Number {
+						start = target.Number
 					}
 					s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target.Number)
 					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); err != nil {
