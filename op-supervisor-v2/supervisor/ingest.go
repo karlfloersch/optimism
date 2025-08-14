@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"os"
 
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
@@ -18,16 +19,23 @@ import (
 
 // openChainDBs initializes the v1 DBs for a chain.
 func (s *Supervisor) openChainDBs(logger log.Logger, chainID uint64, dataDir string) (*logsdb.DB, *fromda.DB, *fromda.DB, error) {
+	// Ensure base directory exists
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, nil, nil, err
+	}
+	logsPath := fmt.Sprintf("%s/logs-%d", dataDir, chainID)
+	localPath := fmt.Sprintf("%s/local-%d", dataDir, chainID)
+	crossPath := fmt.Sprintf("%s/cross-%d", dataDir, chainID)
 	// Use no-op metrics for now; can be replaced with real metrics later.
-	logDB, err := logsdb.NewFromFile(logger, logsMetricsNoop{}, eth.ChainIDFromUInt64(chainID), fmt.Sprintf("%s/logs-%d", dataDir, chainID), true)
+	logDB, err := logsdb.NewFromFile(logger, logsMetricsNoop{}, eth.ChainIDFromUInt64(chainID), logsPath, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	localDB, err := fromda.NewFromFile(logger.New("db", "local"), fromda.AdaptMetrics(chainMetricsNoop{}, "local_derived"), fmt.Sprintf("%s/local-%d", dataDir, chainID))
+	localDB, err := fromda.NewFromFile(logger.New("db", "local"), fromda.AdaptMetrics(chainMetricsNoop{}, "local_derived"), localPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	crossDB, err := fromda.NewFromFile(logger.New("db", "cross"), fromda.AdaptMetrics(chainMetricsNoop{}, "cross_derived"), fmt.Sprintf("%s/cross-%d", dataDir, chainID))
+	crossDB, err := fromda.NewFromFile(logger.New("db", "cross"), fromda.AdaptMetrics(chainMetricsNoop{}, "cross_derived"), crossPath)
 	if err != nil {
 		return nil, nil, nil, err
 	}
