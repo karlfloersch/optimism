@@ -111,3 +111,29 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 	}
 	return nil
 }
+
+// ingestLocalOnlyRange appends only local-safe links for [start,end] (inclusive), without writing logs.
+func ingestLocalOnlyRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client, local *fromda.DB, rollupCfg *sources.L2ClientConfig, start, end uint64) error {
+    for n := start; n <= end; n++ {
+        env, err := l2.PayloadByNumber(ctx, n)
+        if err != nil {
+            return err
+        }
+        ref, err := derive.PayloadToBlockRef(rollupCfg.RollupCfg, env.ExecutionPayload)
+        if err != nil {
+            return err
+        }
+        l1Source := ref.L1Origin
+        l1Ref, err := l1.BlockRefByNumber(ctx, l1Source.Number)
+        if err != nil {
+            return err
+        }
+        if l1Ref.Hash != l1Source.Hash {
+            return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
+        }
+        if err := local.AddDerived(l1Ref, ref.BlockRef(), types.RevisionAny); err != nil {
+            return err
+        }
+    }
+    return nil
+}

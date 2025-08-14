@@ -166,7 +166,11 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 					}
 					s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target.Number)
 					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); err != nil {
+						// If logs write conflicts due to gaps, fall back to writing just local-safe links to catch up
 						s.log.Warn("ingest error", "err", err)
+						if e2 := ingestLocalOnlyRange(ctxPoll, l1, l2, h.localDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); e2 != nil {
+							s.log.Warn("local-only ingest error", "err", e2)
+						}
 					}
 					// minimal seeding: if local DB is still empty, seed the first derived entry from current unsafe head
 					if h.localDB.IsEmpty() {
