@@ -337,15 +337,24 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		s.mu.Unlock()
 		var err error
 		if multi {
-			// require chainId in multi-chain mode
+			// In multi-chain mode, accept explicit chainId, or default to the primary when only one chain is registered.
 			q := r.URL.Query()
 			var chainID uint64
 			if cidStr := q.Get("chainId"); cidStr != "" {
 				_, _ = fmt.Sscanf(cidStr, "%d", &chainID)
 			}
 			if chainID == 0 {
-				http.Error(w, "missing chainId", http.StatusBadRequest)
-				return
+				// default to primary if exactly one chain
+				s.mu.Lock()
+				primary := s.primaryChainID
+				num := len(s.chains)
+				s.mu.Unlock()
+				if num == 1 && primary != 0 {
+					chainID = primary
+				} else {
+					http.Error(w, "missing chainId", http.StatusBadRequest)
+					return
+				}
 			}
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {

@@ -19,8 +19,8 @@ type Proposal struct {
 type Snapshot struct {
 	CrossFinalized uint64
 	PerChain       map[uint64]ChainSnapshot
-    // ResolvePayloadHash resolves the payload hash for a given chain at height H (best-effort)
-    ResolvePayloadHash func(chainID uint64, height uint64) (string, error)
+	// ResolvePayloadHash resolves the payload hash for a given chain at height H (best-effort)
+	ResolvePayloadHash func(chainID uint64, height uint64) (string, error)
 }
 
 // ChainSnapshot summarizes per-chain state used by checkers.

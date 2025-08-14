@@ -79,8 +79,19 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 
 	// Create Supervisor instance
 	s.sup = sv2.NewSupervisor(s.logger)
+	// Register env-driven height checker if configured
+	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
+		s.sup.RegisterChecker(chk)
+		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
+		// For devstack speed: use unsafe scope
+		s.sup.SetL1ScopeLabel(eth.Unsafe)
+	}
 	// In tests, gate cross-safe against L1 Unsafe to progress quickly
 	s.sup.SetL1ScopeLabel(eth.Unsafe)
+	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
+		s.sup.RegisterChecker(chk)
+		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
+	}
 	// Expose embedded op-node user RPC via HTTP reverse proxy for tests
 	s.sup.EnableOpNodeProxy(true)
 
@@ -133,6 +144,11 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		s.sup = sv2.NewSupervisor(s.logger)
 		// In tests, gate cross-safe against L1 Unsafe to progress quickly
 		s.sup.SetL1ScopeLabel(eth.Unsafe)
+		// Register env-driven height checker if configured
+		if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
+			s.sup.RegisterChecker(chk)
+			_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
+		}
 		// Expose embedded op-node user RPC via HTTP reverse proxy for tests
 		s.sup.EnableOpNodeProxy(true)
 		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
@@ -151,8 +167,8 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	s.p.Require().NoError(err)
 	copy(jwtSecret[:], b)
 
-	// Start managed op-node inside supervisor-v2 and begin polling (use L2 user RPC for reads)
-	err = s.sup.StartManaged(l1EL.userRPC, l1CL.beacon.BeaconAddr(), l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, 40)
+	// Register the chain in multi-chain mode; this starts the managed op-node and the finalized runner
+	_, err = s.sup.AddChain(l1EL.userRPC, l1CL.beacon.BeaconAddr(), l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, 40)
 	s.p.Require().NoError(err)
 }
 
@@ -193,13 +209,15 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 		url := s.HTTP()
 		clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
 		if _, ok := orch.l2CLs.Get(clID); !ok {
-			orch.l2CLs.Set(clID, &L2CLNode{
-				id:      clID,
-				userRPC: url + "/opnode/",
-				p:       orch.P(),
-				logger:  orch.P().Logger(),
-				el:      l2el.id,
-			})
+			if cid, ok2 := l2el.id.ChainID().Uint64(); ok2 {
+				orch.l2CLs.Set(clID, &L2CLNode{
+					id:      clID,
+					userRPC: fmt.Sprintf("%s/opnode/%d/", url, cid),
+					p:       orch.P(),
+					logger:  orch.P().Logger(),
+					el:      l2el.id,
+				})
+			}
 		}
 	})
 
@@ -214,7 +232,13 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 		if url == "" {
 			return
 		}
-		cli, err := opclient.NewRPC(sys.T().Ctx(), sys.Logger(), fmt.Sprintf("%s/opnode/", url), opclient.WithLazyDial())
+		var rpcURL string
+		if cid, ok := net.ID().ChainID().Uint64(); ok {
+			rpcURL = fmt.Sprintf("%s/opnode/%d/", url, cid)
+		} else {
+			rpcURL = fmt.Sprintf("%s/opnode/", url)
+		}
+		cli, err := opclient.NewRPC(sys.T().Ctx(), sys.Logger(), rpcURL, opclient.WithLazyDial())
 		if err != nil {
 			return
 		}
@@ -231,13 +255,15 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 			l2elID := el.ID()
 			// Avoid double registration if already present
 			if _, ok := captured.l2CLs.Get(clID); !ok {
-				captured.l2CLs.Set(clID, &L2CLNode{
-					id:      clID,
-					userRPC: fmt.Sprintf("%s/opnode/", url),
-					p:       captured.P(),
-					logger:  captured.P().Logger(),
-					el:      l2elID,
-				})
+				if cid, ok := net.ID().ChainID().Uint64(); ok {
+					captured.l2CLs.Set(clID, &L2CLNode{
+						id:      clID,
+						userRPC: fmt.Sprintf("%s/opnode/%d/", url, cid),
+						p:       captured.P(),
+						logger:  captured.P().Logger(),
+						el:      l2elID,
+					})
+				}
 			}
 		}
 	})

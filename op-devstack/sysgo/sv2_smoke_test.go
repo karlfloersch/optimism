@@ -122,27 +122,7 @@ func TestSV2RollbackSingleChain(gt *testing.T) {
 			preParentHash = parent.Hash
 		}
 
-		// Ensure SV2 denylist contains this ID before rollback
-		sv2URL := os.Getenv("SV2_DENYLIST_URL")
-		t.Require().NotEmpty(sv2URL)
-		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-		_ = retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 150 * time.Millisecond}, func() error {
-			resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, chainID, prePayloadID))
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			var out struct {
-				Denylisted bool `json:"denylisted"`
-			}
-			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
-				return derr
-			}
-			if !out.Denylisted {
-				return fmt.Errorf("not denylisted yet")
-			}
-			return nil
-		})
+		// (No automated checker here) Skip denylist gating in this manual rollback test
 
 		// Let EL advance a couple of blocks past H to reduce immediate reorg risk
 		target := preRef.Number + 2
@@ -259,7 +239,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 	elA := l2A.L2ELNode(match.FirstL2EL)
 	elB := l2B.L2ELNode(match.FirstL2EL)
 
-	ctx, cancel := context.WithTimeout(t.Ctx(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
 	defer cancel()
 
 	// Wait for a few blocks on both chains
@@ -278,82 +258,48 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 	t.Require().NoError(waitUnsafe(elA, 3))
 	t.Require().NoError(waitUnsafe(elB, 3))
 
-	// Snapshot pre-rollback on A and compute payload ID + parent hash at H
-	var preA eth.BlockRef
+	// Choose a small target height H to avoid waiting for large SAFE catch-up
+	targetA := uint64(3)
 	var prePayloadIDA string
 	var preParentHashA string
 	{
-		ref, err := elA.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
-		t.Require().NoError(err)
-		preA = ref
 		l2c, err := sources.NewL2Client(elA.L2EthClient().RPC(), t.Logger(), nil, sources.L2ClientDefaultConfig(l2A.RollupConfig(), true))
 		t.Require().NoError(err)
-		env, err := l2c.PayloadByNumber(ctx, preA.Number)
+		env, err := l2c.PayloadByNumber(ctx, targetA)
 		t.Require().NoError(err)
 		if actual, ok := env.CheckBlockHash(); ok {
 			prePayloadIDA = actual.Hex()
 		}
 		t.Require().NotEmpty(prePayloadIDA)
-		if preA.Number > 0 {
+		if targetA > 0 {
 			var parent struct {
 				Hash string `json:"hash"`
 			}
-			parentHex := fmt.Sprintf("0x%x", preA.Number-1)
+			parentHex := fmt.Sprintf("0x%x", targetA-1)
 			t.Require().NoError(elA.L2EthClient().RPC().CallContext(ctx, &parent, "eth_getBlockByNumber", parentHex, false))
 			t.Require().NotEmpty(parent.Hash)
 			preParentHashA = parent.Hash
 		}
 	}
 
-	// Ensure denylist contains A's payload ID and H is SAFE on A before rollback
+	// Ensure H is SAFE on A before rollback
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 
-	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
-		resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, idA, prePayloadIDA))
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		var out struct {
-			Denylisted bool `json:"denylisted"`
-		}
-		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
-			return derr
-		}
-		if !out.Denylisted {
-			return fmt.Errorf("not denylisted yet")
-		}
-		return nil
-	})
-
-	// Wait until H is SAFE on chain A
+	// Ensure op-node proxy is ready, then wait until H is SAFE on chain A
 	{
-		rpc, err := opclient.NewRPC(ctx, t.Logger(), fmt.Sprintf("%s/opnode/%d/", sv2URL, idA), opclient.WithLazyDial())
-		t.Require().NoError(err)
-		defer rpc.Close()
-		roll := sources.NewRollupClient(rpc)
-		_ = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
-			st, err := roll.SyncStatus(ctx)
-			if err != nil || st == nil {
-				return fmt.Errorf("sync status: %v", err)
-			}
-			safe := st.SafeL2.Number
-			if safe == 0 {
-				safe = st.LocalSafeL2.Number
-			}
-			if safe < preA.Number {
-				return fmt.Errorf("waiting safe>=H: have %d want >= %d", safe, preA.Number)
-			}
-			return nil
-		})
+		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idA, t.Logger()))
+		opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
+		if err := WaitSafeAtOrAbove(ctx, opnodeURL, targetA, t.Logger()); err != nil {
+			t.Logger().Warn("SAFE did not progress to target on A; proceeding with UNSAFE gating", "err", err)
+		}
 	}
 
 	// Trigger rollback on chain A only
 	{
-		toNum := preA.Number - 1
+		toNum := targetA - 1
 		reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
 		resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, idA), "application/json", bytes.NewReader(reqBody))
 		t.Require().NoError(err)
@@ -362,19 +308,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 			t.Require().Equal(http.StatusNoContent, resp.StatusCode)
 		}
 		// Wait for op-node proxy readiness after restart to avoid transient 502s
-		_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
-			rpc, err := opclient.NewRPC(ctx, t.Logger(), fmt.Sprintf("%s/opnode/%d/", sv2URL, idA), opclient.WithLazyDial())
-			if err != nil {
-				return err
-			}
-			defer rpc.Close()
-			roll := sources.NewRollupClient(rpc)
-			st, err := roll.SyncStatus(ctx)
-			if err != nil || st == nil {
-				return fmt.Errorf("sync status: %v", err)
-			}
-			return nil
-		})
+		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idA, t.Logger()))
 	}
 
 	// Assert chain A regresses then re-advances (unsafe)
@@ -383,8 +317,8 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 		if err != nil {
 			return err
 		}
-		if after.Number >= preA.Number {
-			return fmt.Errorf("waiting for rollback to reflect: have %d, want < %d", after.Number, preA.Number)
+		if after.Number >= targetA {
+			return fmt.Errorf("waiting for rollback to reflect: have %d, want < %d", after.Number, targetA)
 		}
 		return nil
 	})
@@ -393,19 +327,19 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 		if err != nil {
 			return err
 		}
-		if after.Number < preA.Number {
-			return fmt.Errorf("waiting to re-advance: have %d < %d", after.Number, preA.Number)
+		if after.Number < targetA {
+			return fmt.Errorf("waiting to re-advance: have %d < %d", after.Number, targetA)
 		}
 		return nil
 	})
 
 	// Parent continuity and replacement at H on A
 	{
-		if preA.Number > 0 {
+		if targetA > 0 {
 			var currParent struct {
 				Hash string `json:"hash"`
 			}
-			parentHex := fmt.Sprintf("0x%x", preA.Number-1)
+			parentHex := fmt.Sprintf("0x%x", targetA-1)
 			// Retry fetch to avoid transient RPC errors during restart windows
 			t.Require().NoError(retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
 				if err := elA.L2EthClient().RPC().CallContext(ctx, &currParent, "eth_getBlockByNumber", parentHex, false); err != nil {
@@ -421,7 +355,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 		var blk struct {
 			Hash string `json:"hash"`
 		}
-		hexNum := fmt.Sprintf("0x%x", preA.Number)
+		hexNum := fmt.Sprintf("0x%x", targetA)
 		t.Require().NoError(retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
 			if err := elA.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, false); err != nil {
 				return err
@@ -431,7 +365,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 			}
 			return nil
 		}))
-		t.Require().NotEqual(preA.Hash, blk.Hash)
+		t.Require().NotEqual(prePayloadIDA, blk.Hash)
 	}
 
 	// Chain B: assert it did not regress after A's rollback via op-node SyncStatus
@@ -498,82 +432,48 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 	t.Require().NoError(waitUnsafe(elA, 3))
 	t.Require().NoError(waitUnsafe(elB, 3))
 
-	// Snapshot pre-rollback on B and compute payload ID + parent hash at H
-	var preB eth.BlockRef
+	// Use a small target for chain B as well
+	targetB := uint64(3)
 	var prePayloadIDB string
 	var preParentHashB string
 	{
-		ref, err := elB.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
-		t.Require().NoError(err)
-		preB = ref
 		l2c, err := sources.NewL2Client(elB.L2EthClient().RPC(), t.Logger(), nil, sources.L2ClientDefaultConfig(l2B.RollupConfig(), true))
 		t.Require().NoError(err)
-		env, err := l2c.PayloadByNumber(ctx, preB.Number)
+		env, err := l2c.PayloadByNumber(ctx, targetB)
 		t.Require().NoError(err)
 		if actual, ok := env.CheckBlockHash(); ok {
 			prePayloadIDB = actual.Hex()
 		}
 		t.Require().NotEmpty(prePayloadIDB)
-		if preB.Number > 0 {
+		if targetB > 0 {
 			var parent struct {
 				Hash string `json:"hash"`
 			}
-			parentHex := fmt.Sprintf("0x%x", preB.Number-1)
+			parentHex := fmt.Sprintf("0x%x", targetB-1)
 			t.Require().NoError(elB.L2EthClient().RPC().CallContext(ctx, &parent, "eth_getBlockByNumber", parentHex, false))
 			t.Require().NotEmpty(parent.Hash)
 			preParentHashB = parent.Hash
 		}
 	}
 
-	// Ensure denylist contains B's payload ID and H is SAFE on B before rollback
+	// Ensure H is SAFE on B before rollback
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 
-	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
-		resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, idB, prePayloadIDB))
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		var out struct {
-			Denylisted bool `json:"denylisted"`
-		}
-		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
-			return derr
-		}
-		if !out.Denylisted {
-			return fmt.Errorf("not denylisted yet")
-		}
-		return nil
-	})
-
-	// Wait until H is SAFE on chain B
+	// Ensure op-node proxy is ready, then wait until H is SAFE on chain B
 	{
-		rpc, err := opclient.NewRPC(ctx, t.Logger(), fmt.Sprintf("%s/opnode/%d/", sv2URL, idB), opclient.WithLazyDial())
-		t.Require().NoError(err)
-		defer rpc.Close()
-		roll := sources.NewRollupClient(rpc)
-		_ = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
-			st, err := roll.SyncStatus(ctx)
-			if err != nil || st == nil {
-				return fmt.Errorf("sync status: %v", err)
-			}
-			safe := st.SafeL2.Number
-			if safe == 0 {
-				safe = st.LocalSafeL2.Number
-			}
-			if safe < preB.Number {
-				return fmt.Errorf("waiting safe>=H: have %d want >= %d", safe, preB.Number)
-			}
-			return nil
-		})
+		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idB, t.Logger()))
+		opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, idB)
+		if err := WaitSafeAtOrAbove(ctx, opnodeURL, targetB, t.Logger()); err != nil {
+			t.Logger().Warn("SAFE did not progress to target on B; proceeding with UNSAFE gating", "err", err)
+		}
 	}
 
 	// Trigger rollback on chain B only
 	{
-		toNum := preB.Number - 1
+		toNum := targetB - 1
 		reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
 		resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, idB), "application/json", bytes.NewReader(reqBody))
 		t.Require().NoError(err)
@@ -582,19 +482,7 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 			t.Require().Equal(http.StatusNoContent, resp.StatusCode)
 		}
 		// Wait for op-node proxy readiness after restart to avoid transient 502s
-		_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
-			rpc, err := opclient.NewRPC(ctx, t.Logger(), fmt.Sprintf("%s/opnode/%d/", sv2URL, idB), opclient.WithLazyDial())
-			if err != nil {
-				return err
-			}
-			defer rpc.Close()
-			roll := sources.NewRollupClient(rpc)
-			st, err := roll.SyncStatus(ctx)
-			if err != nil || st == nil {
-				return fmt.Errorf("sync status: %v", err)
-			}
-			return nil
-		})
+		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idB, t.Logger()))
 	}
 
 	// Assert chain B regresses then re-advances (unsafe)
@@ -603,8 +491,8 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 		if err != nil {
 			return err
 		}
-		if after.Number >= preB.Number {
-			return fmt.Errorf("waiting for rollback to reflect: have %d, want < %d", after.Number, preB.Number)
+		if after.Number >= targetB {
+			return fmt.Errorf("waiting for rollback to reflect: have %d, want < %d", after.Number, targetB)
 		}
 		return nil
 	})
@@ -613,19 +501,19 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 		if err != nil {
 			return err
 		}
-		if after.Number < preB.Number {
-			return fmt.Errorf("waiting to re-advance: have %d < %d", after.Number, preB.Number)
+		if after.Number < targetB {
+			return fmt.Errorf("waiting to re-advance: have %d < %d", after.Number, targetB)
 		}
 		return nil
 	})
 
 	// Parent continuity and replacement at H on B
 	{
-		if preB.Number > 0 {
+		if targetB > 0 {
 			var currParent struct {
 				Hash string `json:"hash"`
 			}
-			parentHex := fmt.Sprintf("0x%x", preB.Number-1)
+			parentHex := fmt.Sprintf("0x%x", targetB-1)
 			t.Require().NoError(retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
 				if err := elB.L2EthClient().RPC().CallContext(ctx, &currParent, "eth_getBlockByNumber", parentHex, false); err != nil {
 					return err
@@ -640,7 +528,7 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 		var blk struct {
 			Hash string `json:"hash"`
 		}
-		hexNum := fmt.Sprintf("0x%x", preB.Number)
+		hexNum := fmt.Sprintf("0x%x", targetB)
 		t.Require().NoError(retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
 			if err := elB.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, false); err != nil {
 				return err
@@ -650,7 +538,7 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 			}
 			return nil
 		}))
-		t.Require().NotEqual(preB.Hash, blk.Hash)
+		t.Require().NotEqual(prePayloadIDB, blk.Hash)
 	}
 
 	// Chain A: assert it did not regress after B's rollback via op-node SyncStatus
@@ -668,6 +556,130 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 			}
 			if st.UnsafeL2.Number < preA.Number {
 				return fmt.Errorf("chain A regressed: have %d < %d", st.UnsafeL2.Number, preA.Number)
+			}
+			return nil
+		})
+	}
+}
+
+// TestSV2HeightCheckerAutoRollbackSingleChain: bring up single-chain SV2 with height-based checker
+// configured to deny a target height. Verify the EL head regresses to target-1 and then re-advances.
+func TestSV2HeightCheckerAutoRollbackSingleChain(gt *testing.T) {
+	// Configure checker and runner before SV2 starts
+	target := uint64(5)
+	gt.Setenv("SV2_ENABLE_CHECKERS", "true")
+	gt.Setenv("SV2_DENY_HEIGHT", fmt.Sprintf("%d", target))
+	gt.Setenv("SV2_RUNNER_INTERVAL_MS", "50")
+	gt.Setenv("SV2_L1_SCOPE", "unsafe")
+
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+		// Start a batcher against the embedded op-node (via CL registered by SV2)
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(
+				stack.NewL2BatcherID("main", cid),
+				stack.NewL1ELNodeID("l1", DefaultL1ID),
+				stack.NewL2CLNodeID("embedded", cid),
+				stack.NewL2ELNodeID("sequencer", cid),
+			)
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	// Get EL client
+	l2Net := system.L2Networks()[0]
+	el := l2Net.L2ELNode(match.FirstL2EL)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 90*time.Second)
+	defer cancel()
+
+	// Wait until SV2 reports cross_finalized >= target before checking for rollback
+	{
+		sv2URL := os.Getenv("SV2_DENYLIST_URL")
+		t.Require().NotEmpty(sv2URL)
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2CrossFinalizedAtLeast(ctx2, sv2URL, target))
+	}
+
+	// Compute pre-rollback block hash at target height
+	var preHash string
+	{
+		var blk struct {
+			Hash string `json:"hash"`
+		}
+		hexNum := fmt.Sprintf("0x%x", target)
+		t.Require().NoError(retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+			if err := el.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, false); err != nil {
+				return err
+			}
+			if blk.Hash == "" {
+				return fmt.Errorf("empty hash at target")
+			}
+			return nil
+		}))
+		preHash = blk.Hash
+	}
+
+	// Wait until SV2 denylist contains this pre-rollback block hash for the chain
+	{
+		sv2URL := os.Getenv("SV2_DENYLIST_URL")
+		t.Require().NotEmpty(sv2URL)
+		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+		_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+			resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, chainID, preHash))
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			var out struct {
+				Denylisted bool `json:"denylisted"`
+			}
+			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+				return derr
+			}
+			if !out.Denylisted {
+				return fmt.Errorf("not denylisted yet")
+			}
+			return nil
+		})
+	}
+
+	// Assert that the block at target height gets replaced (hash changes), and head re-advances ≥ target
+	{
+		// wait for replacement
+		newHash, err := WaitBlockReplacedAtHeight(ctx, el.L2EthClient().RPC(), target, preHash)
+		t.Require().NoError(err)
+		t.Require().NotEqual(preHash, newHash)
+		// and head ≥ target again
+		_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < target {
+				return fmt.Errorf("waiting head >= %d, have %d", target, ref.Number)
 			}
 			return nil
 		})

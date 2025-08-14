@@ -272,9 +272,6 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		}
 	}()
 
-	// Start finalized runner if this is the first chain registered
-	s.maybeStartFinalizedRunner()
-
 	// Register handle
 	s.mu.Lock()
 	if s.chains == nil {
@@ -285,6 +282,9 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		s.primaryChainID = chainID
 	}
 	s.mu.Unlock()
+
+	// Start finalized runner if this is the first chain registered
+	s.maybeStartFinalizedRunner()
 
 	return chainID, nil
 }
@@ -320,40 +320,42 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				var minFinalized uint64
-				minFinalized = 0
-				// compute min over all chains of FinalizedL2.Number
-                s.mu.Lock()
-                // also build a minimal snapshot per tick
-                snap := Snapshot{PerChain: make(map[uint64]ChainSnapshot)}
-                // resolver captures L2 RPCs from chain handles
-                snap.ResolvePayloadHash = func(chainID uint64, height uint64) (string, error) {
-                    s.mu.Lock()
-                    h := s.chains[chainID]
-                    s.mu.Unlock()
-                    if h == nil || h.managedCfg == nil {
-                        return "", fmt.Errorf("unknown chain %d", chainID)
-                    }
-                    ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
-                    defer cancel2()
-                    l2Cli, err := opclient.NewRPC(ctx2, s.log, h.managedCfg.l2UserRPC)
-                    if err != nil {
-                        return "", err
-                    }
-                    defer l2Cli.Close()
-                    l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.managedCfg.rcfg, true))
-                    if err != nil {
-                        return "", err
-                    }
-                    env, err := l2.PayloadByNumber(ctx2, height)
-                    if err != nil {
-                        return "", err
-                    }
-                    if hash, ok := env.CheckBlockHash(); ok {
-                        return hash.Hex(), nil
-                    }
-                    return "", fmt.Errorf("no payload hash at %d", height)
-                }
+				var minHeight uint64
+				minHeight = 0
+				// compute min over all chains of selected label
+				// sample label once per tick OUTSIDE the lock to avoid deadlock
+				label := s.getL1ScopeLabel()
+				s.mu.Lock()
+				// also build a minimal snapshot per tick
+				snap := Snapshot{PerChain: make(map[uint64]ChainSnapshot)}
+				// resolver captures L2 RPCs from chain handles
+				snap.ResolvePayloadHash = func(chainID uint64, height uint64) (string, error) {
+					s.mu.Lock()
+					h := s.chains[chainID]
+					s.mu.Unlock()
+					if h == nil || h.managedCfg == nil {
+						return "", fmt.Errorf("unknown chain %d", chainID)
+					}
+					ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
+					defer cancel2()
+					l2Cli, err := opclient.NewRPC(ctx2, s.log, h.managedCfg.l2UserRPC)
+					if err != nil {
+						return "", err
+					}
+					defer l2Cli.Close()
+					l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.managedCfg.rcfg, true))
+					if err != nil {
+						return "", err
+					}
+					env, err := l2.PayloadByNumber(ctx2, height)
+					if err != nil {
+						return "", err
+					}
+					if hash, ok := env.CheckBlockHash(); ok {
+						return hash.Hex(), nil
+					}
+					return "", fmt.Errorf("no payload hash at %d", height)
+				}
 				for cid, h := range s.chains {
 					_ = cid
 					// fetch rollup status best-effort
@@ -364,29 +366,37 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 						continue
 					}
 					// best-effort dial with timeout
-					func() {
+					func(localLabel eth.BlockLabel) {
 						ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
 						defer cancel2()
 						st, err := s.fetchSyncStatus(ctx2, rpc)
 						if err == nil && st != nil {
-							num := st.FinalizedL2.Number
+							var num uint64
+							switch localLabel {
+							case eth.Unsafe:
+								num = st.UnsafeL2.Number
+							case eth.Safe:
+								num = st.SafeL2.Number
+							default:
+								num = st.FinalizedL2.Number
+							}
 							if num != 0 {
-								if minFinalized == 0 || num < minFinalized {
-									minFinalized = num
+								if minHeight == 0 || num < minHeight {
+									minHeight = num
 								}
 								snap.PerChain[cid] = ChainSnapshot{Finalized: num}
 							}
 						}
-					}()
+					}(label)
 				}
 				s.mu.Unlock()
-				if minFinalized != 0 {
+				if minHeight != 0 {
 					s.mu.Lock()
-					s.crossFinalized = minFinalized
-					snap.CrossFinalized = minFinalized
+					s.crossFinalized = minHeight
+					snap.CrossFinalized = minHeight
 					s.mu.Unlock()
 				}
-				if enableProposals && minFinalized != 0 {
+				if enableProposals && minHeight != 0 {
 					// Evaluate registered checkers with the current snapshot
 					for _, chk := range s.getCheckers() {
 						if props, err := chk.Evaluate(ctx, snap); err != nil {
