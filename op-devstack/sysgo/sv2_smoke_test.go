@@ -968,75 +968,95 @@ func TestSV2TwoChainSafeProgressionSerialized(gt *testing.T) {
 
 // TestSV2CrossSafeProgressSingleChain: ensure SV2 computes and exposes cross_safe and it advances with the chain.
 func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
-    var ids DefaultMinimalSystemIDs
-    opt := stack.Combine[*Orchestrator](
-        DefaultMinimalSystemNoCL(&ids),
-        WithSupervisorV2OnFirstChain(),
-        WithInterop2ActivationOffsetForSV2(6),
-        // Start a batcher against the embedded op-node (via CL registered by SV2)
-        stack.Finally[*Orchestrator](func(orch *Orchestrator) {
-            nets := orch.l2Nets.Values()
-            if len(nets) == 0 { return }
-            net := nets[0]
-            cid := net.id.ChainID()
-            optB := WithBatcher(
-                stack.NewL2BatcherID("main", cid),
-                stack.NewL1ELNodeID("l1", DefaultL1ID),
-                stack.NewL2CLNodeID("embedded", cid),
-                stack.NewL2ELNodeID("sequencer", cid),
-            )
-            optB.AfterDeploy(orch)
-        }),
-    )
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+		// Start a batcher against the embedded op-node (via CL registered by SV2)
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(
+				stack.NewL2BatcherID("main", cid),
+				stack.NewL1ELNodeID("l1", DefaultL1ID),
+				stack.NewL2CLNodeID("embedded", cid),
+				stack.NewL2ELNodeID("sequencer", cid),
+			)
+			optB.AfterDeploy(orch)
+		}),
+	)
 
-    logger := testlog.Logger(gt, log.LevelInfo)
-    onFail, onSkipNow := exiters(gt)
-    p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
-    gt.Cleanup(p.Close)
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
 
-    orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
-    stack.ApplyOptionLifecycle(opt, orch)
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
 
-    t := devtest.SerialT(gt)
-    system := shim.NewSystem(t)
-    orch.Hydrate(system)
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
 
-    l2Net := system.L2Networks()[0]
-    chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-    sv2URL := os.Getenv("SV2_DENYLIST_URL")
-    t.Require().NotEmpty(sv2URL)
+	l2Net := system.L2Networks()[0]
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
 
-    // Ensure op-node proxy is ready
-    ctx, cancel := context.WithTimeout(t.Ctx(), 2*time.Minute)
-    defer cancel()
-    t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, chainID, t.Logger()))
+	// Ensure op-node proxy is ready and Safe head advances to target
+	ctx, cancel := context.WithTimeout(t.Ctx(), 2*time.Minute)
+	defer cancel()
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, chainID, t.Logger()))
+	const target uint64 = 3
+	opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, chainID)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeURL, target, t.Logger()))
 
-    // helper to read cross_safe Number from /status
-    readCrossSafe := func() (uint64, uint64, error) {
-        resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
-        if err != nil { return 0, 0, err }
-        defer resp.Body.Close()
-        var out map[string]any
-        if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil { return 0, 0, derr }
-        // cross_safe is encoded as an object with Number field
-        var crossN, localN uint64
-        if cs, ok := out["cross_safe"].(map[string]any); ok {
-            if v, ok2 := cs["Number"].(float64); ok2 { crossN = uint64(v) }
-        }
-        if ls, ok := out["local_safe"].(map[string]any); ok {
-            if v, ok2 := ls["Number"].(float64); ok2 { localN = uint64(v) }
-        }
-        return crossN, localN, nil
-    }
+	// helper to read cross_safe Number from /status
+	readCrossSafe := func() (uint64, uint64, error) {
+		resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+		if err != nil {
+			return 0, 0, err
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+			return 0, 0, derr
+		}
+		// cross_safe is encoded as an object with Number field
+		var crossN, localN uint64
+		if cs, ok := out["cross_safe"].(map[string]any); ok {
+			if v, ok2 := cs["Number"].(float64); ok2 {
+				crossN = uint64(v)
+			}
+		}
+		if ls, ok := out["local_safe"].(map[string]any); ok {
+			if v, ok2 := ls["Number"].(float64); ok2 {
+				localN = uint64(v)
+			}
+		}
+		return crossN, localN, nil
+	}
 
-    // Wait until cross_safe >= 3 and equals local_safe (no interop messages in this setup)
-    const target uint64 = 3
-    t.Require().NoError(retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
-        c, l, err := readCrossSafe()
-        if err != nil { return err }
-        if c < target { return fmt.Errorf("cross_safe < %d (have %d)", target, c) }
-        if l < target { return fmt.Errorf("local_safe < %d (have %d)", target, l) }
-        if c != l { return fmt.Errorf("expected cross_safe == local_safe in no-interop setup (c=%d l=%d)", c, l) }
-        return nil
-    }))
+	// Wait until cross_safe >= target and equals local_safe (no interop messages in this setup)
+	t.Require().NoError(retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		c, l, err := readCrossSafe()
+		if err != nil {
+			return err
+		}
+		if c < target {
+			return fmt.Errorf("cross_safe < %d (have %d)", target, c)
+		}
+		if l < target {
+			return fmt.Errorf("local_safe < %d (have %d)", target, l)
+		}
+		if c != l {
+			return fmt.Errorf("expected cross_safe == local_safe in no-interop setup (c=%d l=%d)", c, l)
+		}
+		return nil
+	}))
 }
