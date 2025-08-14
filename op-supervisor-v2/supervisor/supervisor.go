@@ -65,13 +65,13 @@ type Supervisor struct {
 	cancelFinalized context.CancelFunc
 	crossFinalized  uint64
 
-    // checker registry (evaluated at cross-finalized)
-    checkers []BlockValidityChecker
+	// checker registry (evaluated at cross-finalized)
+	checkers []BlockValidityChecker
 
-    // testability hooks
-    fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
-    runnerInterval  time.Duration
-    rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
+	// testability hooks
+	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
+	runnerInterval  time.Duration
+	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
 type managedConfig struct {
@@ -117,27 +117,27 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	case "finalized":
 		s.l1ScopeLabel = eth.Finalized
 	}
-    // default fetcher dials the op-node and returns SyncStatus
-    s.fetchSyncStatus = func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
-        cli, err := opclient.NewRPC(ctx, s.log, rpc)
-        if err != nil {
-            return nil, err
-        }
-        defer cli.Close()
-        roll := sources.NewRollupClient(cli)
-        return roll.SyncStatus(ctx)
-    }
-    // runner interval (tunable for tests)
-    s.runnerInterval = 500 * time.Millisecond
-    if ms := os.Getenv("SV2_RUNNER_INTERVAL_MS"); ms != "" {
-        if v, err := time.ParseDuration(ms + "ms"); err == nil {
-            s.runnerInterval = v
-        }
-    }
-    // rollback indirection for tests
-    s.rollbackFn = s.RollbackChain
+	// default fetcher dials the op-node and returns SyncStatus
+	s.fetchSyncStatus = func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
+		cli, err := opclient.NewRPC(ctx, s.log, rpc)
+		if err != nil {
+			return nil, err
+		}
+		defer cli.Close()
+		roll := sources.NewRollupClient(cli)
+		return roll.SyncStatus(ctx)
+	}
+	// runner interval (tunable for tests)
+	s.runnerInterval = 500 * time.Millisecond
+	if ms := os.Getenv("SV2_RUNNER_INTERVAL_MS"); ms != "" {
+		if v, err := time.ParseDuration(ms + "ms"); err == nil {
+			s.runnerInterval = v
+		}
+	}
+	// rollback indirection for tests
+	s.rollbackFn = s.RollbackChain
 
-    // unique temp dir per instance
+	// unique temp dir per instance
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	return s
 }
@@ -177,18 +177,18 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 
 // RegisterChecker appends a block validity checker to be evaluated at cross-finalized.
 func (s *Supervisor) RegisterChecker(c BlockValidityChecker) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.checkers = append(s.checkers, c)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkers = append(s.checkers, c)
 }
 
 // getCheckers returns a snapshot of registered checkers.
 func (s *Supervisor) getCheckers() []BlockValidityChecker {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    out := make([]BlockValidityChecker, len(s.checkers))
-    copy(out, s.checkers)
-    return out
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]BlockValidityChecker, len(s.checkers))
+	copy(out, s.checkers)
+	return out
 }
 
 func (s *Supervisor) StartOpNode(binary string, args ...string) error {
