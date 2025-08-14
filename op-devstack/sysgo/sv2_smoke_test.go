@@ -293,9 +293,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 	{
 		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idA, t.Logger()))
 		opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
-		if err := WaitSafeAtOrAbove(ctx, opnodeURL, targetA, t.Logger()); err != nil {
-			t.Logger().Warn("SAFE did not progress to target on A; proceeding with UNSAFE gating", "err", err)
-		}
+		t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeURL, targetA, t.Logger()))
 	}
 
 	// Trigger rollback on chain A only
@@ -467,9 +465,7 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 	{
 		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idB, t.Logger()))
 		opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, idB)
-		if err := WaitSafeAtOrAbove(ctx, opnodeURL, targetB, t.Logger()); err != nil {
-			t.Logger().Warn("SAFE did not progress to target on B; proceeding with UNSAFE gating", "err", err)
-		}
+		t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeURL, targetB, t.Logger()))
 	}
 
 	// Trigger rollback on chain B only
