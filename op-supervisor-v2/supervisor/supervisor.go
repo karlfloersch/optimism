@@ -295,6 +295,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				"local_safe":       localSafe,
 				"cross_safe":       crossSafe,
 				"cross_finalized":  s.getCrossFinalized(),
+				"l1_scope_label":   s.getL1ScopeLabel().String(),
 			})
 			return
 		}
@@ -308,6 +309,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			"started_at":       started,
 			"op_node_user_rpc": opNodeUser,
 			"cross_finalized":  s.getCrossFinalized(),
+			"l1_scope_label":   s.getL1ScopeLabel().String(),
 		})
 	})
 	// dev-only admin rollback endpoint: POST /admin/rollback { back_n_blocks?: uint64 }

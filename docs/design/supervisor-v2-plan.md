@@ -52,9 +52,9 @@ Implementation checklist (TODOs / caveats):
 
 ### Phase 1 – Finalized-only runner (no reorg handling)
 
-- Ingest local-safe pairs in-process from op-node:
-  - Subscribe to PromoteLocalSafeEvent (carries L2 and L1 origin)
-  - Maintain per-chain latest local-safe {L1 origin, L2 ref} (dedup by L2 hash/number)
+- Persist local-safe L2→L1 origin mapping using rollup RPC:
+  - On SafeL2 progression per chain, fetch `L2BlockRef` (includes L1 origin) by number/hash
+  - Write (L2 ref → L1 origin) into v1 `local_safe.db` (fromda)
 - Read L1 finalized head periodically
 - Compute cross-finalized height:
   - For each chain, eligible = latest local-safe whose L1 origin ≤ finalized L1
@@ -69,12 +69,12 @@ Deliverables:
   - Two-chain A-only finalized-gated rollback
 
 Implementation checklist (TODOs / caveats):
-- [ ] Subscribe to PromoteLocalSafeEvent per chain; store latest {origin, ref} (dedup by L2 hash/number)
+- [ ] Safe writer: for (lastSafe, Safe] persist (L2→L1 origin) via rollup RPC into `local_safe.db`
 - [ ] L1 head reader for unsafe/safe/finalized; honor configured l1_scope
 - [ ] Compute cross-finalized = min eligible across chains; monotonic
 - [ ] Build snapshot at cross-finalized and call checker(s)
 - [ ] On violation: denylist payloadID, rollback to H-1, wait readiness
-- Caveat: on restart, backfill latest local-safe once before resuming events
+- Caveat: on restart, backfill latest local-safe once before resuming
 
 
 ### Phase 2 – Checker interface and built-ins
