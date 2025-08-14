@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	// use sysgo variant of the two-chain preset to avoid generics mismatch
+	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
@@ -684,4 +685,287 @@ func TestSV2HeightCheckerAutoRollbackSingleChain(gt *testing.T) {
 			return nil
 		})
 	}
+}
+
+// TestSV2SingleChainSafeAdvancesQuick: bring up a single chain with SV2 managing the op-node,
+// start a batcher wired to the SV2 op-node proxy, and assert SafeL2 advances beyond a small target.
+func TestSV2SingleChainSafeAdvancesQuick(gt *testing.T) {
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+		// Start a batcher against the embedded op-node (via CL registered by SV2)
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(
+				stack.NewL2BatcherID("main", cid),
+				stack.NewL1ELNodeID("l1", DefaultL1ID),
+				stack.NewL2CLNodeID("embedded", cid), // SV2 registers this CL shim for proxy wiring
+				stack.NewL2ELNodeID("sequencer", cid),
+			)
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	// Quick-fail checks: ensure SV2 URL is exposed and op-node proxy is ready
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	l2Net := system.L2Networks()[0]
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+	t.Require().NoError(WaitOpNodeProxyReady(t.Ctx(), sv2URL, chainID, t.Logger()))
+
+	// Target small height to keep the test fast
+	const target uint64 = 3
+	opnodeURL := fmt.Sprintf("%s/opnode/%d/", sv2URL, chainID)
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeURL, target, t.Logger()))
+}
+
+// TestSV2TwoChainSafeProgressionWithBatchers verifies that with SV2 managing two chains and
+// batchers wired to the SV2 op-node proxies, both chains advance SafeL2 beyond an initial watermark.
+func TestSV2TwoChainSafeProgressionWithBatchers(gt *testing.T) {
+	// Use the readable two-chain preset that starts batchers and funds accounts
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainReady(6, 1, 2))
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+
+	// Environment and URLs
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	idA := l2A.RollupConfig().L2ChainID.Uint64()
+	idB := l2B.RollupConfig().L2ChainID.Uint64()
+	opnodeA := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
+	opnodeB := fmt.Sprintf("%s/opnode/%d/", sv2URL, idB)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
+	defer cancel()
+
+	// Ensure proxies are ready
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idA, t.Logger()))
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idB, t.Logger()))
+
+	// Record initial SafeL2 watermarks
+	readSafe := func(opnode string) (uint64, error) {
+		cli, err := opclient.NewRPC(ctx, t.Logger(), opnode, opclient.WithLazyDial())
+		if err != nil {
+			return 0, err
+		}
+		defer cli.Close()
+		roll := sources.NewRollupClient(cli)
+		st, err := roll.SyncStatus(ctx)
+		if err != nil || st == nil {
+			if err == nil {
+				return 0, fmt.Errorf("nil status")
+			}
+			return 0, err
+		}
+		if st.SafeL2.Number != 0 {
+			return st.SafeL2.Number, nil
+		}
+		return st.LocalSafeL2.Number, nil
+	}
+
+	sA0, err := readSafe(opnodeA)
+	t.Require().NoError(err)
+	sB0, err := readSafe(opnodeB)
+	t.Require().NoError(err)
+
+	// Let chains produce a few blocks so batches have content
+	waitUnsafe := func(el stack.L2ELNode, n uint64) error {
+		return retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < n {
+				return fmt.Errorf("waiting for >= %d blocks, got %d", n, ref.Number)
+			}
+			return nil
+		})
+	}
+	t.Require().NoError(waitUnsafe(l2A.L2ELNode(match.FirstL2EL), 8))
+	t.Require().NoError(waitUnsafe(l2B.L2ELNode(match.FirstL2EL), 8))
+
+	// Briefly log status snapshots and batcher inclusion to observe progression before asserting
+	logStatus := func(opnode string, label string) {
+		cli, err := opclient.NewRPC(ctx, t.Logger(), opnode, opclient.WithLazyDial())
+		if err != nil {
+			t.Logger().Warn("rollup rpc dial failed", "chain", label, "err", err)
+			return
+		}
+		defer cli.Close()
+		roll := sources.NewRollupClient(cli)
+		st, err := roll.SyncStatus(ctx)
+		if err != nil || st == nil {
+			t.Logger().Warn("sync status error", "chain", label, "err", err)
+			return
+		}
+		t.Logger().Info("op-node heads", "chain", label, "unsafe", st.UnsafeL2.Number, "local_safe", st.LocalSafeL2.Number, "safe", st.SafeL2.Number)
+	}
+
+	// Also ping batcher admin to surface liveness; activity API is limited but will error if unreachable
+	// Note: avoid direct L2Batcher registry access (panics if not yet registered); rely on SyncStatus instead.
+
+	for i := 0; i < 6; i++ {
+		logStatus(opnodeA, "A")
+		logStatus(opnodeB, "B")
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Expect SafeL2 to advance by at least K on both chains
+	K := uint64(2)
+	if err := WaitSafeAtOrAbove(ctx, opnodeA, sA0+K, t.Logger()); err != nil {
+		logStatus(opnodeA, "A-final")
+		logStatus(opnodeB, "B-final")
+		t.Require().NoError(err)
+	}
+	if err := WaitSafeAtOrAbove(ctx, opnodeB, sB0+K, t.Logger()); err != nil {
+		logStatus(opnodeA, "A-final")
+		logStatus(opnodeB, "B-final")
+		t.Require().NoError(err)
+	}
+}
+
+// TestSV2TwoChainSafeProgressionSerialized starts batcher A first, waits for Safe/LocalSafe to
+// advance on chain A, then starts batcher B and waits for Safe/LocalSafe on chain B. This avoids
+// potential L1 inclusion contention during bring-up and helps diagnose Safe gating.
+func TestSV2TwoChainSafeProgressionSerialized(gt *testing.T) {
+	// Compose two-chain minimal system with SV2 on all chains, without auto-starting batchers
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimal(6),
+		// Ensure batchers use SV2 /opnode/{chainId}/ when we start them manually below
+		WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
+			if v, ok := id.ChainID().Uint64(); ok {
+				if sv2URL := os.Getenv("SV2_DENYLIST_URL"); sv2URL != "" {
+					cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2URL, v)}
+				}
+			}
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+
+	// Environment and URLs
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	idA := l2A.RollupConfig().L2ChainID.Uint64()
+	idB := l2B.RollupConfig().L2ChainID.Uint64()
+	opnodeA := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
+	opnodeB := fmt.Sprintf("%s/opnode/%d/", sv2URL, idB)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
+	defer cancel()
+
+	// Ensure proxies are ready
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idA, t.Logger()))
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2URL, idB, t.Logger()))
+
+	// Start batcher A only
+	{
+		optA := WithBatcher(stack.NewL2BatcherID("main", l2A.ID().ChainID()), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", l2A.ID().ChainID()), stack.NewL2ELNodeID("sequencer", l2A.ID().ChainID()))
+		optA.AfterDeploy(orch)
+	}
+
+	// Record initial Safe/LocalSafe A, then wait for A to advance by K
+	readSafe := func(opnode string) (uint64, error) {
+		cli, err := opclient.NewRPC(ctx, t.Logger(), opnode, opclient.WithLazyDial())
+		if err != nil {
+			return 0, err
+		}
+		defer cli.Close()
+		roll := sources.NewRollupClient(cli)
+		st, err := roll.SyncStatus(ctx)
+		if err != nil || st == nil {
+			if err == nil {
+				return 0, fmt.Errorf("nil status")
+			}
+			return 0, err
+		}
+		if st.SafeL2.Number != 0 {
+			return st.SafeL2.Number, nil
+		}
+		return st.LocalSafeL2.Number, nil
+	}
+	sA0, err := readSafe(opnodeA)
+	t.Require().NoError(err)
+	// Let chain A produce a few unsafe blocks so the batcher has content
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := l2A.L2ELNode(match.FirstL2EL).EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if ref.Number < 5 {
+			return fmt.Errorf("waiting for >= 5 blocks, got %d", ref.Number)
+		}
+		return nil
+	})
+	K := uint64(2)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeA, sA0+K, t.Logger()))
+
+	// Now start batcher B
+	{
+		optB := WithBatcher(stack.NewL2BatcherID("main", l2B.ID().ChainID()), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", l2B.ID().ChainID()), stack.NewL2ELNodeID("sequencer", l2B.ID().ChainID()))
+		optB.AfterDeploy(orch)
+	}
+	sB0, err := readSafe(opnodeB)
+	t.Require().NoError(err)
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := l2B.L2ELNode(match.FirstL2EL).EthClient().BlockRefByLabel(ctx, eth.Unsafe)
+		if err != nil {
+			return err
+		}
+		if ref.Number < 5 {
+			return fmt.Errorf("waiting for >= 5 blocks, got %d", ref.Number)
+		}
+		return nil
+	})
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, opnodeB, sB0+K, t.Logger()))
 }

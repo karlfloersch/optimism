@@ -306,6 +306,21 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 			// Add chain to supervisor
 			_, err = s.sup.AddChain(l1el.userRPC, l1cl.beacon.BeaconAddr(), l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
 			orch.p.Require().NoError(err)
+
+			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
+			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
+			if cid, ok := l2el.id.ChainID().Uint64(); ok {
+				clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
+				if _, ok2 := orch.l2CLs.Get(clID); !ok2 {
+					orch.l2CLs.Set(clID, &L2CLNode{
+						id:      clID,
+						userRPC: fmt.Sprintf("%s/opnode/%d/", s.HTTP(), cid),
+						p:       orch.P(),
+						logger:  orch.P().Logger(),
+						el:      l2el.id,
+					})
+				}
+			}
 		}
 
 		// Wait for HTTP
@@ -354,6 +369,21 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 			// Add chain to supervisor with custom confirm depth
 			_, err = s.sup.AddChain(l1el.userRPC, l1cl.beacon.BeaconAddr(), l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
 			orch.p.Require().NoError(err)
+
+			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
+			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
+			if cid, ok := l2el.id.ChainID().Uint64(); ok {
+				clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
+				if _, ok2 := orch.l2CLs.Get(clID); !ok2 {
+					orch.l2CLs.Set(clID, &L2CLNode{
+						id:      clID,
+						userRPC: fmt.Sprintf("%s/opnode/%d/", s.HTTP(), cid),
+						p:       orch.P(),
+						logger:  orch.P().Logger(),
+						el:      l2el.id,
+					})
+				}
+			}
 		}
 
 		// Wait for HTTP
@@ -371,8 +401,7 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 // WithSV2TwoChainMinimalDepth composes a minimal two-chain setup without CLs and starts a single SV2 across both chains,
 // using a custom L1 confirmation depth for cross-safety gating.
 func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orchestrator] {
-	// capture orchestrator for later PostHydrate batcher start
-	var captured *Orchestrator
+	// no captured orchestrator needed in AfterDeploy variant
 	// Gate to assert the L2 network count after hydration
 	gateTwo := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
 		sys.T().Gate().Lenf(sys.L2Networks(), 2, "Must have exactly %v chains", 2)
@@ -389,18 +418,13 @@ func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orch
 				cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2URL, v)}
 			}
 		}),
-		// capture orchestrator pointer
-		stack.AfterDeploy(func(orch *Orchestrator) { captured = orch }),
-		// Start batchers for both default chains after hydration (when CL shims are registered)
-		stack.PostHydrate[*Orchestrator](func(sys stack.System) {
-			sys.T().Logger().Info("Starting batchers for SV2 two-chain (post-hydrate)")
-			if captured == nil {
-				return
-			}
+		// start batchers in AfterDeploy (SV2 HTTP + CL shims are ready)
+		stack.AfterDeploy(func(orch *Orchestrator) {
+			orch.P().Logger().Info("Starting batchers for SV2 two-chain (after-deploy)")
 			optA := WithBatcher(stack.NewL2BatcherID("main", DefaultL2AID), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", DefaultL2AID), stack.NewL2ELNodeID("sequencer", DefaultL2AID))
-			optA.AfterDeploy(captured)
+			optA.AfterDeploy(orch)
 			optB := WithBatcher(stack.NewL2BatcherID("main", DefaultL2BID), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", DefaultL2BID), stack.NewL2ELNodeID("sequencer", DefaultL2BID))
-			optB.AfterDeploy(captured)
+			optB.AfterDeploy(orch)
 		}),
 		gateTwo,
 	)
