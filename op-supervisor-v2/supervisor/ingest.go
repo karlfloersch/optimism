@@ -102,11 +102,13 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 			return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
 		}
 		derivedRef := ref.BlockRef()
-		if err := local.AddDerived(l1Ref, derivedRef, types.RevisionAny); err != nil {
+		if err := addDerivedWithDiagonalSplit(ctx, l2, local, rollupCfg, l1Ref, derivedRef); err != nil {
 			return err
 		}
 		if cross != nil {
-			_ = cross.AddDerived(l1Ref, derivedRef, types.RevisionAny)
+			if err := addDerivedWithDiagonalSplit(ctx, l2, cross, rollupCfg, l1Ref, derivedRef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -114,26 +116,48 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 
 // ingestLocalOnlyRange appends only local-safe links for [start,end] (inclusive), without writing logs.
 func ingestLocalOnlyRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client, local *fromda.DB, rollupCfg *sources.L2ClientConfig, start, end uint64) error {
-    for n := start; n <= end; n++ {
-        env, err := l2.PayloadByNumber(ctx, n)
-        if err != nil {
-            return err
-        }
-        ref, err := derive.PayloadToBlockRef(rollupCfg.RollupCfg, env.ExecutionPayload)
-        if err != nil {
-            return err
-        }
-        l1Source := ref.L1Origin
-        l1Ref, err := l1.BlockRefByNumber(ctx, l1Source.Number)
-        if err != nil {
-            return err
-        }
-        if l1Ref.Hash != l1Source.Hash {
-            return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
-        }
-        if err := local.AddDerived(l1Ref, ref.BlockRef(), types.RevisionAny); err != nil {
-            return err
-        }
-    }
-    return nil
+	for n := start; n <= end; n++ {
+		env, err := l2.PayloadByNumber(ctx, n)
+		if err != nil {
+			return err
+		}
+		ref, err := derive.PayloadToBlockRef(rollupCfg.RollupCfg, env.ExecutionPayload)
+		if err != nil {
+			return err
+		}
+		l1Source := ref.L1Origin
+		l1Ref, err := l1.BlockRefByNumber(ctx, l1Source.Number)
+		if err != nil {
+			return err
+		}
+		if l1Ref.Hash != l1Source.Hash {
+			return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
+		}
+		if err := addDerivedWithDiagonalSplit(ctx, l2, local, rollupCfg, l1Ref, ref.BlockRef()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addDerivedWithDiagonalSplit appends a (source,derived) link to the given DB,
+// splitting a diagonal increment (source+1, derived+1) into two ordered writes:
+// (source+1, derived) followed by (source+1, derived+1).
+func addDerivedWithDiagonalSplit(ctx context.Context, l2 *sources.L2Client, db *fromda.DB, rollupCfg *sources.L2ClientConfig, l1Ref eth.BlockRef, derivedRef eth.BlockRef) error {
+	if last, err := db.Last(); err == nil {
+		if last.Source.Number+1 == l1Ref.Number && last.Derived.Number+1 == derivedRef.Number {
+			prevEnv, perr := l2.PayloadByNumber(ctx, last.Derived.Number)
+			if perr != nil {
+				return perr
+			}
+			prevRef, derr := derive.PayloadToBlockRef(rollupCfg.RollupCfg, prevEnv.ExecutionPayload)
+			if derr != nil {
+				return derr
+			}
+			if err := db.AddDerived(l1Ref, prevRef.BlockRef(), types.RevisionAny); err != nil {
+				return err
+			}
+		}
+	}
+	return db.AddDerived(l1Ref, derivedRef, types.RevisionAny)
 }
