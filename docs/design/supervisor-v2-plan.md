@@ -122,12 +122,21 @@ Progress: Two-chain smokes green.
 - Idempotency for denylist/rollback executions
 - Read-only/dry-run flag to compute proposals without executing rollbacks
 - Optional: expose denylist list/recent endpoints
+- Test infra improvements (reduce boilerplate; expand adversarial coverage)
 
 Implementation checklist (TODOs / caveats):
 - [ ] Persist denylist (bolt/sqlite) and append-only audit log in SV2 datadir
 - [ ] Idempotent operations on payloadID
 - [ ] Optional list/recent endpoints for denylist visibility
 - [ ] Add a "dry-run"/read-only flag to disable rollback execution while still computing proposals
+- [ ] Preset improvements to reduce boilerplate in tests:
+  - Provide a preset that auto-wires batchers to SV2 `/opnode/{chainId}/` and waits for `/v1/sync_status` readiness
+  - Consolidate common waits into helpers (`WaitSV2Ready`, `WaitSafeAtOrAbove`, etc.) and use across tests
+- [ ] Increase test coverage and adversarial cases:
+  - Add tests that simulate EL/op-node restart windows during rollback to ensure stability
+  - Add multi-chain skew and bottleneck tests (one chain lags; cross_finalized monotonicity)
+  - Add denylist auto-rollback tests across chains (already present) and extend with randomized heights
+  - If flap is observed in practice, add a minimal reproducer (e.g., frequent rollbacks or rapid batcher churn); otherwise avoid speculative cooldown logic
 - Caveat: no GC for denylist entries
 
 
