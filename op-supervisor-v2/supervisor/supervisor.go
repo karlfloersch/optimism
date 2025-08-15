@@ -237,6 +237,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// v1-compatible sync status endpoint
+	s.addV1SyncStatusEndpoint(mux)
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		var chainID uint64
@@ -424,6 +426,105 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		})
 	}
 	return mux
+}
+
+// addV1SyncStatusEndpoint registers GET /v1/sync_status returning eth.SupervisorSyncStatus and 503 until ready.
+func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
+	mux.HandleFunc("/v1/sync_status", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		chains := make(map[uint64]*chainHandle, len(s.chains))
+		for id, h := range s.chains {
+			chains[id] = h
+		}
+		s.mu.Unlock()
+
+		ready := false
+		out := eth.SupervisorSyncStatus{Chains: make(map[eth.ChainID]*eth.SupervisorChainSyncStatus)}
+		var haveMinL1 bool
+		var minL1 eth.L1BlockRef
+		var haveSafeTs bool
+		var minSafeTs uint64
+		var haveFinTs bool
+		var minFinTs uint64
+
+		ctx := r.Context()
+		for id, h := range chains {
+			var st *eth.SyncStatus
+			if h != nil && h.managedOpNodeUserRPC != "" {
+				if ss, err := s.fetchSyncStatus(ctx, h.managedOpNodeUserRPC); err == nil && ss != nil {
+					st = ss
+				}
+			}
+			var localID, crossID eth.BlockID
+			var localUnsafe eth.BlockRef
+			var finalizedID eth.BlockID
+			if h != nil {
+				h.stateMu.Lock()
+				if h.localDB != nil {
+					if pair, err := h.localDB.Last(); err == nil {
+						localID = pair.Derived.ID()
+					}
+				}
+				if h.crossDB != nil {
+					if pair, err := h.crossDB.Last(); err == nil {
+						crossID = pair.Derived.ID()
+					}
+				}
+				h.stateMu.Unlock()
+			}
+			if st != nil {
+				localUnsafe = st.UnsafeL2.BlockRef()
+				finalizedID = st.FinalizedL2.ID()
+				if !haveMinL1 || st.CurrentL1.Number < minL1.Number || (st.CurrentL1.Number == minL1.Number && st.CurrentL1.Hash != minL1.Hash) {
+					minL1 = st.CurrentL1
+					haveMinL1 = true
+				}
+				if st.SafeL2.Number != 0 {
+					if !haveSafeTs || st.SafeL2.Time < minSafeTs {
+						minSafeTs = st.SafeL2.Time
+						haveSafeTs = true
+					}
+				}
+				if st.FinalizedL2.Number != 0 {
+					if !haveFinTs || st.FinalizedL2.Time < minFinTs {
+						minFinTs = st.FinalizedL2.Time
+						haveFinTs = true
+					}
+				}
+			}
+			if st != nil && (st.UnsafeL2.Number > 0 || st.SafeL2.Number > 0 || st.FinalizedL2.Number > 0) {
+				ready = true
+			}
+			if localID.Number > 0 || crossID.Number > 0 {
+				ready = true
+			}
+			crossUnsafe := eth.BlockID{}
+			if st != nil {
+				crossUnsafe = st.UnsafeL2.ID()
+			}
+			out.Chains[eth.ChainIDFromUInt64(id)] = &eth.SupervisorChainSyncStatus{
+				LocalUnsafe: localUnsafe,
+				LocalSafe:   localID,
+				CrossUnsafe: crossUnsafe,
+				CrossSafe:   crossID,
+				Finalized:   finalizedID,
+			}
+		}
+		if haveMinL1 {
+			out.MinSyncedL1 = minL1
+		}
+		if haveSafeTs {
+			out.SafeTimestamp = minSafeTs
+		}
+		if haveFinTs {
+			out.FinalizedTimestamp = minFinTs
+		}
+		if !ready {
+			http.Error(w, "supervisor status tracker not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
 }
 
 // helper for future graceful shutdowns of subprocess

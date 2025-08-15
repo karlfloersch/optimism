@@ -589,39 +589,23 @@ func TestSupervisorV2TwoChainSafeProgressionRequiresBatcher(gt *testing.T) {
 		t.Require().NoError(err)
 	}
 
-	// Batchers are already started by the preset; proceed to assert cross-safe advances
-
-	// Wait for local_safe to appear first, then for cross_safe to become non-zero on each chain
-	waitCrossSafe := func(net stack.L2Network) error {
-		chainID := net.RollupConfig().L2ChainID.Uint64()
-		// phase 1: ensure local_safe shows up (ingest ready)
-		if err := retry.Do0(ctx, 160, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
-			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			var out map[string]any
-			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
-				return derr
-			}
-			// local_safe.Number or local_safe.number
-			var localN uint64
-			if ls, ok := out["local_safe"].(map[string]any); ok {
-				if v, ok2 := ls["Number"].(float64); ok2 {
-					localN = uint64(v)
-				} else if v2, ok3 := ls["number"].(float64); ok3 {
-					localN = uint64(v2)
-				}
-			}
-			if localN == 0 {
-				return fmt.Errorf("waiting for local_safe > 0")
-			}
-			return nil
-		}); err != nil {
+	// Batchers are already started by the preset; wait for v1-compatible readiness (/v1/sync_status)
+	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		resp, err := http.Get(fmt.Sprintf("%s/v1/sync_status", sv2URL))
+		if err != nil {
 			return err
 		}
-		// phase 2: wait for cross_safe to advance (cross DB writes visible in /status)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("waiting for v1 sync_status ready, got %d", resp.StatusCode)
+		}
+		return nil
+	})
+
+	// Wait for cross-safe to become non-zero on both chains
+	waitCrossSafe := func(net stack.L2Network) error {
+		chainID := net.RollupConfig().L2ChainID.Uint64()
+		// now wait for cross_safe to advance (cross DB writes visible in /status)
 		return retry.Do0(ctx, 200, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
 			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
 			if err != nil {
