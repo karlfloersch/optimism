@@ -239,6 +239,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	})
 	// v1-compatible sync status endpoint
 	s.addV1SyncStatusEndpoint(mux)
+	// v1-compatible query endpoints
+	s.addV1QueryEndpoints(mux)
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		var chainID uint64

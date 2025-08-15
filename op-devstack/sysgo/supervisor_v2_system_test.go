@@ -136,6 +136,11 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 		// Ensure SV2 denylist contains this ID before rollback
 		sv2URL := os.Getenv("SV2_DENYLIST_URL")
 		t.Require().NotEmpty(sv2URL)
+		{
+			ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+			defer cancel2()
+			t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+		}
 		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 		_ = retry.Do0(ctx, 40, &retry.FixedStrategy{Dur: 150 * time.Millisecond}, func() error {
 			resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, chainID, prePayloadID))
@@ -160,6 +165,11 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 	// Trigger rollback via Supervisor admin API (stops op-node, rolls back EL, restarts op-node)
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	// Roll back to an absolute block number (preRef.Number - 1)
 	toNum := preRef.Number - 1
 	reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
@@ -296,6 +306,11 @@ func TestSupervisorV2TwoChainRollbackIsolation(gt *testing.T) {
 	// Roll back chain A to preA-1 via SV2 admin
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	toNum := preA.Number - 1
 	reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
 	resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, idA), "application/json", bytes.NewReader(reqBody))
@@ -422,6 +437,11 @@ func TestSupervisorV2TwoChainCrossSafeProgress(gt *testing.T) {
 	// Query SV2 /status for chain A and verify local_safe and (eventually) cross_safe are non-zero
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	chainID := l2A.RollupConfig().L2ChainID.Uint64()
 	// poll until both fields appear (SV2 persists asynchronously)
 	_ = retry.Do0(ctx, 80, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
@@ -489,6 +509,11 @@ func TestSupervisorV2SingleChainSafeProgresses(gt *testing.T) {
 	defer cancel()
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	chainID := system.L2Networks()[0].RollupConfig().L2ChainID.Uint64()
 	rpc, err := opclient.NewRPC(ctx, t.Logger(), fmt.Sprintf("%s/opnode/%d/", sv2URL, chainID), opclient.WithLazyDial())
 	t.Require().NoError(err)
@@ -817,6 +842,11 @@ func TestSupervisorV2TwoChainValidExecMessageStable(gt *testing.T) {
 	// Also ensure SV2 reports cross_safe for chain B at or beyond the Execute tx inclusion height
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	chainID := l2B.RollupConfig().L2ChainID.Uint64()
 	_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
 		resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
@@ -1271,6 +1301,11 @@ func TestSupervisorV2TwoChainExecReorgsOnRemoteInitRollback(gt *testing.T) {
 	// Roll back chain A to remove the initiating message block; do NOT touch chain B.
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	chainIDA := l2A.RollupConfig().L2ChainID.Uint64()
 	toNum := initRef.Number - 1
 	body, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})

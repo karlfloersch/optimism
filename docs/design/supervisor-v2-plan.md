@@ -16,7 +16,7 @@ Key constraints and context:
 - Cross-finalized only initially (no safe overlay). L1 scope is configurable: unsafe | safe | finalized (default: finalized). If safe, use l1_conf_depth.
 - Ingest local-safe {L1 origin, L2 ref} via in-process op-node events (PromoteLocalSafeEvent). Build cross-finalized = min over chains of eligible local-safe (per L1 scope).
 - Run validity checks at cross-finalized; for violations: add deterministic payloadID to denylist and rollback EL/op-node to H-1. Denylist is persisted forever (no TTL/GC).
-- Status/metrics: Prometheus-compatible; simple JSON status. v1 RPC compatibility (including CheckAccessList) comes after runner is green.
+- Status/HTTP: simple JSON status and minimal v1-like query endpoints. Add readiness via /v1/sync_status.
 - Do not add legacy interop activation or heavy rewinder/syncnode logic. Keep code minimal; tests must accompany changes.
 """
 
@@ -99,56 +99,58 @@ Implementation checklist (TODOs / caveats):
 Progress: Implemented and exercised by smoke tests (auto-rollback via checker path).
 
 
-### Phase 3 – Two-chain stability and observability
+### Phase 3 – Two-chain stability
 
-- Make cross-finalized computation resilient (monotonic, per-chain readiness)
-- Health/status endpoints
-- Metrics (loop latency, proposals, executed actions)
+- Make cross-finalized computation resilient and monotonic
+- Health/status endpoints and readiness
 
 Deliverables:
 - Two-chain smoke suite green and stable
-- Basic metrics and status JSON
+- Status JSON + readiness endpoint
 
 Implementation checklist (TODOs / caveats):
 - [x] Status JSON includes per-chain heads and `cross_finalized`, `l1_scope_label`
-- [ ] Prometheus metrics: loop latency, proposals, executed actions, cooldowns
-- [ ] Cooldowns for rollbacks per chain (prevent flap)
-- Caveat: surface bottleneck chain for cross-finalized
+- [x] Readiness: `/v1/sync_status` returns 503 until initialized, 200 when ready
+- Caveat: surface bottleneck chain for cross-finalized (via status/logs)
 
-Progress: Two-chain smokes green; metrics/cooldowns pending.
+Progress: Two-chain smokes green.
 
 
-### Phase 4 – External inputs (optional)
+### Phase 4 – Hardening and polish
 
-- Add a minimal external checker adapter (e.g., Solana attestation)
+- Durable denylist storage and audit log
+- Idempotency for denylist/rollback executions
+- Read-only/dry-run flag to compute proposals without executing rollbacks
+- Optional: expose denylist list/recent endpoints
+
+Implementation checklist (TODOs / caveats):
+- [ ] Persist denylist (bolt/sqlite) and append-only audit log in SV2 datadir
+- [ ] Idempotent operations on payloadID
+- [ ] Optional list/recent endpoints for denylist visibility
+- [ ] Add a "dry-run"/read-only flag to disable rollback execution while still computing proposals
+- Caveat: no GC for denylist entries
+
+
+### Phase 5 – External inputs (optional, end)
+
+- Add a minimal external checker adapter (e.g., Solana attestation) as a late, optional feature
 
 Deliverables:
 - Example external checker, feature-flagged
 
 Implementation checklist (TODOs / caveats):
-- [ ] Minimal HTTP client poller for external signal → Proposal
+- [ ] Minimal HTTP client poller for external signal → Proposal (feature-flagged)
 - [ ] Idempotent enqueue/execute
-- Caveat: feature-flagged off by default
-
-
-### Phase 5 – Hardening and polish
-
-- Cooldowns and idempotency for rollbacks (per chain)
-- Durable denylist storage and audit log
-
-Implementation checklist (TODOs / caveats):
-- [ ] Persist denylist (bolt/sqlite) and append-only audit log in SV2 datadir
-- [ ] Idempotent operations on payloadID; expose list/recent endpoints
-- Caveat: no GC
+- Caveat: off by default
 
 
 ### RPC compatibility (v1 surface on SV2)
 
-- Implement v1-compatible RPC in SV2 (CrossSafe/LocalSafe/Unsafe/Finalized/SyncStatus/SuperRoot/CheckAccessList)
-
-Implementation checklist (TODOs / caveats):
-- [ ] Implement read-only RPCs mapped to SV2 state
-- [ ] Defer CheckAccessList parity until after runner is stable
+- Implement v1-compatible HTTP endpoints mapped to SV2 state
+- Current endpoints:
+  - `/v1/sync_status` (readiness: 503 until initialized)
+  - `/v1/local_safe`, `/v1/cross_safe`, `/v1/finalized`, `/v1/finalized_l1`, `/v1/cross_derived_to_source`
+  - `/v1/superroot_at_ts` returns 501 Not Implemented (SV2 does not support SuperRoot)
 
 
 ### Later (out of initial scope)
@@ -157,10 +159,9 @@ Implementation checklist (TODOs / caveats):
 - Action queue; sidecar subscriptions (if needed)
 
 
-### Status and metrics
+### Status
 
-- Status: per-chain L2 heads (unsafe/safe/finalized), `local_safe`, `cross_safe` head (if present), `cross_finalized`, `l1_scope_label`
-- Metrics: Prometheus counters/gauges (pending)
+- Status: per-chain L2 heads (unsafe/safe/finalized), `local_safe`, `cross_safe` head (if present), `cross_finalized`, `l1_scope_label`, readiness via `/v1/sync_status`
 
 
 ### Testing status (as of now)
@@ -183,10 +184,10 @@ Implementation checklist (TODOs / caveats):
 
 - [x] Phase 1 runner + single/two-chain tests
 - [x] Phase 2 checker interface + basic checks
-- [ ] Phase 3 status/metrics + stability (metrics/cooldowns remaining)
-- [ ] Phase 4 external check (optional)
-- [ ] Phase 5 denylist persistence + audits
-- [ ] Phase 6 backwards-compatibility validation
+- [x] Phase 3 stability + readiness
+- [ ] Phase 4 hardening (denylist persistence, idempotency, dry-run)
+- [ ] Phase 5 external inputs (optional)
+- [ ] Backwards-compatibility validation (separate doc)
 
 
 ### Open questions

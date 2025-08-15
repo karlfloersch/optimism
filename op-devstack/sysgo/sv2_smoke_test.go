@@ -286,6 +286,12 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 	// Ensure H is SAFE on A before rollback
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// Gate on SV2 readiness
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 
@@ -458,6 +464,12 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 	// Ensure H is SAFE on B before rollback
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// Gate on SV2 readiness
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 
@@ -615,6 +627,12 @@ func TestSV2HeightCheckerAutoRollbackSingleChain(gt *testing.T) {
 	{
 		sv2URL := os.Getenv("SV2_DENYLIST_URL")
 		t.Require().NotEmpty(sv2URL)
+		// Gate on SV2 readiness
+		{
+			ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+			defer cancel2()
+			t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+		}
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
 		defer cancel2()
 		t.Require().NoError(WaitSV2CrossFinalizedAtLeast(ctx2, sv2URL, target))
@@ -643,6 +661,12 @@ func TestSV2HeightCheckerAutoRollbackSingleChain(gt *testing.T) {
 	{
 		sv2URL := os.Getenv("SV2_DENYLIST_URL")
 		t.Require().NotEmpty(sv2URL)
+		// Gate on SV2 readiness
+		{
+			ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+			defer cancel2()
+			t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+		}
 		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 		_ = retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
 			resp, err := http.Get(fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", sv2URL, chainID, preHash))
@@ -724,6 +748,12 @@ func TestSV2SingleChainSafeAdvancesQuick(gt *testing.T) {
 	// Quick-fail checks: ensure SV2 URL is exposed and op-node proxy is ready
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// readiness gate
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	l2Net := system.L2Networks()[0]
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 	t.Require().NoError(WaitOpNodeProxyReady(t.Ctx(), sv2URL, chainID, t.Logger()))
@@ -762,6 +792,12 @@ func TestSV2TwoChainSafeProgressionWithBatchers(gt *testing.T) {
 	// Environment and URLs
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// Gate on SV2 readiness
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 	opnodeA := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
@@ -892,6 +928,12 @@ func TestSV2TwoChainSafeProgressionSerialized(gt *testing.T) {
 	// Environment and URLs
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// Gate on SV2 readiness
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 	idA := l2A.RollupConfig().L2ChainID.Uint64()
 	idB := l2B.RollupConfig().L2ChainID.Uint64()
 	opnodeA := fmt.Sprintf("%s/opnode/%d/", sv2URL, idA)
@@ -1007,6 +1049,12 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
+	// Gate on SV2 readiness
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
 
 	// Ensure op-node proxy is ready and Safe head advances to target
 	ctx, cancel := context.WithTimeout(t.Ctx(), 2*time.Minute)
@@ -1064,3 +1112,5 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 		return nil
 	}))
 }
+
+// superroot test removed

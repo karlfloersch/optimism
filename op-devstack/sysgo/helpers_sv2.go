@@ -100,6 +100,21 @@ func WaitDenylistContains(ctx context.Context, sv2URL string, chainID uint64, pa
 	})
 }
 
+// WaitSV2Ready polls the SV2 v1-compatible sync status endpoint until it returns 200 OK.
+func WaitSV2Ready(ctx context.Context, sv2URL string) error {
+	return retry.Do0(ctx, 160, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		resp, err := http.Get(fmt.Sprintf("%s/v1/sync_status", sv2URL))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("not ready: %d", resp.StatusCode)
+		}
+		return nil
+	})
+}
+
 // GetBlockHashByNumber fetches the block hash at a given L2 number using eth_getBlockByNumber.
 func GetBlockHashByNumber(ctx context.Context, rpc opclient.RPC, num uint64) (string, error) {
 	var out struct {
