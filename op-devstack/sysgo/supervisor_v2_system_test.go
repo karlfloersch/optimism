@@ -591,35 +591,58 @@ func TestSupervisorV2TwoChainSafeProgressionRequiresBatcher(gt *testing.T) {
 
 	// Batchers are already started by the preset; proceed to assert cross-safe advances
 
-	// Wait for cross-safe to become non-zero on both chains
+	// Wait for local_safe to appear first, then for cross_safe to become non-zero on each chain
 	waitCrossSafe := func(net stack.L2Network) error {
 		chainID := net.RollupConfig().L2ChainID.Uint64()
-		return retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		// phase 1: ensure local_safe shows up (ingest ready)
+		if err := retry.Do0(ctx, 160, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
 			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
 			if err != nil {
 				return err
 			}
 			defer resp.Body.Close()
-			var out struct {
-				Unsafe *struct {
-					Number uint64 `json:"number"`
-				}
-				LocalSafe *struct {
-					Number uint64 `json:"number"`
-				}
-				Safe *struct {
-					Number uint64 `json:"number"`
-				}
-				CrossSafe *struct {
-					Number uint64 `json:"number"`
-				}
-			}
+			var out map[string]any
 			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
 				return derr
 			}
-			t.Logf("sv2 status (waiting) chain=%d unsafe=%v local_safe=%v safe=%v cross_safe=%v", chainID,
-				numPtr(out.Unsafe), numPtr(out.LocalSafe), numPtr(out.Safe), numPtr(out.CrossSafe))
-			if out.CrossSafe == nil || out.CrossSafe.Number == 0 {
+			// local_safe.Number or local_safe.number
+			var localN uint64
+			if ls, ok := out["local_safe"].(map[string]any); ok {
+				if v, ok2 := ls["Number"].(float64); ok2 {
+					localN = uint64(v)
+				} else if v2, ok3 := ls["number"].(float64); ok3 {
+					localN = uint64(v2)
+				}
+			}
+			if localN == 0 {
+				return fmt.Errorf("waiting for local_safe > 0")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		// phase 2: wait for cross_safe to advance (cross DB writes visible in /status)
+		return retry.Do0(ctx, 200, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			var out map[string]any
+			if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+				return derr
+			}
+			// for logging
+			t.Logf("sv2 status (waiting) chain=%d body=%v", chainID, out)
+			var crossN uint64
+			if cs, ok := out["cross_safe"].(map[string]any); ok {
+				if v, ok2 := cs["Number"].(float64); ok2 {
+					crossN = uint64(v)
+				} else if v2, ok3 := cs["number"].(float64); ok3 {
+					crossN = uint64(v2)
+				}
+			}
+			if crossN == 0 {
 				return fmt.Errorf("waiting for cross_safe > 0")
 			}
 			return nil

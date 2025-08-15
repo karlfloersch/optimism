@@ -206,7 +206,7 @@ func (a *crosssafeAdapter) CandidateCrossSafe(chain eth.ChainID) (types.DerivedB
 	// build full derived BlockRef
 	env, e := a.l2.PayloadByNumber(context.Background(), seal.Number)
 	if e != nil {
-		return types.DerivedBlockRefPair{}, err
+		return types.DerivedBlockRefPair{}, e
 	}
 	br, derr := derive.PayloadToBlockRef(a.l2.RollupConfig(), env.ExecutionPayload)
 	if derr != nil {
