@@ -134,11 +134,8 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 						}
 					}
 				}
-				// prefer local-safe when available, but fall back to unsafe in sequencer-only test mode
+				// Ingest strictly up to local-safe; skip until local-safe progresses
 				target := st.LocalSafeL2
-				if target.Number == 0 {
-					target = st.UnsafeL2
-				}
 				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2)
 				if target.Number == 0 {
 					continue
@@ -166,15 +163,12 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 					}
 					s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target.Number)
 					if err := ingestRange(ctxPoll, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); err != nil {
-						// If logs write conflicts due to gaps, fall back to writing just local-safe links to catch up
-						s.log.Warn("ingest error", "err", err)
-						if e2 := ingestLocalOnlyRange(ctxPoll, l1, l2, h.localDB, sources.L2ClientDefaultConfig(rcfg, true), start, target.Number); e2 != nil {
-							s.log.Warn("local-only ingest error", "err", e2)
-						}
+						// Defer and retry next tick to preserve ordering; avoid diagonal local-only backfills
+						s.log.Info("ingest: deferred", "err", err)
 					}
-					// minimal seeding: if local DB is still empty, seed the first derived entry from current unsafe head
+					// minimal seeding: if local DB is still empty, seed the first derived entry from current local-safe head
 					if h.localDB.IsEmpty() {
-						// try to map current target (unsafe fallback) to derived refs
+						// try to map current target (local-safe) to derived refs
 						env, err := l2.PayloadByNumber(ctxPoll, target.Number)
 						if err == nil {
 							if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
@@ -275,7 +269,12 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 					}
 					s.log.Info("crosssafe: run", "chain", chainID)
 					if err := adapter.runCrossSafeOnce(s.log, s.getLinker()); err != nil {
-						s.log.Warn("crosssafe: error", "chain", chainID, "err", err)
+						msg := err.Error()
+						if strings.Contains(msg, "future data") || strings.Contains(msg, "past last entry") {
+							s.log.Info("crosssafe: waiting for ingest", "chain", chainID, "err", err)
+						} else {
+							s.log.Warn("crosssafe: error", "chain", chainID, "err", err)
+						}
 					}
 					if cs, err := h.crossDB.Last(); err == nil {
 						s.log.Info("crosssafe: head", "chain", chainID, "derived", cs.Derived)
