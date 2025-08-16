@@ -106,7 +106,7 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 		_ = s.srv.Serve(ln)
 	}()
 
-	// Legacy path removed: managed mode supersedes explicit op-node RPC plumbing here.
+	// Legacy path removed: embedded mode supersedes explicit op-node RPC plumbing here.
 }
 
 func (s *SupervisorV2) Stop() {
@@ -167,7 +167,7 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	s.p.Require().NoError(err)
 	copy(jwtSecret[:], b)
 
-	// Register the chain in multi-chain mode; this starts the managed op-node and the finalized runner
+	// Register the chain in multi-chain mode; this starts the embedded op-node and the finalized runner
 	_, err = s.sup.AddChain(l1EL.userRPC, l1CL.beacon.BeaconAddr(), l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, 40)
 	s.p.Require().NoError(err)
 }
