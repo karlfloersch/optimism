@@ -6,9 +6,9 @@ Note: I am writing this as a draft and may contain confusing or incomplete infor
 Refactor the supervisor so that it does not require significant modifications to the op-node. Pre-interop hard fork op-node API should be sufficient for integrating this Supervisor v2 and thereby enabling interop.
 
 ## Architecture
-supervisor-v2 embeds an op-node (managed mode) for each chain in the dependency set (note: these op-nodes DO NOT use the interop hardfork; they should be pectra op-nodes, and no dependency-set information is sent to the op-node).
+supervisor-v2 embeds an op-node (embedded mode) for each chain in the dependency set (note: these op-nodes DO NOT use the interop hardfork; they should be pectra op-nodes, and no dependency-set information is sent to the op-node).
 
-- Managed/embedded op-node: supervisor constructs and runs the op-node in-process using op-node libraries.
+- Embedded op-node: supervisor constructs and runs the op-node in-process using op-node libraries.
 - RPC exposure:
   - Devstack/tests: dial the embedded op-node user RPC directly (typed client).
   - CLI: exposes a reverse-proxy under `/opnode/` on the supervisor HTTP server (default on) for single-port UX.
@@ -62,7 +62,7 @@ Implementation plan
 - [x] Add a devstack preset and tests without affecting existing suites.
 
 Current status (M1):
-- Managed mode implemented: supervisor embeds op-node and polls heads; CLI supports managed-only and reverse-proxies op-node RPC at `/opnode/` (default on).
+- Embedded mode implemented: supervisor embeds op-node and polls heads; CLI supports embedding only and reverse-proxies op-node RPC at `/opnode/` (default on).
 - Devstack: dedicated preset (no external CL). Supervisor v2 hydrates a typed CL frontend to the embedded op-node; smoke test passes and asserts L2 advancement.
 - Sysgo: `scripts/sysgo-smoke.sh` passes (sequencing and receipt confirmed).
 
@@ -76,7 +76,7 @@ Implementation plan
 - [x] System test: sysgo-based test validates mechanics — head regresses immediately after rollback and re-advances back to at least the pre-rollback height (no denylist yet, so it returns to the same tip).
 
 Current status (M2):
-- Admin rollback endpoint implemented in `op-supervisor-v2` and managed op-node lifecycle supports replace-and-restart.
+- Admin rollback endpoint implemented in `op-supervisor-v2` and embedded op-node lifecycle supports replace-and-restart.
 - Sysgo preset test `TestSupervisorV2Rollback` added; asserts rollback regression below pre-height and recovery back to at least the pre-height. The test now also validates that the replaced block at height H has a different hash, and the parent at H-1 remains unchanged (chain continuity up to H-1).
 - Rollback implementation is abstracted via `rollbackEL(...)` (currently backed by `debug_setHead`). TODO: replace with Engine API `engine_forkchoiceUpdated` against the authenticated EL RPC for broader EL compatibility (e.g., reth), without changing finalized.
 - Rollback API is now absolute-only (`to_block_number`). In multi-chain mode, the endpoint requires `?chainId=` to scope the operation.

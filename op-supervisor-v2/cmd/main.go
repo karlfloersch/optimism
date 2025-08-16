@@ -23,12 +23,12 @@ import (
 func main() {
 	app := &cli.App{
 		Name:  "op-supervisor-v2",
-		Usage: "Supervisor v2 prototype: runs embedded op-node (managed mode) and exposes health",
+		Usage: "Supervisor v2 prototype: runs embedded op-node and exposes health",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
 			&cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
 			&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose embedded op-node RPC under /opnode/"},
-			// Managed (embedded op-node) mode (always on)
+			// Embedded op-node mode (always on)
 			&cli.StringFlag{Name: "l1.rpc", Usage: "L1 execution RPC endpoint"},
 			&cli.StringFlag{Name: "beacon.addr", Usage: "L1 beacon endpoint for blobs (e.g. http://localhost:5052)"},
 			&cli.StringFlag{Name: "l2.authrpc", Usage: "L2 execution Engine API (auth RPC) endpoint"},
@@ -62,7 +62,7 @@ func main() {
 			pollInt := ctx.Duration("poll.interval")
 			confirmDepth := ctx.Uint("confirm.depth")
 
-			// Managed (embedded) op-node only
+			// Embedded op-node only
 			l1RPC := ctx.String("l1.rpc")
 			beacon := ctx.String("beacon.addr")
 			l2Auth := ctx.String("l2.authrpc")
@@ -98,7 +98,7 @@ func main() {
 				return fmt.Errorf("parse rollup.config: %w", err)
 			}
 			if err := sup.StartManaged(l1RPC, beacon, l2Auth, l2User, jwt, &rcfg, pollInt, uint64(confirmDepth)); err != nil {
-				return fmt.Errorf("start managed: %w", err)
+				return fmt.Errorf("start embedded: %w", err)
 			}
 
 			// Wait for interrupt

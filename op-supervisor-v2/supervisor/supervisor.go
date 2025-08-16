@@ -365,7 +365,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {
 			if cfg == nil {
-				http.Error(w, "managed mode not running", http.StatusServiceUnavailable)
+				http.Error(w, "embedded mode not running", http.StatusServiceUnavailable)
 				return
 			}
 			err = s.performRollback(r.Context(), cfg, *req.ToBlockNumber)
@@ -778,7 +778,7 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 	return nil
 }
 
-// performRollback stops the managed op-node, rolls back the EL to an absolute block number
+// performRollback stops the embedded op-node, rolls back the EL to an absolute block number
 // then restarts the op-node and polling.
 func (s *Supervisor) performRollback(ctx context.Context, cfg *embeddedConfig, toBlock uint64) error {
 	// Stop polling and op-node
@@ -800,7 +800,7 @@ func (s *Supervisor) performRollback(ctx context.Context, cfg *embeddedConfig, t
 		return err
 	}
 
-	// Restart managed op-node and polling
+	// Restart embedded op-node and polling
 	s.mu.Lock()
 	userRPC, stopFn2, err := s.StartEmbeddedOpNode(cfg.l1RPC, cfg.beaconAddr, cfg.l2AuthRPC, cfg.jwtSecret, cfg.rcfg)
 	if err != nil {

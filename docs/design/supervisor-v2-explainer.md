@@ -16,7 +16,7 @@ References:
 
 ### How it works
 
-- **Managed op-node per chain**: SV2 starts an embedded op-node and polls heads via a per-chain loop. Op-node remains pre-interop; it does not persist cross-safety.
+- **Embedded op-node per chain**: SV2 starts an embedded op-node and polls heads via a per-chain loop. Op-node remains pre-interop; it does not persist cross-safety.
 - **Local-safe and cross-safe**: SV2 ingests local-safe inputs, applies L1 confirmation-depth gating, and computes cross-safe across chains.
 - **Rollback + denylist** (on cross-invalid):
   1. Add the deterministic payload ID at height H to a per-chain denylist.

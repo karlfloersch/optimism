@@ -19,7 +19,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// chainHandle tracks the managed state for a single chain.
+// chainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
 type chainHandle struct {
 	stateMu sync.Mutex
 
@@ -485,7 +485,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		return err
 	}
 
-	// Restart managed op-node and polling
+	// Restart embedded op-node and polling
 	userRPC, stopFn2, err := s.StartEmbeddedOpNode(h.embeddedCfg.l1RPC, h.embeddedCfg.beaconAddr, h.embeddedCfg.l2AuthRPC, h.embeddedCfg.jwtSecret, h.embeddedCfg.rcfg)
 	if err != nil {
 		return err

@@ -183,7 +183,7 @@ type LocalDerivedEvent struct {
 }
 ```
 
-- Emitted by the managed node when the op-node reports a derivation update:
+- Emitted by the embedded node when the op-node reports a derivation update:
 ```351:359:op-supervisor/supervisor/backend/syncnode/node.go
 func (m *ManagedNode) onDerivationUpdate(pair types.DerivedBlockRefPair) {
   m.emitter.Emit(m.ctx, superevents.LocalDerivedEvent{

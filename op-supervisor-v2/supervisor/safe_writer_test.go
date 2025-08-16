@@ -21,7 +21,7 @@ func TestSafeWriterPersistsLocalMapping(t *testing.T) {
 		t.Fatalf("open dbs: %v", err)
 	}
 
-	// create light L1/L2 clients by reusing manager's dialers is non-trivial in unit tests.
+	// creating light L1/L2 clients by reusing the orchestrator's dialers is non-trivial in unit tests.
 	// Leverage the existing AddChain path to bring up the poller quickly against ephemeral devstack is not desired here.
 	// Instead, do a minimal smoke by invoking ingestRange with nil clients to ensure it short-circuits gracefully.
 	// This test only asserts DB side-effect when ingestRange is called with mocked inputs in integration tests.
