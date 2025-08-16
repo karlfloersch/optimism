@@ -24,13 +24,13 @@ type chainHandle struct {
 	stateMu sync.Mutex
 
 	// runtime state
-	managedOpNodeUserRPC string
-	stopManagedOpNode    func(ctx context.Context) error
-	cancelPoll           context.CancelFunc
-	started              time.Time
+	embeddedOpNodeUserRPC string
+	stopEmbeddedOpNode    func(ctx context.Context) error
+	cancelPoll            context.CancelFunc
+	started               time.Time
 
 	// config for restart/rollback
-	managedCfg *managedConfig
+	embeddedCfg *embeddedConfig
 
 	// v1 DBs per chain
 	logsDB  *logsdb.DB
@@ -44,15 +44,15 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	chainID := rcfg.L2ChainID.Uint64()
 
 	// Start embedded op-node
-	userRPC, stopFn, err := s.StartManagedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
+	userRPC, stopFn, err := s.StartEmbeddedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
 	if err != nil {
 		return 0, err
 	}
 
 	h := &chainHandle{
-		managedOpNodeUserRPC: userRPC,
-		stopManagedOpNode:    stopFn,
-		managedCfg: &managedConfig{
+		embeddedOpNodeUserRPC: userRPC,
+		stopEmbeddedOpNode:    stopFn,
+		embeddedCfg: &embeddedConfig{
 			l1RPC:        l1RPC,
 			beaconAddr:   beaconAddr,
 			l2AuthRPC:    l2AuthRPC,
@@ -94,7 +94,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		// lazy L1 client for ingest
-		l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.managedCfg.l1RPC)
+		l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l1RPC)
 		var l1 *sources.L1Client
 		if l1Cli != nil {
 			l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard))
@@ -124,7 +124,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 				// Ensure L1 client is initialized (may fail early before L1 comes up)
 				if l1 == nil {
 					if l1Cli == nil {
-						if c, e := opclient.NewRPC(ctxPoll, s.log, h.managedCfg.l1RPC); e == nil {
+						if c, e := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l1RPC); e == nil {
 							l1Cli = c
 						}
 					}
@@ -264,7 +264,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 						l2:             l2,
 						addDenylist:    func(cid uint64, id string) error { return s.denylist.Add(cid, id) },
 						rollback:       s.RollbackChain,
-						l1ConfirmDepth: h.managedCfg.confirmDepth,
+						l1ConfirmDepth: h.embeddedCfg.confirmDepth,
 						l1ScopeLabel:   s.getL1ScopeLabel(),
 					}
 					s.log.Info("crosssafe: run", "chain", chainID)
@@ -347,17 +347,17 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 					s.mu.Lock()
 					h := s.chains[chainID]
 					s.mu.Unlock()
-					if h == nil || h.managedCfg == nil {
+					if h == nil || h.embeddedCfg == nil {
 						return "", fmt.Errorf("unknown chain %d", chainID)
 					}
 					ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
 					defer cancel2()
-					l2Cli, err := opclient.NewRPC(ctx2, s.log, h.managedCfg.l2UserRPC)
+					l2Cli, err := opclient.NewRPC(ctx2, s.log, h.embeddedCfg.l2UserRPC)
 					if err != nil {
 						return "", err
 					}
 					defer l2Cli.Close()
-					l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.managedCfg.rcfg, true))
+					l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.embeddedCfg.rcfg, true))
 					if err != nil {
 						return "", err
 					}
@@ -374,7 +374,7 @@ func (s *Supervisor) maybeStartFinalizedRunner() {
 					_ = cid
 					// fetch rollup status best-effort
 					h.stateMu.Lock()
-					rpc := h.managedOpNodeUserRPC
+					rpc := h.embeddedOpNodeUserRPC
 					h.stateMu.Unlock()
 					if rpc == "" {
 						continue
@@ -451,9 +451,9 @@ func (s *Supervisor) RemoveChain(chainID uint64) {
 		h.cancelPoll()
 		h.cancelPoll = nil
 	}
-	if h.stopManagedOpNode != nil {
-		_ = h.stopManagedOpNode(context.Background())
-		h.stopManagedOpNode = nil
+	if h.stopEmbeddedOpNode != nil {
+		_ = h.stopEmbeddedOpNode(context.Background())
+		h.stopEmbeddedOpNode = nil
 	}
 	h.stateMu.Unlock()
 }
@@ -463,7 +463,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	s.mu.Lock()
 	h := s.chains[chainID]
 	s.mu.Unlock()
-	if h == nil || h.managedCfg == nil {
+	if h == nil || h.embeddedCfg == nil {
 		return nil
 	}
 	h.stateMu.Lock()
@@ -474,24 +474,24 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		h.cancelPoll()
 		h.cancelPoll = nil
 	}
-	if h.stopManagedOpNode != nil {
+	if h.stopEmbeddedOpNode != nil {
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = h.stopManagedOpNode(c)
+		_ = h.stopEmbeddedOpNode(c)
 		cancel()
 	}
 
 	// Roll back EL head to the absolute target via pluggable implementation
-	if err := rollbackEL(ctx, h.managedCfg.l2UserRPC, toBlock); err != nil {
+	if err := rollbackEL(ctx, h.embeddedCfg.l2UserRPC, toBlock); err != nil {
 		return err
 	}
 
 	// Restart managed op-node and polling
-	userRPC, stopFn2, err := s.StartManagedOpNode(h.managedCfg.l1RPC, h.managedCfg.beaconAddr, h.managedCfg.l2AuthRPC, h.managedCfg.jwtSecret, h.managedCfg.rcfg)
+	userRPC, stopFn2, err := s.StartEmbeddedOpNode(h.embeddedCfg.l1RPC, h.embeddedCfg.beaconAddr, h.embeddedCfg.l2AuthRPC, h.embeddedCfg.jwtSecret, h.embeddedCfg.rcfg)
 	if err != nil {
 		return err
 	}
-	h.managedOpNodeUserRPC = userRPC
-	h.stopManagedOpNode = stopFn2
+	h.embeddedOpNodeUserRPC = userRPC
+	h.stopEmbeddedOpNode = stopFn2
 	ctxPoll, cancel := context.WithCancel(context.Background())
 	h.cancelPoll = cancel
 
@@ -501,12 +501,12 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		cancel()
 		return err
 	}
-	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, h.managedCfg.l2UserRPC)
+	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l2UserRPC)
 	if err != nil {
 		cancel()
 		return err
 	}
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.managedCfg.rcfg, true))
+	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.embeddedCfg.rcfg, true))
 	if err != nil {
 		cancel()
 		return err
@@ -514,7 +514,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	roll := sources.NewRollupClient(opNodeCli)
 
 	go func() {
-		ticker := time.NewTicker(h.managedCfg.interval)
+		ticker := time.NewTicker(h.embeddedCfg.interval)
 		defer ticker.Stop()
 		for {
 			select {

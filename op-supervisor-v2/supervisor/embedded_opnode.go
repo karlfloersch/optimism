@@ -22,9 +22,9 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// StartManagedOpNode starts an op-node in-process with minimal configuration and returns the user-RPC URL
-// and a function to stop the managed op-node. The node is configured as a sequencer with local RPCs and no external P2P.
-func (s *Supervisor) StartManagedOpNode(l1RPC string, beaconAddr string, l2AuthRPC string, jwtSecret [32]byte, rcfg *rollup.Config) (string, func(context.Context) error, error) {
+// StartEmbeddedOpNode starts an embedded op-node in-process with minimal configuration and returns the user-RPC URL
+// and a function to stop the embedded op-node. The node is configured as a sequencer with local RPCs and no external P2P.
+func (s *Supervisor) StartEmbeddedOpNode(l1RPC string, beaconAddr string, l2AuthRPC string, jwtSecret [32]byte, rcfg *rollup.Config) (string, func(context.Context) error, error) {
 	// Minimal P2P config (memory-only, local addresses)
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	for _, f := range opNodeFlags.P2PFlags(opNodeFlags.EnvVarPrefix) {
@@ -84,7 +84,7 @@ func (s *Supervisor) StartManagedOpNode(l1RPC string, beaconAddr string, l2AuthR
 		}
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("start managed op-node: %w", err)
+		return "", nil, fmt.Errorf("start embedded op-node: %w", err)
 	}
 
 	// Return user RPC endpoint for polling

@@ -32,12 +32,12 @@ type Supervisor struct {
 	// polling
 	cancelPoll context.CancelFunc
 
-	// managed-node mode
-	managedOpNodeUserRPC string
-	stopManagedOpNode    func(ctx context.Context) error
+	// embedded op-node mode
+	embeddedOpNodeUserRPC string
+	stopEmbeddedOpNode    func(ctx context.Context) error
 
 	// restart context
-	managedCfg *managedConfig
+	embeddedCfg *embeddedConfig
 
 	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
 	enableOpNodeProxy bool
@@ -74,7 +74,7 @@ type Supervisor struct {
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
-type managedConfig struct {
+type embeddedConfig struct {
 	l1RPC        string
 	beaconAddr   string
 	l2AuthRPC    string
@@ -219,11 +219,11 @@ func (s *Supervisor) Stop() {
 		s.cancelPoll()
 		s.cancelPoll = nil
 	}
-	if s.stopManagedOpNode != nil {
+	if s.stopEmbeddedOpNode != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = s.stopManagedOpNode(ctx)
+		_ = s.stopEmbeddedOpNode(ctx)
 		cancel()
-		s.stopManagedOpNode = nil
+		s.stopEmbeddedOpNode = nil
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
@@ -260,9 +260,9 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				return
 			}
 			h.stateMu.Lock()
-			running := h.stopManagedOpNode != nil
+			running := h.stopEmbeddedOpNode != nil
 			started := h.started
-			opNodeUser := h.managedOpNodeUserRPC
+			opNodeUser := h.embeddedOpNodeUserRPC
 			var localSafe, crossSafe any
 			var unsafeHead, safeHead, finalizedHead any
 			if h.localDB != nil {
@@ -306,7 +306,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		// single-chain legacy mode
 		running := s.cmd != nil
 		started := s.started
-		opNodeUser := s.managedOpNodeUserRPC
+		opNodeUser := s.embeddedOpNodeUserRPC
 		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"op_node_running":  running,
@@ -336,9 +336,9 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		// chain-scoped when in multi-chain mode; legacy single-chain otherwise
 		s.mu.Lock()
 		multi := len(s.chains) > 0
-		var cfg *managedConfig
+		var cfg *embeddedConfig
 		if !multi {
-			cfg = s.managedCfg
+			cfg = s.embeddedCfg
 		}
 		s.mu.Unlock()
 		var err error
@@ -395,7 +395,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/ or /opnode/{chainId}/
 		mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
-			target := s.managedOpNodeUserRPC
+			target := s.embeddedOpNodeUserRPC
 			// Try chain-scoped if multi-chain and a chainId segment is present
 			if len(s.chains) > 0 {
 				rest := strings.TrimPrefix(r.URL.Path, "/opnode/")
@@ -407,7 +407,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 					var cid uint64
 					_, _ = fmt.Sscanf(seg, "%d", &cid)
 					if h := s.chains[cid]; h != nil {
-						target = h.managedOpNodeUserRPC
+						target = h.embeddedOpNodeUserRPC
 					}
 				}
 			}
@@ -452,8 +452,8 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		ctx := r.Context()
 		for id, h := range chains {
 			var st *eth.SyncStatus
-			if h != nil && h.managedOpNodeUserRPC != "" {
-				if ss, err := s.fetchSyncStatus(ctx, h.managedOpNodeUserRPC); err == nil && ss != nil {
+			if h != nil && h.embeddedOpNodeUserRPC != "" {
+				if ss, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC); err == nil && ss != nil {
 					st = ss
 				}
 			}
@@ -721,13 +721,13 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 		return nil
 	}
 	// Start embedded op-node
-	userRPC, stopFn, err := s.StartManagedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
+	userRPC, stopFn, err := s.StartEmbeddedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
 	if err != nil {
 		return err
 	}
-	s.managedOpNodeUserRPC = userRPC
-	s.stopManagedOpNode = stopFn
-	s.managedCfg = &managedConfig{l1RPC: l1RPC, beaconAddr: beaconAddr, l2AuthRPC: l2AuthRPC, l2UserRPC: l2UserRPC, jwtSecret: jwtSecret, rcfg: rcfg, interval: interval, confirmDepth: confirmDepth}
+	s.embeddedOpNodeUserRPC = userRPC
+	s.stopEmbeddedOpNode = stopFn
+	s.embeddedCfg = &embeddedConfig{l1RPC: l1RPC, beaconAddr: beaconAddr, l2AuthRPC: l2AuthRPC, l2UserRPC: l2UserRPC, jwtSecret: jwtSecret, rcfg: rcfg, interval: interval, confirmDepth: confirmDepth}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelPoll = cancel
@@ -780,14 +780,14 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 
 // performRollback stops the managed op-node, rolls back the EL to an absolute block number
 // then restarts the op-node and polling.
-func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, toBlock uint64) error {
+func (s *Supervisor) performRollback(ctx context.Context, cfg *embeddedConfig, toBlock uint64) error {
 	// Stop polling and op-node
 	s.mu.Lock()
 	if s.cancelPoll != nil {
 		s.cancelPoll()
 		s.cancelPoll = nil
 	}
-	stopFn := s.stopManagedOpNode
+	stopFn := s.stopEmbeddedOpNode
 	s.mu.Unlock()
 	if stopFn != nil {
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -802,13 +802,13 @@ func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, to
 
 	// Restart managed op-node and polling
 	s.mu.Lock()
-	userRPC, stopFn2, err := s.StartManagedOpNode(cfg.l1RPC, cfg.beaconAddr, cfg.l2AuthRPC, cfg.jwtSecret, cfg.rcfg)
+	userRPC, stopFn2, err := s.StartEmbeddedOpNode(cfg.l1RPC, cfg.beaconAddr, cfg.l2AuthRPC, cfg.jwtSecret, cfg.rcfg)
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	s.managedOpNodeUserRPC = userRPC
-	s.stopManagedOpNode = stopFn2
+	s.embeddedOpNodeUserRPC = userRPC
+	s.stopEmbeddedOpNode = stopFn2
 	ctxPoll, cancel := context.WithCancel(context.Background())
 	s.cancelPoll = cancel
 	s.mu.Unlock()
@@ -862,7 +862,7 @@ func (s *Supervisor) performRollback(ctx context.Context, cfg *managedConfig, to
 func (s *Supervisor) ManagedOpNodeUserRPC() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.managedOpNodeUserRPC
+	return s.embeddedOpNodeUserRPC
 }
 
 // EnableOpNodeProxy toggles the /opnode/ reverse proxy in the HTTP handler.

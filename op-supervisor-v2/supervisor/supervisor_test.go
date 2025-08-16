@@ -46,8 +46,8 @@ func TestFinalizedRunnerComputesMinAndCallsCheckers(t *testing.T) {
 	// register two chains directly into supervisor (simulate AddChain effect)
 	s.mu.Lock()
 	s.chains = map[uint64]*chainHandle{
-		1: {managedOpNodeUserRPC: "rpc1"},
-		2: {managedOpNodeUserRPC: "rpc2"},
+		1: {embeddedOpNodeUserRPC: "rpc1"},
+		2: {embeddedOpNodeUserRPC: "rpc2"},
 	}
 	s.mu.Unlock()
 	// enable proposals so checkers are called in the loop

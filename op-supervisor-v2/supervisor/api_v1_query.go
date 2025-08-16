@@ -54,8 +54,8 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 			return
 		}
 		var out eth.BlockID
-		if h.managedOpNodeUserRPC != "" {
-			if st, err := s.fetchSyncStatus(r.Context(), h.managedOpNodeUserRPC); err == nil && st != nil {
+		if h.embeddedOpNodeUserRPC != "" {
+			if st, err := s.fetchSyncStatus(r.Context(), h.embeddedOpNodeUserRPC); err == nil && st != nil {
 				out = st.FinalizedL2.ID()
 			}
 		}
@@ -77,8 +77,8 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 			s.mu.Lock()
 			h := s.chains[id]
 			s.mu.Unlock()
-			if h != nil && h.managedOpNodeUserRPC != "" {
-				if st, err := s.fetchSyncStatus(r.Context(), h.managedOpNodeUserRPC); err == nil && st != nil {
+			if h != nil && h.embeddedOpNodeUserRPC != "" {
+				if st, err := s.fetchSyncStatus(r.Context(), h.embeddedOpNodeUserRPC); err == nil && st != nil {
 					if out.Number == 0 || st.FinalizedL1.Number < out.Number {
 						out = st.FinalizedL1
 					}
