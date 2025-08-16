@@ -79,6 +79,10 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 
 	// Create Supervisor instance
 	s.sup = sv2.NewSupervisor(s.logger)
+	// For persistence tests, allow overriding data dir via env
+	if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
+		s.sup.SetDataDir(dd)
+	}
 	// Register env-driven height checker if configured
 	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
 		s.sup.RegisterChecker(chk)
@@ -142,6 +146,10 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		s.ln = ln
 		s.httpURL = "http://" + ln.Addr().String()
 		s.sup = sv2.NewSupervisor(s.logger)
+		// For persistence tests, allow overriding data dir via env
+		if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
+			s.sup.SetDataDir(dd)
+		}
 		// In tests, gate cross-safe against L1 Unsafe to progress quickly
 		s.sup.SetL1ScopeLabel(eth.Unsafe)
 		// Register env-driven height checker if configured
