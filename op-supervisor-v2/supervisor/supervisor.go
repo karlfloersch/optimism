@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"path/filepath"
+
 	"github.com/ethereum-optimism/optimism/op-node/params"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/apis"
@@ -20,7 +22,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
-	"path/filepath"
 	"github.com/ethereum/go-ethereum/log"
 )
 
