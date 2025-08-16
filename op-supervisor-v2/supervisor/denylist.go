@@ -64,7 +64,12 @@ func (d *DenylistStore) persist() error {
 	}
 	d.mu.Unlock()
 	b, _ := json.MarshalIndent(out, "", "  ")
-	return os.WriteFile(d.path, b, 0o644)
+	// atomic write: write to temp and rename
+	tmp := d.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.path)
 }
 
 func (d *DenylistStore) Add(chainID uint64, id string) error {

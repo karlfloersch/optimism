@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
+	"path/filepath"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -86,7 +87,8 @@ type embeddedConfig struct {
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
-	s := &Supervisor{log: l, denylist: NewDenylistStore("")}
+
+	s := &Supervisor{log: l}
 	// initialize shared linker state
 	s.linkChains = make(map[eth.ChainID]struct{})
 	s.expiryWindow = params.MessageExpiryTimeSecondsInterop
@@ -137,13 +139,27 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	// rollback indirection for tests
 	s.rollbackFn = s.RollbackChain
 
-	// unique temp dir per instance
+	// unique temp dir per instance (can be overridden via SetDataDir or CLI)
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
+	// initialize denylist under data dir by default
+	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
 	return s
 }
 
 // getDataDir returns the base data directory for chain DBs
 func (s *Supervisor) getDataDir() string { return s.dataDir }
+
+// SetDataDir overrides the base data directory for chain DBs and denylist persistence.
+// Should be called before starting any chains or HTTP server.
+func (s *Supervisor) SetDataDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if dir == "" {
+		return
+	}
+	s.dataDir = dir
+	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+}
 
 // registerChainForLinker registers a chain ID into the shared linker set.
 func (s *Supervisor) registerChainForLinker(id eth.ChainID) {

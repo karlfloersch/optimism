@@ -28,6 +28,7 @@ func main() {
 			&cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
 			&cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
 			&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose embedded op-node RPC under /opnode/"},
+			&cli.StringFlag{Name: "sv2.data-dir", Value: "", Usage: "SV2 data dir (denylist.json and chain DBs). Default is a unique temp dir."},
 			// Embedded op-node mode (always on)
 			&cli.StringFlag{Name: "l1.rpc", Usage: "L1 execution RPC endpoint"},
 			&cli.StringFlag{Name: "beacon.addr", Usage: "L1 beacon endpoint for blobs (e.g. http://localhost:5052)"},
@@ -48,6 +49,9 @@ func main() {
 			httpPort := ctx.Int("http.port")
 
 			sup := supervisor.NewSupervisor(lgr)
+			if dd := ctx.String("sv2.data-dir"); dd != "" {
+				sup.SetDataDir(dd)
+			}
 			sup.EnableOpNodeProxy(ctx.Bool("proxy.opnode"))
 
 			// Start HTTP server
