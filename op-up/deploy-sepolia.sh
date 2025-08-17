@@ -31,7 +31,7 @@ if [ -f "$ROOT/op-up/deploy-sepolia/intent.toml" ]; then
   cp "$ROOT/op-up/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
   # Always expand __ROOT__ placeholder
   tmp=$(mktemp)
-  sed -E "s#file://__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
+  sed -E "s#__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
   # Optionally rewrite batcher placeholder
   if [ -n "${BATCHER_PK:-}" ]; then
     ADDR=$(cast wallet address --private-key "$BATCHER_PK")
