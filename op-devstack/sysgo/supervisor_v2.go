@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum/go-ethereum/log"
+    "strings"
 )
 
 // SupervisorV2 runs the Supervisor v2 prototype in-process with an HTTP server
@@ -88,11 +89,17 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
 		s.sup.RegisterChecker(chk)
 		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
-		// For devstack speed: use unsafe scope
+	}
+	// Scope: allow override via SV2_L1_SCOPE (finalized|safe|unsafe), default unsafe
+	scope := strings.ToLower(os.Getenv("SV2_L1_SCOPE"))
+	switch scope {
+	case "finalized", "finalise", "finalized_scope":
+		s.sup.SetL1ScopeLabel(eth.Finalized)
+	case "safe":
+		s.sup.SetL1ScopeLabel(eth.Safe)
+	default:
 		s.sup.SetL1ScopeLabel(eth.Unsafe)
 	}
-	// In tests, gate cross-safe against L1 Unsafe to progress quickly
-	s.sup.SetL1ScopeLabel(eth.Unsafe)
 	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
 		s.sup.RegisterChecker(chk)
 		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")

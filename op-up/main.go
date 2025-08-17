@@ -140,6 +140,19 @@ func run() error {
 						cfg.TxMgrConfig = setuputils.NewTxMgrConfig(endpoint.URL(os.Getenv("OP_L1_RPC")), sk)
 					}
 				}
+				// Optional env overrides for batcher cadence
+				if v := os.Getenv("OP_BATCHER_MAX_CHANNEL_DURATION"); v != "" {
+					if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+						cfg.MaxChannelDuration = n
+					}
+				}
+				if v := os.Getenv("OP_BATCHER_POLL_INTERVAL"); v != "" {
+					if d, err := time.ParseDuration(v); err == nil {
+						cfg.PollInterval = d
+					} else if n, err2 := strconv.ParseUint(v, 10, 64); err2 == nil {
+						cfg.PollInterval = time.Duration(n) * time.Second
+					}
+				}
 			}))
 			// SV2 across all chains, with configurable confirm depth
 			depth := uint64(2)
