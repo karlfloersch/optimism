@@ -15,8 +15,16 @@ mkdir -p "$WORKDIR"
 # and pass flags explicitly as well for clarity.
 export L1_RPC_URL="${L1_RPC_URL:-$OP_L1_RPC}"
 
-if [ ! -f "$WORKDIR/intent.toml" ] && [ -f "$ROOT/deploy-sepolia/intent.toml" ]; then
-  cp "$ROOT/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
+# Seed intent from committed template and rewrite BATCHER placeholder when missing
+if [ ! -f "$WORKDIR/intent.toml" ]; then
+  if [ -f "$ROOT/op-up/deploy-sepolia/intent.toml" ]; then
+    cp "$ROOT/op-up/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
+    if [ -n "${BATCHER_PK:-}" ]; then
+      ADDR=$(cast wallet address --private-key "$BATCHER_PK")
+      tmp=$(mktemp)
+      sed -E "s/0xBATCHER/$ADDR/g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
+    fi
+  fi
 fi
 
 if [ -d "$ROOT/packages/contracts-bedrock/forge-artifacts" ] && [ ! -f "$WORKDIR/forge-artifacts.tgz" ]; then
