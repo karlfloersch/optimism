@@ -10,6 +10,10 @@ mkdir -p "$WORKDIR"
 : "${OP_L1_RPC:?OP_L1_RPC must be set}"
 : "${L1_PK:?L1_PK must be set}"
 
+# Ensure op-deployer picks up the L1 RPC URL (expects L1_RPC_URL)
+# and pass flags explicitly as well for clarity.
+export L1_RPC_URL="${L1_RPC_URL:-$OP_L1_RPC}"
+
 if [ ! -f "$WORKDIR/intent.toml" ] && [ -f "$ROOT/deploy-sepolia/intent.toml" ]; then
   cp "$ROOT/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
 fi
@@ -25,7 +29,11 @@ if [ ! -f "$WORKDIR/l2_genesis.json" ]; then
   go run "$ROOT/op-deployer/cmd/op-deployer" inspect genesis --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/l2_genesis.json"
 fi
 
-go run "$ROOT/op-deployer/cmd/op-deployer" apply --workdir "$WORKDIR" "$CHAIN_ID"
+go run "$ROOT/op-deployer/cmd/op-deployer" apply \
+  --workdir "$WORKDIR" \
+  --l1-rpc-url "$OP_L1_RPC" \
+  --private-key "$L1_PK" \
+  "$CHAIN_ID"
 
 echo "Artifacts written to $WORKDIR"
 echo "- rollup.json"

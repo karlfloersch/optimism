@@ -4,12 +4,11 @@ This mode runs a single L2 (chainId you choose) against an external L1 RPC (e.g.
 
 ## One-time setup
 
-1) Create or copy an env file (ignored by git):
+1) Create an env file (ignored by git):
 
 ```bash
-cp op-up/external-l1.env op-up/external-l1.env 2>/dev/null || true
 # Edit op-up/external-l1.env to set:
-# L1_PK, OP_L1_RPC, OP_L1_BEACON_RPC (optional), OP_L1_CHAIN_ID, OP_L2_CHAIN_ID
+# L1_PK, OP_L1_RPC, OP_L1_BEACON_RPC, OP_L1_CHAIN_ID, OP_L2_CHAIN_ID
 # OP_L2_ROLLUP_PATH, OP_L2_GENESIS_PATH (or use the artifacts dir below)
 ```
 
@@ -17,6 +16,7 @@ cp op-up/external-l1.env op-up/external-l1.env 2>/dev/null || true
 
 ```bash
 # Uses op-deployer, writes to op-up/artifacts/
+source op-up/external-l1.env
 ./op-up/deploy-sepolia.sh 901
 # Files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json
 ```
