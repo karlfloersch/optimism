@@ -117,6 +117,21 @@ SAFE=$(grep -n "Forkchoice update" "$LOG_FILE" | grep -Eo 'safe=0x[0-9a-fA-F]+' 
 echo "[sysgo-smoke] unsafe blocks inserted: $UNSAFE"
 echo "[sysgo-smoke] safe head updates seen: $SAFE"
 
+echo "[sysgo-smoke] querying SV2 /v1/sync_status for safe progress"
+SV2_URL="http://127.0.0.1:9750"
+for i in {1..60}; do
+  if curl -sf "$SV2_URL/healthz" >/dev/null; then
+    break
+  fi
+  sleep 0.5
+
+done
+SYNC=$(curl -sf "$SV2_URL/v1/sync_status" || true)
+if [[ -z "$SYNC" ]]; then
+  echo "[sysgo-smoke] warning: SV2 sync_status not available"
+else
+  echo "[sysgo-smoke] sv2 sync_status: $SYNC"
+fi
 
 echo "[sysgo-smoke] SUCCESS"
 

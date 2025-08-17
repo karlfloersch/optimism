@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -176,7 +177,19 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	copy(jwtSecret[:], b)
 
 	// Register the chain in multi-chain mode; this starts the embedded op-node and the finalized runner
-	_, err = s.sup.AddChain(l1EL.userRPC, l1CL.beacon.BeaconAddr(), l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, 40)
+	beaconAddr := ""
+	if l1CL.beacon != nil {
+		beaconAddr = l1CL.beacon.BeaconAddr()
+	} else {
+		beaconAddr = l1CL.beaconHTTPAddr
+	}
+	depth := uint64(40)
+	if v := os.Getenv("OP_SV2_CONFIRM_DEPTH"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			depth = n
+		}
+	}
+	_, err = s.sup.AddChain(l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
 	s.p.Require().NoError(err)
 }
 

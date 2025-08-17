@@ -1,2 +1,20 @@
+# Local Sepolia deployments, state, and artifacts (kept out of git)
+artifacts/**
+
+# Local env files and secrets
+external-l1.env
+
+# Logs
+logs/**
+*.log
+
+# Optional: local copies of keys if you place them here
+opnode_p2p_priv.txt
+
+# Misc build/cache
+*.tgz
+*.tar.gz
+
+# Local build outputs and working dirs
 op
 bin

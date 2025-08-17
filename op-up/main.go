@@ -15,6 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"math/big"
+	"strings"
+
+	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
@@ -22,7 +26,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	"github.com/ethereum-optimism/optimism/op-devstack/sysgo"
+	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/setuputils"
 	"github.com/ethereum-optimism/optimism/op-service/client"
+	"github.com/ethereum-optimism/optimism/op-service/endpoint"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
@@ -59,27 +65,65 @@ func run() error {
 	}
 
 	ids := sysgo.NewDefaultMinimalSystemIDs(sysgo.DefaultL1ID, sysgo.DefaultL2AID)
-	presets.DoMain(testingM{}, stack.MakeCommon(stack.Combine(
-		sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+	var opt stack.Option[*sysgo.Orchestrator]
+	if os.Getenv("OP_EXTERNAL_L1") == "1" {
+		// Derive L1/L2 IDs from env for faucet wiring
+		l1CID := sysgo.DefaultL1ID
+		if v := os.Getenv("OP_L1_CHAIN_ID"); v != "" {
+			if n, ok := new(big.Int).SetString(v, 10); ok {
+				l1CID = eth.ChainIDFromUInt64(n.Uint64())
+			}
+		}
+		l2CID := sysgo.DefaultL2AID
+		if v := os.Getenv("OP_L2_CHAIN_ID"); v != "" {
+			if n, ok := new(big.Int).SetString(v, 10); ok {
+				l2CID = eth.ChainIDFromUInt64(n.Uint64())
+			}
+		}
+		l1ELForFaucet := stack.NewL1ELNodeID("l1", l1CID)
+		l2ELForFaucet := stack.NewL2ELNodeID("sequencer", l2CID)
 
-		sysgo.WithDeployer(),
-		sysgo.WithDeployerOptions(
-			sysgo.WithLocalContractSources(),
-			sysgo.WithCommons(ids.L1.ChainID()),
-			sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
-		),
-		sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
-
-		sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
-
-		sysgo.WithL2ELNode(ids.L2EL, nil),
-		sysgo.WithL2CLNode(ids.L2CL, true, false, ids.L1CL, ids.L1EL, ids.L2EL),
-
-		sysgo.WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL),
-		sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil),
-
-		sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}),
-	)), presets.WithLogFilter(logfilter.DefaultShow(logfilter.Level(log.LevelDebug).Show())))
+		opt = stack.Combine(
+			sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+			sysgo.WithExternalPresetFromEnv(),
+			sysgo.WithL2ELNode(ids.L2EL, nil),
+			sysgo.WithSupervisorV2OnFirstChain(),
+			// Use L1_PK for batcher transactions on Sepolia
+			sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
+				pk := os.Getenv("L1_PK")
+				if pk != "" {
+					if strings.HasPrefix(pk, "0x") || strings.HasPrefix(pk, "0X") {
+						pk = pk[2:]
+					}
+					if sk, err := crypto.HexToECDSA(pk); err == nil {
+						cfg.TxMgrConfig = setuputils.NewTxMgrConfig(endpoint.URL(os.Getenv("OP_L1_RPC")), sk)
+					}
+				}
+			}),
+			// Start the batcher to post data to L1 so safe can progress
+			sysgo.WithBatcher(ids.L2Batcher, l1ELForFaucet, stack.NewL2CLNodeID("embedded", l2CID), ids.L2EL),
+			// Enable faucets for convenience (L2 funding only; L1 faucet requires funded key)
+			sysgo.WithFaucets([]stack.L1ELNodeID{l1ELForFaucet}, []stack.L2ELNodeID{l2ELForFaucet}),
+		)
+	} else {
+		opt = stack.Combine(
+			sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+			sysgo.WithDeployer(),
+			sysgo.WithDeployerOptions(
+				sysgo.WithLocalContractSources(),
+				sysgo.WithCommons(ids.L1.ChainID()),
+				sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+			),
+			sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
+			sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
+			sysgo.WithL2ELNode(ids.L2EL, nil),
+			sysgo.WithL2CLNode(ids.L2CL, true, false, ids.L1CL, ids.L1EL, ids.L2EL),
+			sysgo.WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL),
+			sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil),
+			sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}),
+		)
+	}
+	presets.DoMain(testingM{}, stack.MakeCommon(opt), presets.WithLogFilter(logfilter.DefaultShow(logfilter.Level(log.LevelDebug).Show())))
 
 	return nil
 }
@@ -189,6 +233,14 @@ func runSysgo() error {
 			return err
 		}
 		s := supv2.NewSupervisor(lgr)
+		// Expose SV2 HTTP for health and /opnode/ proxy so external tools can query sync status
+		s.EnableOpNodeProxy(true)
+		go func() {
+			addr := "127.0.0.1:9750"
+			if err := http.ListenAndServe(addr, s.HTTPHandler()); err != nil {
+				fmt.Fprintf(os.Stderr, "sv2 http listen error: %v\n", err)
+			}
+		}()
 		if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
 			return err
 		}
