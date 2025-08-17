@@ -14,6 +14,18 @@ deploy2 chain_id_a chain_id_b:
 run stop_after:
     set -euo pipefail; . {{justfile_directory()}}/external-l1.env && cd {{justfile_directory()}} && OP_EXTERNAL_L1=1 OP_SV2_CONFIRM_DEPTH=2 OP_UP_STOP_AFTER={{stop_after}} go run .
 
+# Usage: just -f op-up/justfile run2 stop_after=420
+run2 stop_after:
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && \
+    OP_L2_CHAIN_IDS="${OP_L2_CHAIN_IDS:-901,902}" \
+    OP_SV2_CONFIRM_DEPTH="${OP_SV2_CONFIRM_DEPTH:-2}" \
+    OP_UP_STOP_AFTER={{stop_after}} \
+    OP_L2_ROLLUP_PATH_901="${OP_L2_ROLLUP_PATH_901:-$PWD/op-up/artifacts/chain-901/rollup.json}" \
+    OP_L2_GENESIS_PATH_901="${OP_L2_GENESIS_PATH_901:-$PWD/op-up/artifacts/chain-901/l2_genesis.json}" \
+    OP_L2_ROLLUP_PATH_902="${OP_L2_ROLLUP_PATH_902:-$PWD/op-up/artifacts/chain-902/rollup.json}" \
+    OP_L2_GENESIS_PATH_902="${OP_L2_GENESIS_PATH_902:-$PWD/op-up/artifacts/chain-902/l2_genesis.json}" \
+    cd {{justfile_directory()}} && OP_EXTERNAL_L1=1 go run .
+
 # Usage: just -f op-up/justfile clean
 clean:
     set -euo pipefail; rm -rf {{justfile_directory()}}/artifacts/* {{justfile_directory()}}/logs/* || true

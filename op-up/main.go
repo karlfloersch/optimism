@@ -17,6 +17,7 @@ import (
 
 	"math/big"
 	"strings"
+	"strconv"
 
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
@@ -67,44 +68,120 @@ func run() error {
 	ids := sysgo.NewDefaultMinimalSystemIDs(sysgo.DefaultL1ID, sysgo.DefaultL2AID)
 	var opt stack.Option[*sysgo.Orchestrator]
 	if os.Getenv("OP_EXTERNAL_L1") == "1" {
-		// Derive L1/L2 IDs from env for faucet wiring
+		// External L1 multi-chain support (one SV2, multiple ELs)
 		l1CID := sysgo.DefaultL1ID
 		if v := os.Getenv("OP_L1_CHAIN_ID"); v != "" {
 			if n, ok := new(big.Int).SetString(v, 10); ok {
 				l1CID = eth.ChainIDFromUInt64(n.Uint64())
 			}
 		}
-		l2CID := sysgo.DefaultL2AID
-		if v := os.Getenv("OP_L2_CHAIN_ID"); v != "" {
-			if n, ok := new(big.Int).SetString(v, 10); ok {
-				l2CID = eth.ChainIDFromUInt64(n.Uint64())
-			}
-		}
-		l1ELForFaucet := stack.NewL1ELNodeID("l1", l1CID)
-		l2ELForFaucet := stack.NewL2ELNodeID("sequencer", l2CID)
-
-		opt = stack.Combine(
-			sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
-			sysgo.WithExternalPresetFromEnv(),
-			sysgo.WithL2ELNode(ids.L2EL, nil),
-			sysgo.WithSupervisorV2OnFirstChain(),
-			// Use BATCHER_PK for batcher transactions on Sepolia
-			sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
-				pk := os.Getenv("BATCHER_PK")
-				if pk != "" {
-					if strings.HasPrefix(pk, "0x") || strings.HasPrefix(pk, "0X") {
-						pk = pk[2:]
+		chainIDsCSV := os.Getenv("OP_L2_CHAIN_IDS")
+		if chainIDsCSV != "" {
+			// Parse comma-separated chain IDs
+			parts := strings.Split(chainIDsCSV, ",")
+			var l2ELs []stack.L2ELNodeID
+			combined := stack.Combine(
+				sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+				sysgo.WithExternalL1NodesRPC(l1CID, os.Getenv("OP_L1_RPC"), os.Getenv("OP_L1_BEACON_RPC")),
+			)
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				var l2cid eth.ChainID
+				if n, ok := new(big.Int).SetString(p, 10); ok {
+					l2cid = eth.ChainIDFromUInt64(n.Uint64())
+				} else {
+					continue
+				}
+				// Determine artifact paths (allow per-chain overrides, else default to op-up/artifacts/chain-<id>/)
+				rollEnv := "OP_L2_ROLLUP_PATH_" + p
+				genEnv := "OP_L2_GENESIS_PATH_" + p
+				rollPath := os.Getenv(rollEnv)
+				genPath := os.Getenv(genEnv)
+				if rollPath == "" || genPath == "" {
+					cwd, _ := os.Getwd()
+					base := filepath.Join(cwd, "op-up", "artifacts", "chain-"+p)
+					if rollPath == "" {
+						rollPath = filepath.Join(base, "rollup.json")
 					}
-					if sk, err := crypto.HexToECDSA(pk); err == nil {
+					if genPath == "" {
+						genPath = filepath.Join(base, "l2_genesis.json")
+					}
+				}
+				combined.Add(sysgo.WithExternalL2FromFiles(l2cid, l1CID, rollPath, genPath))
+				l2el := stack.NewL2ELNodeID("sequencer", l2cid)
+				combined.Add(sysgo.WithL2ELNode(l2el, nil))
+				l2ELs = append(l2ELs, l2el)
+				// Start a batcher for this chain; use embedded CL that SV2 registers per chain
+				combined.Add(sysgo.WithBatcher(stack.NewL2BatcherID("main", l2cid), stack.NewL1ELNodeID("l1", l1CID), stack.NewL2CLNodeID("embedded", l2cid), l2el))
+			}
+			// Wire batcher options: per-chain keys and rollup RPC via SV2 proxy
+			combined.Add(sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
+				// per-chain key BATCHER_PK_<CHAINID> fallback to BATCHER_PK
+				key := os.Getenv("BATCHER_PK")
+				if v, ok := id.ChainID().Uint64(); ok {
+					perChain := os.Getenv(fmt.Sprintf("BATCHER_PK_%d", v))
+					if perChain != "" {
+						key = perChain
+					}
+					// Prefer SV2 proxy for RollupRpc if available
+					sv2 := os.Getenv("SV2_DENYLIST_URL")
+					if sv2 != "" {
+						cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2, v)}
+					}
+				}
+				if key != "" {
+					if strings.HasPrefix(key, "0x") || strings.HasPrefix(key, "0X") {
+						key = key[2:]
+					}
+					if sk, err := crypto.HexToECDSA(key); err == nil {
 						cfg.TxMgrConfig = setuputils.NewTxMgrConfig(endpoint.URL(os.Getenv("OP_L1_RPC")), sk)
 					}
 				}
-			}),
-			// Start the batcher to post data to L1 so safe can progress
-			sysgo.WithBatcher(ids.L2Batcher, l1ELForFaucet, stack.NewL2CLNodeID("embedded", l2CID), ids.L2EL),
-			// Enable faucets for convenience (L2 funding only; L1 faucet requires funded key)
-			sysgo.WithFaucets([]stack.L1ELNodeID{l1ELForFaucet}, []stack.L2ELNodeID{l2ELForFaucet}),
-		)
+			}))
+			// SV2 across all chains, with configurable confirm depth
+			depth := uint64(2)
+			if v := os.Getenv("OP_SV2_CONFIRM_DEPTH"); v != "" {
+				if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+					depth = n
+				}
+			}
+			combined.Add(sysgo.WithSupervisorV2OnAllChainsConfirmDepth(depth))
+			// Faucets: external L1, all L2 ELs
+			combined.Add(sysgo.WithFaucets([]stack.L1ELNodeID{stack.NewL1ELNodeID("l1", l1CID)}, l2ELs))
+			opt = combined
+		} else {
+			// Single-chain external mode (existing behavior)
+			l2CID := sysgo.DefaultL2AID
+			if v := os.Getenv("OP_L2_CHAIN_ID"); v != "" {
+				if n, ok := new(big.Int).SetString(v, 10); ok {
+					l2CID = eth.ChainIDFromUInt64(n.Uint64())
+				}
+			}
+			l1ELForFaucet := stack.NewL1ELNodeID("l1", l1CID)
+			l2ELForFaucet := stack.NewL2ELNodeID("sequencer", l2CID)
+			opt = stack.Combine(
+				sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+				sysgo.WithExternalPresetFromEnv(),
+				sysgo.WithL2ELNode(ids.L2EL, nil),
+				sysgo.WithSupervisorV2OnFirstChain(),
+				sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
+					pk := os.Getenv("BATCHER_PK")
+					if pk != "" {
+						if strings.HasPrefix(pk, "0x") || strings.HasPrefix(pk, "0X") {
+							pk = pk[2:]
+						}
+						if sk, err := crypto.HexToECDSA(pk); err == nil {
+							cfg.TxMgrConfig = setuputils.NewTxMgrConfig(endpoint.URL(os.Getenv("OP_L1_RPC")), sk)
+						}
+					}
+				}),
+				sysgo.WithBatcher(ids.L2Batcher, l1ELForFaucet, stack.NewL2CLNodeID("embedded", l2CID), ids.L2EL),
+				sysgo.WithFaucets([]stack.L1ELNodeID{l1ELForFaucet}, []stack.L2ELNodeID{l2ELForFaucet}),
+			)
+		}
 	} else {
 		opt = stack.Combine(
 			sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
