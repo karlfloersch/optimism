@@ -1,6 +1,6 @@
 # op-up (external L1 mode)
 
-This mode runs a single L2 (chainId you choose) against an external L1 RPC (e.g., Sepolia). Supervisor v2 embeds an op-node per L2 and exposes /v1/sync_status and an /opnode/{chainId}/ proxy.
+This mode runs an L2 (chainId you choose) against an external L1 RPC (e.g., Sepolia). You can deploy one or multiple chains by calling the deployer once per chain. Supervisor v2 embeds an op-node per L2 and exposes /v1/sync_status and an /opnode/{chainId}/ proxy.
 
 ## One-time setup
 
@@ -18,12 +18,12 @@ This mode runs a single L2 (chainId you choose) against an external L1 RPC (e.g.
 # Preferred: use just (keeps commands consistent)
 just -f op-up/justfile deploy 901
 
-# Files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json (written via stdout redirection)
+# Single-chain files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json (written via stdout redirection)
 ```
 
 Notes about artifacts and template:
-- The deploy script seeds `op-up/artifacts/intent.toml` from the committed template at `op-up/deploy-sepolia/intent.toml`.
-- It expands `file://__ROOT__` to the repo root and rewrites every `0xBATCHER` placeholder to the address derived from `BATCHER_PK`.
+- The deploy script seeds `WORKDIR/intent.toml` from the committed template at `op-up/deploy-sepolia/intent.toml` (WORKDIR is `op-up/artifacts/` for single-chain, or `op-up/artifacts/chain-<id>/` for multi-chain).
+- It expands `file://__ROOT__` to the repo root and rewrites every `0xBATCHER` placeholder to the address derived from `BATCHER_PK_<CHAIN_ID>` if set, otherwise `BATCHER_PK`.
 - You can delete `op-up/artifacts/` any time; the script will regenerate the intent before inspecting/applying.
 
 End-to-end (clean → deploy → run):
@@ -33,16 +33,25 @@ just -f op-up/justfile up 901 120
 
 ## Pre-flight checks (important)
 
-- Ensure the configured batcher matches `BATCHER_PK` and is funded on Sepolia; otherwise L2 safe will not advance.
+- Ensure the configured batcher matches your batcher key(s) and is funded on Sepolia; otherwise L2 safe will not advance.
 
 ```bash
 # 1) Confirm artifact paths are used (avoid hard-coded non-existent paths)
+# Single-chain
 export OP_L2_ROLLUP_PATH="$PWD/op-up/artifacts/rollup.json"
 export OP_L2_GENESIS_PATH="$PWD/op-up/artifacts/l2_genesis.json"
+
+# Multi-chain (example chain 901)
+# export OP_L2_ROLLUP_PATH="$PWD/op-up/artifacts/chain-901/rollup.json"
+# export OP_L2_GENESIS_PATH="$PWD/op-up/artifacts/chain-901/l2_genesis.json"
 
 # 2) Derive the BATCHER_PK address and compare with configured batcher
 echo "BATCHER_PK addr: $(cast wallet address --private-key $BATCHER_PK)"
 echo "configured batcher: $(jq -r '.genesis.system_config.batcherAddr' "$OP_L2_ROLLUP_PATH")"
+
+# If using per-chain keys (e.g., 901/902):
+# echo "BATCHER_PK_901 addr: $(cast wallet address --private-key ${BATCHER_PK_901})"
+# echo "BATCHER_PK_902 addr: $(cast wallet address --private-key ${BATCHER_PK_902})"
 
 # If they differ, edit your intent to set the batcher to your BATCHER_PK address, then re-run step (2):
 #   op-up/deploy-sepolia/intent.toml  ->  [chains.roles].batcher = "<BATCHER_PK addr>"
@@ -61,13 +70,42 @@ export OP_L2_GENESIS_PATH="$PWD/op-up/artifacts/l2_genesis.json"
 ## Run
 
 ```bash
-# Preferred: use just
+# Preferred: use just (single-chain with default `op-up/artifacts/`)
 just -f op-up/justfile run 120
+
+# Multi-chain: point to the desired chain's artifacts before running
+# Chain 901
+# OP_L2_ROLLUP_PATH=$PWD/op-up/artifacts/chain-901/rollup.json \
+# OP_L2_GENESIS_PATH=$PWD/op-up/artifacts/chain-901/l2_genesis.json \
+# OP_L2_CHAIN_ID=901 \
+# just -f op-up/justfile run 120
+
+# Chain 902
+# OP_L2_ROLLUP_PATH=$PWD/op-up/artifacts/chain-902/rollup.json \
+# OP_L2_GENESIS_PATH=$PWD/op-up/artifacts/chain-902/l2_genesis.json \
+# OP_L2_CHAIN_ID=902 \
+# just -f op-up/justfile run 120
 ```
 
 - SV2 HTTP is printed at startup (e.g., `[sv2] http: http://127.0.0.1:PORT`).
 - Query sync status: `curl -s $SV2_URL/v1/sync_status | jq`.
 - The embedded op-node user RPC is proxied at `$SV2_URL/opnode/$OP_L2_CHAIN_ID/`.
+
+## Multi-chain deployment quickstart
+
+```bash
+# Deploy two chains (901 and 902) into separate artifact dirs
+. op-up/external-l1.env
+just -f op-up/justfile deploy2 901 902
+
+# Optional: per-chain batcher keys (recommended)
+# export BATCHER_PK_901="$BATCHER_PK"     # uses default key
+# export BATCHER_PK_902="0x<your-second-key>"
+
+# Query OptimismPortal (L1) addresses via inspect (example for 901)
+L2_HEX=$(printf "0x%064x" 901)
+go run op-deployer/cmd/op-deployer inspect l1 --workdir op-up/artifacts/chain-901 "$L2_HEX" | jq -r '.OptimismPortalProxy'
+```
 
 ## Quick health checks
 
