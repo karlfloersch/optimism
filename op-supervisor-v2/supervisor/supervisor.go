@@ -315,7 +315,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				"finalized":        finalizedHead,
 				"local_safe":       localSafe,
 				"cross_safe":       crossSafe,
-				"cross_finalized":  s.getCrossFinalized(),
+				"cross_finalized":  s.crossFinalizedFromDBOrFallback(),
 				"l1_scope_label":   string(s.getL1ScopeLabel()),
 			})
 			return
@@ -329,7 +329,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			"op_node_running":  running,
 			"started_at":       started,
 			"op_node_user_rpc": opNodeUser,
-			"cross_finalized":  s.getCrossFinalized(),
+			"cross_finalized":  s.crossFinalizedFromDBOrFallback(),
 			"l1_scope_label":   string(s.getL1ScopeLabel()),
 		})
 	})
@@ -447,6 +447,40 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	return mux
 }
 
+// crossFinalizedFromDBOrFallback returns the minimum cross-safe height across chains,
+// derived from the per-chain cross DB heads if available. Falls back to the in-memory
+// computed value when DBs are not open yet.
+func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
+	s.mu.Lock()
+	chains := make(map[uint64]*chainHandle, len(s.chains))
+	for id, h := range s.chains {
+		chains[id] = h
+	}
+	s.mu.Unlock()
+	var min uint64
+	for _, h := range chains {
+		if h == nil {
+			continue
+		}
+		h.stateMu.Lock()
+		cross := h.crossDB
+		h.stateMu.Unlock()
+		if cross == nil {
+			continue
+		}
+		if pair, err := cross.Last(); err == nil {
+			num := pair.Derived.Number
+			if num != 0 && (min == 0 || num < min) {
+				min = num
+			}
+		}
+	}
+	if min != 0 {
+		return min
+	}
+	return s.getCrossFinalized()
+}
+
 // addV1SyncStatusEndpoint registers GET /v1/sync_status returning eth.SupervisorSyncStatus and 503 until ready.
 func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/sync_status", func(w http.ResponseWriter, r *http.Request) {
@@ -475,6 +509,7 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 				}
 			}
 			var localID, crossID eth.BlockID
+			var crossTs uint64
 			var localUnsafe eth.BlockRef
 			var finalizedID eth.BlockID
 			if h != nil {
@@ -487,28 +522,30 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 				if h.crossDB != nil {
 					if pair, err := h.crossDB.Last(); err == nil {
 						crossID = pair.Derived.ID()
+						crossTs = pair.Derived.Timestamp
+						// Cross-finalized equals cross-safe for now
+						finalizedID = crossID
 					}
 				}
 				h.stateMu.Unlock()
 			}
 			if st != nil {
 				localUnsafe = st.UnsafeL2.BlockRef()
-				finalizedID = st.FinalizedL2.ID()
 				if !haveMinL1 || st.CurrentL1.Number < minL1.Number || (st.CurrentL1.Number == minL1.Number && st.CurrentL1.Hash != minL1.Hash) {
 					minL1 = st.CurrentL1
 					haveMinL1 = true
 				}
-				if st.SafeL2.Number != 0 {
-					if !haveSafeTs || st.SafeL2.Time < minSafeTs {
-						minSafeTs = st.SafeL2.Time
-						haveSafeTs = true
-					}
+			}
+			// Derive global minima from cross DB timestamps to match v1 semantics,
+			// and since cross-finalized == cross-safe for now.
+			if crossID.Number > 0 {
+				if !haveSafeTs || crossTs < minSafeTs {
+					minSafeTs = crossTs
+					haveSafeTs = true
 				}
-				if st.FinalizedL2.Number != 0 {
-					if !haveFinTs || st.FinalizedL2.Time < minFinTs {
-						minFinTs = st.FinalizedL2.Time
-						haveFinTs = true
-					}
+				if !haveFinTs || crossTs < minFinTs {
+					minFinTs = crossTs
+					haveFinTs = true
 				}
 			}
 			if st != nil && (st.UnsafeL2.Number > 0 || st.SafeL2.Number > 0 || st.FinalizedL2.Number > 0) {

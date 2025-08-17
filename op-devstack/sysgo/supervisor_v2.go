@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"strings"
+
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
@@ -22,7 +24,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum/go-ethereum/log"
-    "strings"
 )
 
 // SupervisorV2 runs the Supervisor v2 prototype in-process with an HTTP server
