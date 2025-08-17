@@ -2,20 +2,17 @@ set shell := ["/bin/bash", "-cu"]
 
 # Usage: just -f op-up/justfile deploy chain_id=901
 deploy chain_id:
-    set -euo pipefail; . {{justfile_directory()}}/external-l1.env
-    set -euo pipefail; {{justfile_directory()}}/deploy-sepolia.sh {{chain_id}}
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && {{justfile_directory()}}/deploy-sepolia.sh {{chain_id}}
 
 # Usage: just -f op-up/justfile deploy2 chain_id_a=901 chain_id_b=902
 deploy2 chain_id_a chain_id_b:
-    set -euo pipefail; . {{justfile_directory()}}/external-l1.env
-    set -euo pipefail; {{justfile_directory()}}/deploy-sepolia.sh {{chain_id_a}} {{justfile_directory()}}/artifacts/chain-{{chain_id_a}}
-    set -euo pipefail; {{justfile_directory()}}/deploy-sepolia.sh {{chain_id_b}} {{justfile_directory()}}/artifacts/chain-{{chain_id_b}}
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && {{justfile_directory()}}/deploy-sepolia.sh {{chain_id_a}} {{justfile_directory()}}/artifacts/chain-{{chain_id_a}}
+    set -euo pipefail; WAIT="${OP_UP_DEPLOY_WAIT:-30}"; echo "Waiting ${WAIT}s before second deploy to avoid nonce contention..."; sleep "${WAIT}"
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && {{justfile_directory()}}/deploy-sepolia.sh {{chain_id_b}} {{justfile_directory()}}/artifacts/chain-{{chain_id_b}}
 
 # Usage: just -f op-up/justfile run stop_after=120
 run stop_after:
-    set -euo pipefail; . {{justfile_directory()}}/external-l1.env
-    set -euo pipefail; cd {{justfile_directory()}} && OP_EXTERNAL_L1=1 OP_SV2_CONFIRM_DEPTH=2 OP_UP_STOP_AFTER={{stop_after}} \
-    go run .
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && cd {{justfile_directory()}} && OP_EXTERNAL_L1=1 OP_SV2_CONFIRM_DEPTH=2 OP_UP_STOP_AFTER={{stop_after}} go run .
 
 # Usage: just -f op-up/justfile clean
 clean:
