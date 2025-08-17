@@ -15,23 +15,7 @@ mkdir -p "$WORKDIR"
 # and pass flags explicitly as well for clarity.
 export L1_RPC_URL="${L1_RPC_URL:-$OP_L1_RPC}"
 
-# Seed intent from committed template and rewrite BATCHER placeholder when missing
-if [ ! -f "$WORKDIR/intent.toml" ]; then
-  if [ -f "$ROOT/op-up/deploy-sepolia/intent.toml" ]; then
-    cp "$ROOT/op-up/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
-    # Always expand __ROOT__ placeholder
-    tmp=$(mktemp)
-    sed -E "s#file://__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
-    # Optionally rewrite batcher placeholder
-    if [ -n "${BATCHER_PK:-}" ]; then
-      ADDR=$(cast wallet address --private-key "$BATCHER_PK")
-      tmp=$(mktemp)
-      sed -E "s/0xBATCHER/$ADDR/g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
-    fi
-  fi
-fi
-
-# Ensure state.json exists (init writes a default intent.toml and state.json)
+# Initialize state.json (required by apply/inspect)
 if [ ! -f "$WORKDIR/state.json" ]; then
   # Convert decimal CHAIN_ID to 256-bit hex for init
   L2_HEX=$(printf "0x%064x" "$CHAIN_ID")
@@ -41,6 +25,22 @@ if [ ! -f "$WORKDIR/state.json" ]; then
     --l1-chain-id "${OP_L1_CHAIN_ID}" \
     --l2-chain-ids "$L2_HEX"
 fi
+
+# Overwrite intent.toml with our template and apply placeholders each run
+if [ -f "$ROOT/op-up/deploy-sepolia/intent.toml" ]; then
+  cp "$ROOT/op-up/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
+  # Always expand __ROOT__ placeholder
+  tmp=$(mktemp)
+  sed -E "s#file://__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
+  # Optionally rewrite batcher placeholder
+  if [ -n "${BATCHER_PK:-}" ]; then
+    ADDR=$(cast wallet address --private-key "$BATCHER_PK")
+    tmp=$(mktemp)
+    sed -E "s/0xBATCHER/$ADDR/g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
+  fi
+fi
+
+# (init already handled above)
 
 if [ -d "$ROOT/packages/contracts-bedrock/forge-artifacts" ] && [ ! -f "$WORKDIR/forge-artifacts.tgz" ]; then
   tar -czf "$WORKDIR/forge-artifacts.tgz" -C "$ROOT/packages/contracts-bedrock" forge-artifacts
