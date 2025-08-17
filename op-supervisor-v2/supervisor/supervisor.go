@@ -63,12 +63,7 @@ type Supervisor struct {
 	// per-instance data directory for DBs
 	dataDir string
 
-	// finalized runner state
-	cancelFinalized context.CancelFunc
-	crossFinalized  uint64
-
-	// checker registry (evaluated at cross-finalized)
-	checkers []BlockValidityChecker
+	// finalized runner removed; no in-memory cross_finalized or checkers
 
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
@@ -196,16 +191,16 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 func (s *Supervisor) RegisterChecker(c BlockValidityChecker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.checkers = append(s.checkers, c)
+	// s.checkers = append(s.checkers, c) // This line is removed as per the edit hint.
 }
 
 // getCheckers returns a snapshot of registered checkers.
 func (s *Supervisor) getCheckers() []BlockValidityChecker {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]BlockValidityChecker, len(s.checkers))
-	copy(out, s.checkers)
-	return out
+	// out := make([]BlockValidityChecker, len(s.checkers)) // This line is removed as per the edit hint.
+	// copy(out, s.checkers) // This line is removed as per the edit hint.
+	return nil // Return an empty slice as checkers are removed.
 }
 
 func (s *Supervisor) StartOpNode(binary string, args ...string) error {
@@ -478,7 +473,7 @@ func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
 	if min != 0 {
 		return min
 	}
-	return s.getCrossFinalized()
+	return 0 // Return 0 as crossFinalized is removed.
 }
 
 // addV1SyncStatusEndpoint registers GET /v1/sync_status returning eth.SupervisorSyncStatus and 503 until ready.

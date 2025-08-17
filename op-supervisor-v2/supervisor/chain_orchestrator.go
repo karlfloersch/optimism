@@ -3,7 +3,6 @@ package supervisor
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -357,145 +356,16 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	}
 	s.mu.Unlock()
 
-	// Start finalized runner if this is the first chain registered
-	s.maybeStartFinalizedRunner()
+	// Finalized runner removed; cross-safe advancement is driven by per-chain pollers
 
 	return chainID, nil
 }
 
-// getCrossFinalized returns the last computed cross-finalized height.
-func (s *Supervisor) getCrossFinalized() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.crossFinalized
-}
+// getCrossFinalized returns the DB-backed min cross-safe height (0 if none).
+func (s *Supervisor) getCrossFinalized() uint64 { return s.crossFinalizedFromDBOrFallback() }
 
-// maybeStartFinalizedRunner starts a background loop that computes the minimum FinalizedL2 height across chains.
-// It is intentionally simple and read-only; later we will plug in checkers and denylist/rollback execution.
-func (s *Supervisor) maybeStartFinalizedRunner() {
-	s.mu.Lock()
-	already := s.cancelFinalized != nil
-	hasChains := len(s.chains) > 0
-	s.mu.Unlock()
-	if already || !hasChains {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.cancelFinalized = cancel
-	s.mu.Unlock()
-	go func() {
-		ticker := time.NewTicker(s.runnerInterval)
-		defer ticker.Stop()
-		// feature flag: disable proposals by default until wired
-		enableProposals := strings.ToLower(os.Getenv("SV2_ENABLE_CHECKERS")) == "true"
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				var minHeight uint64
-				minHeight = 0
-				// compute min over all chains of selected label
-				// sample label once per tick OUTSIDE the lock to avoid deadlock
-				label := s.getL1ScopeLabel()
-				s.mu.Lock()
-				// also build a minimal snapshot per tick
-				snap := Snapshot{PerChain: make(map[uint64]ChainSnapshot)}
-				// resolver captures L2 RPCs from chain handles
-				snap.ResolvePayloadHash = func(chainID uint64, height uint64) (string, error) {
-					s.mu.Lock()
-					h := s.chains[chainID]
-					s.mu.Unlock()
-					if h == nil || h.embeddedCfg == nil {
-						return "", fmt.Errorf("unknown chain %d", chainID)
-					}
-					ctx2, cancel2 := context.WithTimeout(ctx, 500*time.Millisecond)
-					defer cancel2()
-					l2Cli, err := opclient.NewRPC(ctx2, s.log, h.embeddedCfg.l2UserRPC)
-					if err != nil {
-						return "", err
-					}
-					defer l2Cli.Close()
-					l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.embeddedCfg.rcfg, true))
-					if err != nil {
-						return "", err
-					}
-					env, err := l2.PayloadByNumber(ctx2, height)
-					if err != nil {
-						return "", err
-					}
-					if hash, ok := env.CheckBlockHash(); ok {
-						return hash.Hex(), nil
-					}
-					return "", fmt.Errorf("no payload hash at %d", height)
-				}
-				for cid, h := range s.chains {
-					_ = cid
-					// fetch rollup status best-effort
-					h.stateMu.Lock()
-					rpc := h.embeddedOpNodeUserRPC
-					h.stateMu.Unlock()
-					if rpc == "" {
-						continue
-					}
-					// best-effort dial with timeout
-					func(localLabel eth.BlockLabel) {
-						ctx2, cancel2 := context.WithTimeout(ctx, 300*time.Millisecond)
-						defer cancel2()
-						st, err := s.fetchSyncStatus(ctx2, rpc)
-						if err == nil && st != nil {
-							var num uint64
-							switch localLabel {
-							case eth.Unsafe:
-								num = st.UnsafeL2.Number
-							case eth.Safe:
-								num = st.SafeL2.Number
-							default:
-								num = st.FinalizedL2.Number
-							}
-							if num != 0 {
-								if minHeight == 0 || num < minHeight {
-									minHeight = num
-								}
-								snap.PerChain[cid] = ChainSnapshot{Finalized: num}
-							}
-						}
-					}(label)
-				}
-				s.mu.Unlock()
-				if minHeight != 0 {
-					s.mu.Lock()
-					s.crossFinalized = minHeight
-					snap.CrossFinalized = minHeight
-					s.mu.Unlock()
-				}
-				if enableProposals && minHeight != 0 {
-					// Evaluate registered checkers with the current snapshot
-					for _, chk := range s.getCheckers() {
-						if props, err := chk.Evaluate(ctx, snap); err != nil {
-							s.log.Warn("checker error", "err", err)
-						} else if len(props) > 0 {
-							// Execute proposals: add denylist + rollback
-							for _, p := range props {
-								if p.PayloadID != "" {
-									_ = s.denylist.Add(p.ChainID, p.PayloadID)
-								}
-								if s.rollbackFn != nil && p.ToBlock > 0 && p.ChainID != 0 {
-									if err := s.rollbackFn(ctx, p.ChainID, p.ToBlock); err != nil {
-										s.log.Warn("rollback failed", "chain", p.ChainID, "to", p.ToBlock, "err", err)
-									} else {
-										s.log.Info("rollback executed", "chain", p.ChainID, "to", p.ToBlock, "reason", p.Reason)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}()
-}
+// maybeStartFinalizedRunner is removed (no-op).
+func (s *Supervisor) maybeStartFinalizedRunner() {}
 
 // RemoveChain stops and unregisters a chain by ID.
 func (s *Supervisor) RemoveChain(chainID uint64) {
