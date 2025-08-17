@@ -22,7 +22,7 @@ if [ ! -f "$WORKDIR/intent.toml" ]; then
     if [ -n "${BATCHER_PK:-}" ]; then
       ADDR=$(cast wallet address --private-key "$BATCHER_PK")
       tmp=$(mktemp)
-      sed -E "s/0xBATCHER/$ADDR/g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
+      sed -E "s/0xBATCHER/$ADDR/g; s#file://__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
     fi
   fi
 fi
