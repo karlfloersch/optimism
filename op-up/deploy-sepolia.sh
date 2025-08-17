@@ -17,12 +17,8 @@ export L1_RPC_URL="${L1_RPC_URL:-$OP_L1_RPC}"
 
 # Seed intent from committed template and rewrite BATCHER placeholder when missing
 if [ ! -f "$WORKDIR/intent.toml" ]; then
-  SOURCE_INTENT="$ROOT/sepolia-intent.toml"
-  if [ ! -f "$SOURCE_INTENT" ]; then
-    SOURCE_INTENT="$ROOT/op-up/deploy-sepolia/intent.toml"
-  fi
-  if [ -f "$SOURCE_INTENT" ]; then
-    cp "$SOURCE_INTENT" "$WORKDIR/intent.toml"
+  if [ -f "$ROOT/op-up/deploy-sepolia/intent.toml" ]; then
+    cp "$ROOT/op-up/deploy-sepolia/intent.toml" "$WORKDIR/intent.toml"
     # Always expand __ROOT__ placeholder
     tmp=$(mktemp)
     sed -E "s#file://__ROOT__#$ROOT#g" "$WORKDIR/intent.toml" > "$tmp" && mv "$tmp" "$WORKDIR/intent.toml"
