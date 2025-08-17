@@ -316,7 +316,14 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 				l1Cli, l1 = s.ensureL1Client(ctxPoll, l1Cli, l1, h.embeddedCfg.l1RPC, rcfg)
 				// Ingest strictly up to local-safe; skip until local-safe progresses
 				target := st.LocalSafeL2
-				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+				// Include cross-safe (from cross DB) for observability
+				var crossSafe any
+				if h.crossDB != nil {
+					if pair, err := h.crossDB.Last(); err == nil {
+						crossSafe = pair.Derived
+					}
+				}
+				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
 				if target.Number == 0 {
 					continue
 				}
@@ -580,7 +587,13 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 					continue
 				}
 				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
+				var crossSafe any
+				if h.crossDB != nil {
+					if pair, err := h.crossDB.Last(); err == nil {
+						crossSafe = pair.Derived
+					}
+				}
+				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
 				if localSafe.Number == 0 {
 					continue
 				}
