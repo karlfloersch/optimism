@@ -31,6 +31,13 @@ if [ ! -f "$WORKDIR/intent.toml" ]; then
   fi
 fi
 
+# Ensure state.json exists by initializing from intent when missing
+if [ ! -f "$WORKDIR/state.json" ]; then
+  go run "$ROOT/op-deployer/cmd/op-deployer" init \
+    --workdir "$WORKDIR" \
+    --intent "$WORKDIR/intent.toml"
+fi
+
 if [ -d "$ROOT/packages/contracts-bedrock/forge-artifacts" ] && [ ! -f "$WORKDIR/forge-artifacts.tgz" ]; then
   tar -czf "$WORKDIR/forge-artifacts.tgz" -C "$ROOT/packages/contracts-bedrock" forge-artifacts
 fi
