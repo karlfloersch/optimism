@@ -8,7 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$WORKDIR"
 
 : "${OP_L1_RPC:?OP_L1_RPC must be set}"
-: "${L1_PK:?L1_PK must be set}"
+# Use DEPLOYER_PK for contract deployment
+: "${DEPLOYER_PK:?DEPLOYER_PK must be set}"
 
 # Ensure op-deployer picks up the L1 RPC URL (expects L1_RPC_URL)
 # and pass flags explicitly as well for clarity.
@@ -32,7 +33,7 @@ fi
 go run "$ROOT/op-deployer/cmd/op-deployer" apply \
   --workdir "$WORKDIR" \
   --l1-rpc-url "$OP_L1_RPC" \
-  --private-key "$L1_PK" \
+  --private-key "$DEPLOYER_PK" \
   "$CHAIN_ID"
 
 echo "Artifacts written to $WORKDIR"

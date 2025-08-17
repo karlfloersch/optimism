@@ -88,9 +88,9 @@ func run() error {
 			sysgo.WithExternalPresetFromEnv(),
 			sysgo.WithL2ELNode(ids.L2EL, nil),
 			sysgo.WithSupervisorV2OnFirstChain(),
-			// Use L1_PK for batcher transactions on Sepolia
+			// Use BATCHER_PK for batcher transactions on Sepolia
 			sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
-				pk := os.Getenv("L1_PK")
+				pk := os.Getenv("BATCHER_PK")
 				if pk != "" {
 					if strings.HasPrefix(pk, "0x") || strings.HasPrefix(pk, "0X") {
 						pk = pk[2:]
