@@ -42,19 +42,19 @@ if [ -d "$ROOT/packages/contracts-bedrock/forge-artifacts" ] && [ ! -f "$WORKDIR
   tar -czf "$WORKDIR/forge-artifacts.tgz" -C "$ROOT/packages/contracts-bedrock" forge-artifacts
 fi
 
-if [ ! -f "$WORKDIR/rollup.json" ]; then
-  go run "$ROOT/op-deployer/cmd/op-deployer" inspect rollup --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/rollup.json"
-fi
-if [ ! -f "$WORKDIR/l2_genesis.json" ]; then
-  go run "$ROOT/op-deployer/cmd/op-deployer" inspect genesis --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/l2_genesis.json"
-fi
-
+# Deploy (creates/updates state.json) before generating derived artifacts
 go run "$ROOT/op-deployer/cmd/op-deployer" apply \
   --workdir "$WORKDIR" \
   --l1-rpc-url "$OP_L1_RPC" \
   --private-key "$DEPLOYER_PK" \
   "$CHAIN_ID"
 
+if [ ! -f "$WORKDIR/rollup.json" ]; then
+  go run "$ROOT/op-deployer/cmd/op-deployer" inspect rollup --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/rollup.json"
+fi
+if [ ! -f "$WORKDIR/l2_genesis.json" ]; then
+  go run "$ROOT/op-deployer/cmd/op-deployer" inspect genesis --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/l2_genesis.json"
+fi
 echo "Artifacts written to $WORKDIR"
 echo "- rollup.json"
 echo "- l2_genesis.json"
