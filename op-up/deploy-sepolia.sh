@@ -31,11 +31,15 @@ if [ ! -f "$WORKDIR/intent.toml" ]; then
   fi
 fi
 
-# Ensure state.json exists by initializing from intent when missing
+# Ensure state.json exists (init writes a default intent.toml and state.json)
 if [ ! -f "$WORKDIR/state.json" ]; then
+  # Convert decimal CHAIN_ID to 256-bit hex for init
+  L2_HEX=$(printf "0x%064x" "$CHAIN_ID")
   go run "$ROOT/op-deployer/cmd/op-deployer" init \
     --workdir "$WORKDIR" \
-    --intent "$WORKDIR/intent.toml"
+    --intent-type standard-overrides \
+    --l1-chain-id "${OP_L1_CHAIN_ID}" \
+    --l2-chain-ids "$L2_HEX"
 fi
 
 if [ -d "$ROOT/packages/contracts-bedrock/forge-artifacts" ] && [ ! -f "$WORKDIR/forge-artifacts.tgz" ]; then
