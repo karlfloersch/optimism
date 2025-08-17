@@ -53,11 +53,12 @@ go run "$ROOT/op-deployer/cmd/op-deployer" apply \
   --private-key "$DEPLOYER_PK" \
   "$CHAIN_ID"
 
+# Some versions of op-deployer print to stdout and ignore --outfile; use shell redirection
 if [ ! -f "$WORKDIR/rollup.json" ]; then
-  go run "$ROOT/op-deployer/cmd/op-deployer" inspect rollup --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/rollup.json"
+  go run "$ROOT/op-deployer/cmd/op-deployer" inspect rollup --workdir "$WORKDIR" "$CHAIN_ID" > "$WORKDIR/rollup.json"
 fi
 if [ ! -f "$WORKDIR/l2_genesis.json" ]; then
-  go run "$ROOT/op-deployer/cmd/op-deployer" inspect genesis --workdir "$WORKDIR" "$CHAIN_ID" --outfile "$WORKDIR/l2_genesis.json"
+  go run "$ROOT/op-deployer/cmd/op-deployer" inspect genesis --workdir "$WORKDIR" "$CHAIN_ID" > "$WORKDIR/l2_genesis.json"
 fi
 echo "Artifacts written to $WORKDIR"
 echo "- rollup.json"

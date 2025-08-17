@@ -15,16 +15,21 @@ This mode runs a single L2 (chainId you choose) against an external L1 RPC (e.g.
 2) Generate artifacts (idempotent):
 
 ```bash
-# Uses op-deployer, writes to op-up/artifacts/
-source op-up/external-l1.env
-./op-up/deploy-sepolia.sh 901
-# Files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json
+# Preferred: use just (keeps commands consistent)
+just -f op-up/justfile deploy 901
+
+# Files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json (written via stdout redirection)
 ```
 
 Notes about artifacts and template:
 - The deploy script seeds `op-up/artifacts/intent.toml` from the committed template at `op-up/deploy-sepolia/intent.toml`.
 - It expands `file://__ROOT__` to the repo root and rewrites every `0xBATCHER` placeholder to the address derived from `BATCHER_PK`.
 - You can delete `op-up/artifacts/` any time; the script will regenerate the intent before inspecting/applying.
+
+End-to-end (clean → deploy → run):
+```bash
+just -f op-up/justfile up 901 120
+```
 
 ## Pre-flight checks (important)
 
@@ -56,8 +61,8 @@ export OP_L2_GENESIS_PATH="$PWD/op-up/artifacts/l2_genesis.json"
 ## Run
 
 ```bash
-source op-up/external-l1.env
-OP_EXTERNAL_L1=1 OP_SV2_CONFIRM_DEPTH=2 OP_UP_STOP_AFTER=120 go run ./op-up
+# Preferred: use just
+just -f op-up/justfile run 120
 ```
 
 - SV2 HTTP is printed at startup (e.g., `[sv2] http: http://127.0.0.1:PORT`).
