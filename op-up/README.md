@@ -21,6 +21,11 @@ source op-up/external-l1.env
 # Files: op-up/artifacts/rollup.json, op-up/artifacts/l2_genesis.json
 ```
 
+Notes about artifacts and template:
+- The deploy script seeds `op-up/artifacts/intent.toml` from the committed template at `op-up/deploy-sepolia/intent.toml`.
+- It expands `file://__ROOT__` to the repo root and rewrites every `0xBATCHER` placeholder to the address derived from `BATCHER_PK`.
+- You can delete `op-up/artifacts/` any time; the script will regenerate the intent before inspecting/applying.
+
 ## Pre-flight checks (important)
 
 - Ensure the configured batcher matches `BATCHER_PK` and is funded on Sepolia; otherwise L2 safe will not advance.
