@@ -364,9 +364,6 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 // getCrossFinalized returns the DB-backed min cross-safe height (0 if none).
 func (s *Supervisor) getCrossFinalized() uint64 { return s.crossFinalizedFromDBOrFallback() }
 
-// maybeStartFinalizedRunner is removed (no-op).
-func (s *Supervisor) maybeStartFinalizedRunner() {}
-
 // RemoveChain stops and unregisters a chain by ID.
 func (s *Supervisor) RemoveChain(chainID uint64) {
 	s.mu.Lock()

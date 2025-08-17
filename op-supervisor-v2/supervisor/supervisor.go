@@ -187,22 +187,6 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 	return s.l1ScopeLabel
 }
 
-// RegisterChecker appends a block validity checker to be evaluated at cross-finalized.
-func (s *Supervisor) RegisterChecker(c BlockValidityChecker) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// s.checkers = append(s.checkers, c) // This line is removed as per the edit hint.
-}
-
-// getCheckers returns a snapshot of registered checkers.
-func (s *Supervisor) getCheckers() []BlockValidityChecker {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// out := make([]BlockValidityChecker, len(s.checkers)) // This line is removed as per the edit hint.
-	// copy(out, s.checkers) // This line is removed as per the edit hint.
-	return nil // Return an empty slice as checkers are removed.
-}
-
 func (s *Supervisor) StartOpNode(binary string, args ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

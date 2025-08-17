@@ -86,11 +86,6 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 	if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
 		s.sup.SetDataDir(dd)
 	}
-	// Register env-driven height checker if configured
-	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
-		s.sup.RegisterChecker(chk)
-		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
-	}
 	// Scope: allow override via SV2_L1_SCOPE (finalized|safe|unsafe), default unsafe
 	scope := strings.ToLower(os.Getenv("SV2_L1_SCOPE"))
 	switch scope {
@@ -100,10 +95,6 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 		s.sup.SetL1ScopeLabel(eth.Safe)
 	default:
 		s.sup.SetL1ScopeLabel(eth.Unsafe)
-	}
-	if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
-		s.sup.RegisterChecker(chk)
-		_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
 	}
 	// Expose embedded op-node user RPC via HTTP reverse proxy for tests
 	s.sup.EnableOpNodeProxy(true)
@@ -161,11 +152,6 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		}
 		// In tests, gate cross-safe against L1 Unsafe to progress quickly
 		s.sup.SetL1ScopeLabel(eth.Unsafe)
-		// Register env-driven height checker if configured
-		if chk := sv2.NewHeightCheckerFromEnv(); chk != nil {
-			s.sup.RegisterChecker(chk)
-			_ = os.Setenv("SV2_ENABLE_CHECKERS", "true")
-		}
 		// Expose embedded op-node user RPC via HTTP reverse proxy for tests
 		s.sup.EnableOpNodeProxy(true)
 		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}

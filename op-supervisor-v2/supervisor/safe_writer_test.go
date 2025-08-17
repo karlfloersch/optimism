@@ -43,8 +43,7 @@ func TestSafeWriterPersistsLocalMapping(t *testing.T) {
 
 	// Minimal assertion: status should include cross_finalized and not panic, and l1_scope_label present
 	s.SetL1ScopeLabel(eth.Finalized)
-	// Trigger runner once; no chains have RPCs but loop should handle gracefully
-	s.runnerInterval = 1 * time.Millisecond
-	s.maybeStartFinalizedRunner()
+	// No finalized runner; ensure getCrossFinalized can be called safely
+	_ = s.getCrossFinalized()
 	time.Sleep(10 * time.Millisecond)
 }
