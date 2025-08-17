@@ -274,6 +274,12 @@ func runSysgo() error {
 	defer t.doCleanup()
 	sys := shim.NewSystem(t)
 	orch.Hydrate(sys)
+	// In multi-chain mode the SV2 + batchers are fully orchestrated via presets; just wait.
+	if os.Getenv("OP_L2_CHAIN_IDS") != "" {
+		<-ctx.Done()
+		return nil
+	}
+
 	l2Networks := sys.L2Networks()
 	if len(l2Networks) != 1 {
 		return fmt.Errorf("need one l2 network, got: %d", len(l2Networks))
