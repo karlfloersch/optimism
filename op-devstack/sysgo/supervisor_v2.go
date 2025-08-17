@@ -325,9 +325,14 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 			copy(jwtSecret[:], b)
 
 			// Add chain to supervisor
-			_, err = s.sup.AddChain(l1el.userRPC, l1cl.beacon.BeaconAddr(), l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
+			beaconAddr := ""
+			if l1cl.beacon != nil {
+				beaconAddr = l1cl.beacon.BeaconAddr()
+			} else {
+				beaconAddr = l1cl.beaconHTTPAddr
+			}
+			_, err = s.sup.AddChain(l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
 			orch.p.Require().NoError(err)
-
 			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
 			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
 			if cid, ok := l2el.id.ChainID().Uint64(); ok {
@@ -388,7 +393,13 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 			copy(jwtSecret[:], b)
 
 			// Add chain to supervisor with custom confirm depth
-			_, err = s.sup.AddChain(l1el.userRPC, l1cl.beacon.BeaconAddr(), l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
+			beaconAddr := ""
+			if l1cl.beacon != nil {
+				beaconAddr = l1cl.beacon.BeaconAddr()
+			} else {
+				beaconAddr = l1cl.beaconHTTPAddr
+			}
+			_, err = s.sup.AddChain(l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
 			orch.p.Require().NoError(err)
 
 			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)

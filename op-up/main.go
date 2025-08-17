@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"math/big"
-	"strings"
 	"strconv"
+	"strings"
 
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
@@ -80,6 +80,7 @@ func run() error {
 			// Parse comma-separated chain IDs
 			parts := strings.Split(chainIDsCSV, ",")
 			var l2ELs []stack.L2ELNodeID
+			var l2CIDs []eth.ChainID
 			combined := stack.Combine(
 				sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
 				sysgo.WithExternalL1NodesRPC(l1CID, os.Getenv("OP_L1_RPC"), os.Getenv("OP_L1_BEACON_RPC")),
@@ -114,8 +115,7 @@ func run() error {
 				l2el := stack.NewL2ELNodeID("sequencer", l2cid)
 				combined.Add(sysgo.WithL2ELNode(l2el, nil))
 				l2ELs = append(l2ELs, l2el)
-				// Start a batcher for this chain; use embedded CL that SV2 registers per chain
-				combined.Add(sysgo.WithBatcher(stack.NewL2BatcherID("main", l2cid), stack.NewL1ELNodeID("l1", l1CID), stack.NewL2CLNodeID("embedded", l2cid), l2el))
+				l2CIDs = append(l2CIDs, l2cid)
 			}
 			// Wire batcher options: per-chain keys and rollup RPC via SV2 proxy
 			combined.Add(sysgo.WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
@@ -149,6 +149,18 @@ func run() error {
 				}
 			}
 			combined.Add(sysgo.WithSupervisorV2OnAllChainsConfirmDepth(depth))
+			// Start batchers after SV2 HTTP + CL shims are ready
+			combined.Add(stack.AfterDeploy(func(orch *sysgo.Orchestrator) {
+				for _, cid := range l2CIDs {
+					optB := sysgo.WithBatcher(
+						stack.NewL2BatcherID("main", cid),
+						stack.NewL1ELNodeID("l1", l1CID),
+						stack.NewL2CLNodeID("embedded", cid),
+						stack.NewL2ELNodeID("sequencer", cid),
+					)
+					optB.AfterDeploy(orch)
+				}
+			}))
 			// Faucets: external L1, all L2 ELs
 			combined.Add(sysgo.WithFaucets([]stack.L1ELNodeID{stack.NewL1ELNodeID("l1", l1CID)}, l2ELs))
 			opt = combined
