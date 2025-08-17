@@ -24,6 +24,7 @@ l2ContractsLocator = "file://__ROOT__/packages/contracts-bedrock/forge-artifacts
     systemConfigOwner = "0xBATCHER"
     unsafeBlockSigner = "0xBATCHER"
     batcher = "0xBATCHER"
+    proposer = "0xBATCHER"
     challenger = "0xfd1d2e729ae8eee2e146c033bf4400fe75284301"
 
 
