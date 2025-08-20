@@ -9,7 +9,7 @@ We are building Supervisor v2 (SV2), a minimal finalized-only supervisor that em
 
 Read these docs first:
 - docs/design/supervisor-v2-plan.md (this plan with milestones and checklists)
-- docs/design/op-supervisor-v2.md (overall SV2 design)
+- docs/design/supervisor-overview.md (overall SV2 overview and core logic)
 - docs/design/supervisor-v1-cross-safe-walkthrough.md (cross-safe background and DBs)
 
 Key constraints and context:
