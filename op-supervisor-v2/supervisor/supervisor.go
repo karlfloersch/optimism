@@ -329,13 +329,9 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			http.Error(w, "missing to_block_number", http.StatusBadRequest)
 			return
 		}
-		// chain-scoped when in multi-chain mode; legacy single-chain otherwise
+		// chain-scoped when in multi-chain mode
 		s.mu.Lock()
 		multi := len(s.chains) > 0
-		var cfg *embeddedConfig
-		if !multi {
-			cfg = s.embeddedCfg
-		}
 		s.mu.Unlock()
 		var err error
 		if multi {
@@ -360,11 +356,9 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			}
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {
-			if cfg == nil {
-				http.Error(w, "embedded mode not running", http.StatusServiceUnavailable)
-				return
-			}
-			err = s.performRollback(r.Context(), cfg, *req.ToBlockNumber)
+			// In single-chain mode we don't support admin rollback anymore; require multi-chain handles.
+			http.Error(w, "embedded mode not running", http.StatusServiceUnavailable)
+			return
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -813,83 +807,7 @@ func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC str
 
 // performRollback stops the embedded op-node, rolls back the EL to an absolute block number
 // then restarts the op-node and polling.
-func (s *Supervisor) performRollback(ctx context.Context, cfg *embeddedConfig, toBlock uint64) error {
-	// Stop polling and op-node
-	s.mu.Lock()
-	if s.cancelPoll != nil {
-		s.cancelPoll()
-		s.cancelPoll = nil
-	}
-	stopFn := s.stopEmbeddedOpNode
-	s.mu.Unlock()
-	if stopFn != nil {
-		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = stopFn(c)
-		cancel()
-	}
-
-	// Roll back EL head to the absolute target via pluggable implementation
-	if err := rollbackEL(ctx, cfg.l2UserRPC, toBlock); err != nil {
-		return err
-	}
-
-	// Restart embedded op-node and polling
-	s.mu.Lock()
-	userRPC, stopFn2, err := s.StartEmbeddedOpNode(cfg.l1RPC, cfg.beaconAddr, cfg.l2AuthRPC, cfg.jwtSecret, cfg.rcfg)
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.embeddedOpNodeUserRPC = userRPC
-	s.stopEmbeddedOpNode = stopFn2
-	ctxPoll, cancel := context.WithCancel(context.Background())
-	s.cancelPoll = cancel
-	s.mu.Unlock()
-
-	// Dial clients for polling
-	opNodeCli, err := opclient.NewRPC(ctxPoll, s.log, userRPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, cfg.l2UserRPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(cfg.rcfg, true))
-	if err != nil {
-		cancel()
-		return err
-	}
-	roll := sources.NewRollupClient(opNodeCli)
-
-	go func() {
-		ticker := time.NewTicker(cfg.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctxPoll.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctxPoll)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
-					continue
-				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctxPoll, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
-				}
-			}
-		}
-	}()
-	return nil
-}
+// performRollback removed; legacy single-chain rollback is now handled within RollbackChain
 
 // ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node if running.
 func (s *Supervisor) ManagedOpNodeUserRPC() string {

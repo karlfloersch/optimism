@@ -101,8 +101,8 @@ func main() {
 			if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
 				return fmt.Errorf("parse rollup.config: %w", err)
 			}
-			if err := sup.StartManaged(l1RPC, beacon, l2Auth, l2User, jwt, &rcfg, pollInt, uint64(confirmDepth)); err != nil {
-				return fmt.Errorf("start embedded: %w", err)
+			if _, err := sup.AddChain(l1RPC, beacon, l2Auth, l2User, jwt, &rcfg, pollInt, uint64(confirmDepth)); err != nil {
+				return fmt.Errorf("add chain: %w", err)
 			}
 
 			// Wait for interrupt
