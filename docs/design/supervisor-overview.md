@@ -4,13 +4,15 @@ This document describes a proof-of-concept (PoC). It is not production-ready and
 
 ### What it is
 
-- **Goal**: Provide interop-era cross-safety via an external Supervisor that embeds and manages pre-interop op-nodes, computes cross-safe independently, and coordinates rollbacks when needed.
+- **Goal**: Provide interop cross-safety via an external Supervisor that embeds and manages pre-interop op-nodes, computes cross-safe independently, and coordinates rollbacks when needed.
 - **Scope**: One Supervisor process can manage multiple chains. For each chain it runs an embedded `op-node`, connects to the chain’s L2 EL and shared L1 RPCs, ingests data to local DBs, and computes cross-safe.
-- **Surface**:
-  - Health and status (per-chain).
-  - Denylist check: `GET /denylist/v1/check?chainId=<id>&id=<payloadId>` → `{ denylisted: bool }`.
-  - Optional reverse-proxy for op-node user RPC: `/opnode/{chainId}/`.
-- **Core logic size**: ~1,127 lines of Go (critical logic only; non-test) across `ingest.go`, `crosssafe_adapter.go`, `rollback.go`, `chain_orchestrator.go`, and `denylist.go`.
+- **Core logic (~1,127 LOC; critical logic only; non-test)**:
+  - Ingest up to LocalSafe each tick and persist: payloads/receipts to `logs`, and `(L1 → L2)` links to `local` (and seed `cross` when empty).
+  - Compute cross-safe across chains under an L1 confirmation depth/scope; when valid, update `cross` to advance cross-safe.
+  - If a block is found cross-invalid (e.g., contains invalid executing messages), add its deterministic payload/block ID to a per-chain denylist, stop the embedded op-node, and roll back the op-node and EL to height H-1 (the last known-good).
+  - On restart, as the op-node re-derives, it consults the Supervisor denylist (via `SV2_DENYLIST_URL`) and replaces the invalid block at height H with a deposit-only block per steady derivation rules, then proceeds.
+
+  (see diagram and code walkthrough below for more detail)
 
 ### Key product simplifications and differences
 
@@ -279,5 +281,16 @@ On restart, the embedded op-node queries the Supervisor’s denylist before inse
 
 - Reuse existing alt-DA “denylist”-like mechanism where applicable, to avoid duplicating policy/state.
 - Reminder: this is a PoC intended for exploration/experimentation only; do not run in production.
+
+### FAQ
+
+- **How do we detect invalid executing messages without cross-unsafe in the node?**
+  - This PoC keeps the `op-node` minimal. Detection can live in external monitoring (or even in the batcher) that validates interop references before they are batched. When a monitor flags an invalid reference, operators can trigger an operational response (e.g., pause/rollback and recover) rather than relying on in-node cross-unsafe. See the Interop AutoStop design for an operator playbook and recovery flow ([Design: Interop AutoStop](https://github.com/ethereum-optimism/design-docs/pull/287)).
+
+- **How do we avoid being DoS’d by streams of invalid interop references?**
+  - Pre-screen at RPC ingress (e.g., proxyd) and reject requests that reference invalid/unavailable executing messages before they reach the sequencer. This can be as simple as an `eth_getLogs`/headers check or a purpose-built validator. Add rate limiting/backoff and return structured errors so clients back off; proxyd can also implement automatic backoff when it sees AutoStop-style errors (see discussion in the same design PR above).
+
+- **Can we simplify further?**
+  - Likely. Candidates include stricter L1 scope gating to defer work earlier, making the logs DB optional when only cross-safe is needed, reusing alt-DA’s denylist to avoid duplicate policy/config, and moving more checks to the batcher/proxyd. This PoC is deliberately minimal and expected to evolve.
 
 
