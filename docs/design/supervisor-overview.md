@@ -25,7 +25,7 @@ This document describes a proof-of-concept (PoC). It is not production-ready and
   - The op-node remains pre-interop and unmodified with the exception of an optional denylist consult (enabled by `SV2_DENYLIST_URL`) before inserting a payload. If denylisted, the payload is treated as invalid and skipped.
   - There are no interop-specific storage changes or cross-safety logic added to the op-node.
 
-- **No P2P sync/replication of the Supervisor databases**:
+- **No support for P2P sync/replication of the Supervisor databases**:
   - The Supervisor’s logs/local/cross databases are maintained locally by the Supervisor instance. There is no peer-to-peer synchronization layer for these DBs.
   - Result: reduced complexity, fewer moving parts, and no additional network protocols.
 
