@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 
+	"net"
+
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
@@ -208,22 +210,32 @@ func run() error {
 			)
 		}
 	} else {
-		opt = stack.Combine(
-			sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
-			sysgo.WithDeployer(),
-			sysgo.WithDeployerOptions(
-				sysgo.WithLocalContractSources(),
-				sysgo.WithCommons(ids.L1.ChainID()),
-				sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
-			),
-			sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
-			sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
-			sysgo.WithL2ELNode(ids.L2EL, nil),
-			sysgo.WithL2CLNode(ids.L2CL, true, false, ids.L1CL, ids.L1EL, ids.L2EL),
-			sysgo.WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL),
-			sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil),
-			sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}),
-		)
+		// Local two-chain mode with Supervisor v2 across both chains and Interop2-only activation
+		// Enable by setting OP_LOCAL_TWO_CHAIN=1
+		if os.Getenv("OP_LOCAL_TWO_CHAIN") == "1" {
+			opt = stack.Combine(
+				sysgo.WithSV2TwoChainMinimalDepth(6, 1),
+				sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
+			)
+		} else {
+			// Default single-chain local mode
+			opt = stack.Combine(
+				sysgo.WithMnemonicKeys(devkeys.TestMnemonic),
+				sysgo.WithDeployer(),
+				sysgo.WithDeployerOptions(
+					sysgo.WithLocalContractSources(),
+					sysgo.WithCommons(ids.L1.ChainID()),
+					sysgo.WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+				),
+				sysgo.WithDeployerPipelineOption(sysgo.WithDeployerCacheDir(deployerCacheDir)),
+				sysgo.WithL1Nodes(ids.L1EL, ids.L1CL),
+				sysgo.WithL2ELNode(ids.L2EL, nil),
+				sysgo.WithL2CLNode(ids.L2CL, true, false, ids.L1CL, ids.L1EL, ids.L2EL),
+				sysgo.WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL),
+				sysgo.WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil),
+				sysgo.WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}),
+			)
+		}
 	}
 	presets.DoMain(testingM{}, stack.MakeCommon(opt), presets.WithLogFilter(logfilter.DefaultShow(logfilter.Level(log.LevelDebug).Show())))
 
@@ -287,8 +299,92 @@ func runSysgo() error {
 	defer t.doCleanup()
 	sys := shim.NewSystem(t)
 	orch.Hydrate(sys)
+
+	// Fixed EL RPC proxies for multi-chain modes (local two-chain or external multi-chain)
+	if os.Getenv("OP_LOCAL_TWO_CHAIN") == "1" || os.Getenv("OP_L2_CHAIN_IDS") != "" {
+		// Default fixed ports: 9545 for chain 901, 9546 for chain 902 (override via OP_FIXED_EL_PORTS="901=PORT,902=PORT")
+		portMap := map[uint64]string{901: "9545", 902: "9546"}
+		if cfg := os.Getenv("OP_FIXED_EL_PORTS"); cfg != "" {
+			for _, kv := range strings.Split(cfg, ",") {
+				kv = strings.TrimSpace(kv)
+				if kv == "" || !strings.Contains(kv, "=") {
+					continue
+				}
+				parts := strings.SplitN(kv, "=", 2)
+				cidStr := strings.TrimSpace(parts[0])
+				portStr := strings.TrimSpace(parts[1])
+				if n, ok := new(big.Int).SetString(cidStr, 10); ok {
+					portMap[n.Uint64()] = portStr
+				}
+			}
+		}
+		for _, netw := range sys.L2Networks() {
+			cid, _ := netw.ID().ChainID().Uint64()
+			el := netw.L2ELNode(match.FirstL2EL)
+			backend := el.L2EthClient().RPC()
+			port, ok := portMap[cid]
+			if !ok {
+				continue
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to bind fixed EL port for chain %d on :%s: %v\n", cid, port, err)
+				continue
+			}
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, "Failed to read body", http.StatusInternalServerError)
+					return
+				}
+				defer r.Body.Close()
+				var req map[string]any
+				if err := json.Unmarshal(body, &req); err != nil {
+					http.Error(w, "Invalid JSON RPC", http.StatusBadRequest)
+					return
+				}
+				method, _ := req["method"].(string)
+				var params []any
+				if p, ok := req["params"]; ok && p != nil {
+					switch vv := p.(type) {
+					case []any:
+						params = vv
+					case map[string]any:
+						params = []any{vv}
+					}
+				}
+				id := req["id"]
+				var result json.RawMessage
+				callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				if err := backend.CallContext(callCtx, &result, method, params...); err != nil {
+					resp := map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32000, "message": err.Error()}}
+					b, _ := json.Marshal(resp)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(b)
+					return
+				}
+				resp := map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+				b, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(b)
+			})
+			srv := &http.Server{Handler: mux}
+			go func(chain uint64, p string) {
+				fmt.Printf("Fixed EL RPC proxy for chain %d: http://127.0.0.1:%s\n", chain, p)
+				_ = srv.Serve(ln)
+			}(cid, port)
+		}
+	}
 	// In multi-chain mode the SV2 + batchers are fully orchestrated via presets; just wait.
-	if os.Getenv("OP_L2_CHAIN_IDS") != "" {
+	if os.Getenv("OP_L2_CHAIN_IDS") != "" || os.Getenv("OP_LOCAL_TWO_CHAIN") == "1" {
 		<-ctx.Done()
 		return nil
 	}
