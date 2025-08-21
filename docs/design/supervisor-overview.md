@@ -4,7 +4,7 @@ This document describes a proof-of-concept (PoC). It is not production-ready and
 
 ### What it is
 
-- **Goal**: Provide interop cross-safety via a Supervisor that embeds and manages pre-interop op-nodes, computes cross-safe independently, and coordinates rollbacks when needed.
+- **Goal**: Provide interop cross-safety via a Supervisor that embeds and manages pre-interop op-nodes, computes cross-safe independently, and coordinates rollbacks when needed **in the fewest lines of code possible**.
 - **Scope**: One Supervisor process can manage multiple chains. For each chain it runs an embedded `op-node`, connects to the chain’s L2 EL and shared L1 RPCs, ingests data to local DBs, and computes cross-safe.
 - **Core logic (consensus-critical; non-test) — supervisor ~1,127 LOC; op-node ~30 LOC**:
   - Ingest up to LocalSafe each tick and persist: payloads/receipts to `logs`, and `(L1 → L2)` links to `local` (and seed `cross` when empty).
