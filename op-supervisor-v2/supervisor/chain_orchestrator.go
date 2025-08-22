@@ -28,10 +28,9 @@ func (s *Supervisor) ensureL1Client(ctx context.Context, l1Cli opclient.RPC, l1 
 			l1Cli = c
 		}
 	}
-	if l1Cli != nil && l1 == nil {
-		if l, e := sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard)); e == nil {
-			l = l
-			return l1Cli, l
+	if l1Cli != nil {
+		if l1Client, e := sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard)); e == nil {
+			l1 = l1Client
 		}
 	}
 	return l1Cli, l1
@@ -209,6 +208,75 @@ func (s *Supervisor) runCrossSafeStep(ctx context.Context, adapter *crosssafeAda
 	}
 }
 
+// startChainPolling starts the main polling loop for a chain with full supervisor functionality.
+func (s *Supervisor) startChainPolling(ctxPoll context.Context, h *chainHandle, roll *sources.RollupClient, l2 *sources.L2Client, chainID uint64) {
+	ticker := time.NewTicker(h.embeddedCfg.interval)
+	defer ticker.Stop()
+
+	// lazy L1 client for ingest
+	l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l1RPC)
+	var l1 *sources.L1Client
+	if l1Cli != nil {
+		l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(h.embeddedCfg.rcfg, true, sources.RPCKindStandard))
+	}
+
+	// open DBs if not already
+	if h.logsDB == nil || h.localDB == nil || h.crossDB == nil {
+		logs, local, cross, err := s.openChainDBs(s.log, chainID, s.getDataDir())
+		if err == nil {
+			h.logsDB, h.localDB, h.crossDB = logs, local, cross
+		} else {
+			s.log.Warn("failed to open sv2 dbs", "err", err)
+		}
+	}
+
+	// register this chain in the shared linker
+	s.registerChainForLinker(eth.ChainIDFromUInt64(chainID))
+
+	for {
+		select {
+		case <-ctxPoll.Done():
+			return
+		case <-ticker.C:
+			st, err := roll.SyncStatus(ctxPoll)
+			if err != nil || st == nil {
+				s.log.Warn("poll: sync status error", "err", err)
+				continue
+			}
+			// Ensure L1 client is initialized (may fail early before L1 comes up)
+			l1Cli, l1 = s.ensureL1Client(ctxPoll, l1Cli, l1, h.embeddedCfg.l1RPC, h.embeddedCfg.rcfg)
+			// Ingest strictly up to local-safe; skip until local-safe progresses
+			target := st.LocalSafeL2
+			// Include cross-safe (from cross DB) for observability
+			var crossSafe any
+			if h.crossDB != nil {
+				if pair, err := h.crossDB.Last(); err == nil {
+					crossSafe = pair.Derived
+				}
+			}
+			s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
+			if target.Number == 0 {
+				continue
+			}
+			// Ingest and optionally seed/debug if there is new work
+			if h.logsDB != nil && h.localDB != nil && l1 != nil {
+				s.ingestToLocalSafe(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID, target.Number)
+				s.seedLocalIfEmpty(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID, target.Number)
+				s.debugIngestHeads(h, chainID)
+			}
+			// bootstrap cross DB once from latest local derived so cross-safe can start progressing
+			if h.crossDB != nil && h.localDB != nil {
+				s.bootstrapCrossIfEmpty(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID)
+			}
+			// drive one step of cross-safe update
+			if h.logsDB != nil && h.localDB != nil && h.crossDB != nil {
+				adapter := s.newCrosssafeAdapter(h, l1, l2, h.embeddedCfg.rcfg, chainID)
+				s.runCrossSafeStep(ctxPoll, adapter, chainID)
+			}
+		}
+	}
+}
+
 // chainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
 type chainHandle struct {
 	stateMu sync.Mutex
@@ -280,70 +348,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	}
 	roll := sources.NewRollupClient(opNodeCli)
 
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		// lazy L1 client for ingest
-		l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l1RPC)
-		var l1 *sources.L1Client
-		if l1Cli != nil {
-			l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard))
-		}
-		// open DBs if not already
-		if h.logsDB == nil || h.localDB == nil || h.crossDB == nil {
-			logs, local, cross, err := s.openChainDBs(s.log, chainID, s.getDataDir())
-			if err == nil {
-				h.logsDB, h.localDB, h.crossDB = logs, local, cross
-			} else {
-				s.log.Warn("failed to open sv2 dbs", "err", err)
-			}
-		}
-		// register this chain in the shared linker
-		s.registerChainForLinker(eth.ChainIDFromUInt64(chainID))
-
-		for {
-			select {
-			case <-ctxPoll.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctxPoll)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				// Ensure L1 client is initialized (may fail early before L1 comes up)
-				l1Cli, l1 = s.ensureL1Client(ctxPoll, l1Cli, l1, h.embeddedCfg.l1RPC, rcfg)
-				// Ingest strictly up to local-safe; skip until local-safe progresses
-				target := st.LocalSafeL2
-				// Include cross-safe (from cross DB) for observability
-				var crossSafe any
-				if h.crossDB != nil {
-					if pair, err := h.crossDB.Last(); err == nil {
-						crossSafe = pair.Derived
-					}
-				}
-				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
-				if target.Number == 0 {
-					continue
-				}
-				// Ingest and optionally seed/debug if there is new work
-				if h.logsDB != nil && h.localDB != nil && l1 != nil {
-					s.ingestToLocalSafe(ctxPoll, h, l1, l2, rcfg, chainID, target.Number)
-					s.seedLocalIfEmpty(ctxPoll, h, l1, l2, rcfg, chainID, target.Number)
-					s.debugIngestHeads(h, chainID)
-				}
-				// bootstrap cross DB once from latest local derived so cross-safe can start progressing
-				if h.crossDB != nil && h.localDB != nil {
-					s.bootstrapCrossIfEmpty(ctxPoll, h, l1, l2, rcfg, chainID)
-				}
-				// drive one step of cross-safe update
-				if h.logsDB != nil && h.localDB != nil && h.crossDB != nil {
-					adapter := s.newCrosssafeAdapter(h, l1, l2, rcfg, chainID)
-					s.runCrossSafeStep(ctxPoll, adapter, chainID)
-				}
-			}
-		}
-	}()
+	go s.startChainPolling(ctxPoll, h, roll, l2, chainID)
 
 	// Register handle
 	s.mu.Lock()
@@ -440,35 +445,6 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	}
 	roll := sources.NewRollupClient(opNodeCli)
 
-	go func() {
-		ticker := time.NewTicker(h.embeddedCfg.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctxPoll.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctxPoll)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				var crossSafe any
-				if h.crossDB != nil {
-					if pair, err := h.crossDB.Last(); err == nil {
-						crossSafe = pair.Derived
-					}
-				}
-				s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
-				if localSafe.Number == 0 {
-					continue
-				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctxPoll, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "chain", chainID, "num", localSafe.Number, "err", err)
-				}
-			}
-		}
-	}()
+	go s.startChainPolling(ctxPoll, h, roll, l2, chainID)
 	return nil
 }
