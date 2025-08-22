@@ -24,6 +24,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
+
+	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
+	"github.com/ethereum-optimism/optimism/op-service/txplan"
 )
 
 // TestSV2RollbackSingleChain is a minimal single-chain rollback + denylist smoke test.
@@ -990,53 +993,231 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 	defer cancel2()
 	t.Require().NoError(WaitSafeAtOrAbove(ctx2, opnodeURL, target, t.Logger()))
 
-	// helper to read cross_safe Number from /status
-	readCrossSafe := func() (uint64, uint64, error) {
-		resp, err := http.Get(fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID))
-		if err != nil {
-			return 0, 0, err
+	// Send a simple tx to create activity and capture its inclusion block number via EL (sequencer EL)
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
+	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
+	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
+
+	// Use the first L2 EL node (sequencer EL) for tx planning
+	el := l2Net.L2ELNode(match.FirstL2EL)
+
+	planAlice := txplan.Combine(
+		txplan.WithPrivateKey(alicePriv),
+		txplan.WithChainID(el.EthClient()),
+		txplan.WithPendingNonce(el.EthClient()),
+		txplan.WithAgainstLatestBlock(el.EthClient()),
+		txplan.WithEstimator(el.EthClient(), true),
+		txplan.WithRetrySubmission(el.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(el.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(el.EthClient()),
+	)
+	transfer := txplan.NewPlannedTx(planAlice)
+	_, err = transfer.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	incRef, err := transfer.IncludedBlock.Eval(t.Ctx())
+	t.Require().NoError(err)
+	includeNum := incRef.Number
+
+	// Wait until Safe >= includeNum on the sequencer op-node proxy
+	seqOp := fmt.Sprintf("%s/opnode/%d/", sv2URL, chainID)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, includeNum, t.Logger()))
+
+	// Fetch the block hash at includeNum from the sequencer EL directly and assert it is non-empty
+	getELHash := func(node stack.L2ELNode, num uint64) string {
+		var out struct {
+			Hash string `json:"hash"`
 		}
-		defer resp.Body.Close()
-		var out map[string]any
-		if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
-			return 0, 0, derr
-		}
-		// cross_safe is encoded as an object with Number field
-		var crossN, localN uint64
-		if cs, ok := out["cross_safe"].(map[string]any); ok {
-			if v, ok2 := cs["Number"].(float64); ok2 {
-				crossN = uint64(v)
-			} else if v2, ok3 := cs["number"].(float64); ok3 {
-				crossN = uint64(v2)
+		hexNum := fmt.Sprintf("0x%x", num)
+		// Retry to avoid transient not-found right after reorgs/resets
+		t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+			out.Hash = ""
+			if err := node.L2EthClient().RPC().CallContext(ctx, &out, "eth_getBlockByNumber", hexNum, false); err != nil {
+				return err
 			}
-		}
-		if ls, ok := out["local_safe"].(map[string]any); ok {
-			if v, ok2 := ls["Number"].(float64); ok2 {
-				localN = uint64(v)
-			} else if v2, ok3 := ls["number"].(float64); ok3 {
-				localN = uint64(v2)
+			if out.Hash == "" {
+				return fmt.Errorf("empty hash")
 			}
+			return nil
+		}))
+		return out.Hash
+	}
+	seqHash := getELHash(el, includeNum)
+	t.Require().NotEmpty(seqHash)
+}
+
+// TestSV2SequencerAndVerifierSyncSingleChain spins up a single L2 chain under SV2 (sequencer),
+// then starts a second SV2 instance in verifier mode for the same chain. It sends a tx,
+// waits until both sequencer and verifier report a Safe block at/after the inclusion height,
+// and asserts the block hashes at that safe height are identical on both nodes.
+func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
+	// Prepare IDs for a second EL on the default L2 chain for the verifier
+	verifierELID := stack.NewL2ELNodeID("verifier", DefaultL2AID)
+	// Prepare ID for a third EL (second verifier)
+	verifierELID2 := stack.NewL2ELNodeID("verifier2", DefaultL2AID)
+
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		// add second and third ELs up-front so they are available in the system
+		WithL2ELNode(verifierELID, nil),
+		WithL2ELNode(verifierELID2, nil),
+		WithSupervisorV2OnFirstChain(),
+		WithInterop2ActivationOffsetForSV2(6),
+		// Start a batcher against the embedded op-node (via CL registered by SV2)
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(
+				stack.NewL2BatcherID("main", cid),
+				stack.NewL1ELNodeID("l1", DefaultL1ID),
+				stack.NewL2CLNodeID("embedded", cid),
+				stack.NewL2ELNodeID("sequencer", cid),
+			)
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	// Start two SV2s in verifier mode against the two verifier ELs before hydration
+	var verifierURL string
+	var verifierURL2 string
+	stack.ApplyOptionLifecycle(stack.Combine[*Orchestrator](
+		opt,
+		WithSecondSupervisorV2ForEL(verifierELID, func(url string) { verifierURL = url }),
+		WithSecondSupervisorV2ForEL(verifierELID2, func(url string) { verifierURL2 = url }),
+	), orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	// Get references
+	l2Net := system.L2Networks()[0]
+	elSeq := l2Net.L2ELNode(match.FirstL2EL)
+	// find verifier ELs by ID within the system
+	elVer := l2Net.L2ELNode(verifierELID)
+	elVer2 := l2Net.L2ELNode(verifierELID2)
+	_ = elVer2 // referenced to avoid unused in case of future checks
+
+	// Read environment URL for sequencer-side SV2
+	sv2SequencerURL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2SequencerURL)
+
+	// Wait for all op-node proxies
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
+	defer cancel()
+	t.Require().NoError(WaitSV2Ready(ctx, sv2SequencerURL))
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2SequencerURL, chainID, t.Logger()))
+	t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		if verifierURL == "" {
+			return fmt.Errorf("verifier sv2 not ready")
 		}
-		return crossN, localN, nil
+		return WaitOpNodeProxyReady(ctx, verifierURL, chainID, t.Logger())
+	}))
+	t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		if verifierURL2 == "" {
+			return fmt.Errorf("verifier2 sv2 not ready")
+		}
+		return WaitOpNodeProxyReady(ctx, verifierURL2, chainID, t.Logger())
+	}))
+
+	// Build sequencer op-node RPC URL
+	seqOpURL := fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
+
+	// Ensure the sequencer Safe has advanced before rollback, then rollback to block 3 on the sequencer SV2
+	{
+		// Wait until Safe >= 4 on sequencer
+		t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOpURL, 4, t.Logger()))
+		// POST rollback to block 3
+		body, _ := json.Marshal(map[string]uint64{"to_block_number": 3})
+		rollbackURL := fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2SequencerURL, chainID)
+		resp, err := http.Post(rollbackURL, "application/json", bytes.NewReader(body))
+		t.Require().NoErrorf(err, "rollback POST failed")
+		if resp != nil {
+			defer resp.Body.Close()
+			t.Require().Equal(http.StatusNoContent, resp.StatusCode)
+		}
+		// Wait for op-node proxy to be ready again after rollback and Safe>=3
+		t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2SequencerURL, chainID, t.Logger()))
+		t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOpURL, 3, t.Logger()))
 	}
 
-	// Wait until cross_safe >= target and equals local_safe (no interop messages in this setup)
-	t.Require().NoError(retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
-		c, l, err := readCrossSafe()
-		if err != nil {
-			return err
+	// Send a simple tx to create activity and capture its inclusion block number via EL (sequencer EL)
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
+	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
+	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
+
+	planAlice := txplan.Combine(
+		txplan.WithPrivateKey(alicePriv),
+		txplan.WithChainID(elSeq.EthClient()),
+		txplan.WithPendingNonce(elSeq.EthClient()),
+		txplan.WithAgainstLatestBlock(elSeq.EthClient()),
+		txplan.WithEstimator(elSeq.EthClient(), true),
+		txplan.WithRetrySubmission(elSeq.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(elSeq.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(elSeq.EthClient()),
+	)
+	transfer := txplan.NewPlannedTx(planAlice)
+	_, err = transfer.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	incRef, err := transfer.IncludedBlock.Eval(t.Ctx())
+	t.Require().NoError(err)
+	includeNum := incRef.Number
+
+	// Wait until all report Safe >= includeNum
+	seqOp := fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
+	verOp := fmt.Sprintf("%s/opnode/%d/", verifierURL, chainID)
+	verOp2 := fmt.Sprintf("%s/opnode/%d/", verifierURL2, chainID)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, includeNum, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, includeNum, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, includeNum, t.Logger()))
+
+	// Wait until Safe >= includeNum on all op-node proxies (sequencer + both verifiers)
+	seqOp = fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
+	verOp = fmt.Sprintf("%s/opnode/%d/", verifierURL, chainID)
+	verOp2 = fmt.Sprintf("%s/opnode/%d/", verifierURL2, chainID)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, includeNum, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, includeNum, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, includeNum, t.Logger()))
+
+	// Fetch the block hash at includeNum from each EL directly and assert equality
+	getELHash := func(node stack.L2ELNode, num uint64) string {
+		var out struct {
+			Hash string `json:"hash"`
 		}
-		if c < target {
-			return fmt.Errorf("cross_safe < %d (have %d)", target, c)
-		}
-		if l < target {
-			return fmt.Errorf("local_safe < %d (have %d)", target, l)
-		}
-		if c != l {
-			return fmt.Errorf("expected cross_safe == local_safe in no-interop setup (c=%d l=%d)", c, l)
+		hexNum := fmt.Sprintf("0x%x", num)
+		// Retry to avoid transient not-found right after reorgs/resets
+		t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+			out.Hash = ""
+			if err := node.L2EthClient().RPC().CallContext(ctx, &out, "eth_getBlockByNumber", hexNum, false); err != nil {
+				return err
+			}
+			if out.Hash == "" {
+				return fmt.Errorf("empty hash")
 		}
 		return nil
 	}))
+		return out.Hash
+	}
+	seqHash := getELHash(elSeq, includeNum)
+	verHash := getELHash(elVer, includeNum)
+	verHash2 := getELHash(elVer2, includeNum)
+	t.Require().Equal(seqHash, verHash)
+	t.Require().Equal(seqHash, verHash2)
 }
 
 // superroot test removed

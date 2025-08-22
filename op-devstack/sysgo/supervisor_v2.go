@@ -187,6 +187,50 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	s.p.Require().NoError(err)
 }
 
+// StartEmbeddedFromSysNoEnv is like StartEmbeddedFromSys but does not mutate SV2_DENYLIST_URL.
+func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv == nil {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		s.p.Require().NoError(err)
+		s.ln = ln
+		s.httpURL = "http://" + ln.Addr().String()
+		s.sup = sv2.NewSupervisor(s.logger)
+		if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
+			s.sup.SetDataDir(dd)
+		}
+		s.sup.SetL1ScopeLabel(eth.Unsafe)
+		s.sup.EnableOpNodeProxy(true)
+		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
+		go func() { _ = s.srv.Serve(ln) }()
+		fmt.Printf("[sv2] http: %s\n", s.HTTP())
+	}
+
+	// Read JWT secret
+	jwtHex, err := os.ReadFile(l2EL.jwtPath)
+	s.p.Require().NoError(err)
+	var jwtSecret [32]byte
+	b, err := hex.DecodeString(string(jwtHex)[2:])
+	s.p.Require().NoError(err)
+	copy(jwtSecret[:], b)
+
+	beaconAddr := ""
+	if l1CL.beacon != nil {
+		beaconAddr = l1CL.beacon.BeaconAddr()
+	} else {
+		beaconAddr = l1CL.beaconHTTPAddr
+	}
+	depth := uint64(40)
+	if v := os.Getenv("OP_SV2_CONFIRM_DEPTH"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			depth = n
+		}
+	}
+	_, err = s.sup.AddChain(l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
+	s.p.Require().NoError(err)
+}
+
 // proxyAddr: reuse variant from l2_el.go signature
 // Note: proxyAddr helper is defined in l2_el.go and available within this package; do not redeclare here.
 
@@ -535,4 +579,83 @@ func waitHTTP(p devtest.P, url string) error {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// WithSecondSupervisorV2OnFirstChain starts a SECOND SV2 instance for the same first-chain EL,
+// intended to be used as a verifier by disabling the sequencer in the embedded op-node via env.
+// It does not override SV2_DENYLIST_URL and instead notifies the caller via callback with its base URL.
+func WithSecondSupervisorV2OnFirstChain(onReady func(url string)) stack.Option[*Orchestrator] {
+	return stack.AfterDeploy(func(orch *Orchestrator) {
+		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
+		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
+		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
+		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
+
+		l2el, _ := orch.l2ELs.Get(l2elIDs[0])
+		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
+		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
+
+		id := stack.SupervisorID("sv2-" + l2elIDs[0].Key() + "-verifier")
+		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
+		orch.p.Cleanup(s.Stop)
+
+		// Temporarily set env to disable sequencer for this instance
+		prev := os.Getenv("SV2_SEQUENCER_ENABLED")
+		_ = os.Setenv("SV2_SEQUENCER_ENABLED", "false")
+		s.StartEmbeddedFromSysNoEnv(l1el, l1cl, l2el)
+		// Restore env
+		if prev == "" {
+			_ = os.Unsetenv("SV2_SEQUENCER_ENABLED")
+		} else {
+			_ = os.Setenv("SV2_SEQUENCER_ENABLED", prev)
+		}
+
+		// Wait for HTTP to be ready and notify caller
+		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
+		})
+		orch.P().Require().NoError(err)
+		if onReady != nil {
+			onReady(s.HTTP())
+		}
+	})
+}
+
+// WithSecondSupervisorV2ForEL starts a second SV2 instance for the given L2 EL ID in verifier mode (sequencer disabled).
+// It does not modify SV2_DENYLIST_URL; the onReady callback receives the base URL of the verifier SV2.
+func WithSecondSupervisorV2ForEL(elID stack.L2ELNodeID, onReady func(url string)) stack.Option[*Orchestrator] {
+	return stack.AfterDeploy(func(orch *Orchestrator) {
+		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
+		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
+		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
+
+		l2el, ok := orch.l2ELs.Get(elID)
+		orch.p.Require().True(ok, "specified L2 EL not found")
+		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
+		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
+
+		id := stack.SupervisorID("sv2-" + elID.Key() + "-verifier")
+		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
+		orch.p.Cleanup(s.Stop)
+
+		prev := os.Getenv("SV2_SEQUENCER_ENABLED")
+		_ = os.Setenv("SV2_SEQUENCER_ENABLED", "false")
+		s.StartEmbeddedFromSysNoEnv(l1el, l1cl, l2el)
+		if prev == "" {
+			_ = os.Unsetenv("SV2_SEQUENCER_ENABLED")
+		} else {
+			_ = os.Setenv("SV2_SEQUENCER_ENABLED", prev)
+		}
+
+		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
+		})
+		orch.P().Require().NoError(err)
+		if onReady != nil {
+			onReady(s.HTTP())
+		}
+	})
 }

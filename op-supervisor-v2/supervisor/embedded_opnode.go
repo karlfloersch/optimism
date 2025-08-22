@@ -20,6 +20,10 @@ import (
 	oprpc "github.com/ethereum-optimism/optimism/op-service/rpc"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/urfave/cli/v2"
+
+	// derive sequencer mode from env to avoid struct coupling
+	"os"
+	"strings"
 )
 
 // StartEmbeddedOpNode starts an embedded op-node in-process with minimal configuration and returns the user-RPC URL
@@ -43,6 +47,13 @@ func (s *Supervisor) StartEmbeddedOpNode(l1RPC string, beaconAddr string, l2Auth
 	cliCtx := cli.NewContext(&cli.App{}, fs, nil)
 	p2pConfig, _ := p2pcli.NewConfig(cliCtx, rcfg.BlockTime)
 
+	// Build op-node config
+	enabled := true
+	if v := strings.ToLower(os.Getenv("SV2_SEQUENCER_ENABLED")); v != "" {
+		if v == "0" || v == "false" || v == "no" || v == "off" {
+			enabled = false
+		}
+	}
 	nodeCfg := &opNodeConfig.Config{
 		L1: &opNodeConfig.L1EndpointConfig{
 			L1NodeAddr: l1RPC,
@@ -60,7 +71,7 @@ func (s *Supervisor) StartEmbeddedOpNode(l1RPC string, beaconAddr string, l2Auth
 			L2EngineJWTSecret: jwtSecret,
 		},
 		Beacon:        &opNodeConfig.L1BeaconEndpointConfig{BeaconAddr: beaconAddr},
-		Driver:        driver.Config{SequencerEnabled: true, SequencerConfDepth: 2},
+		Driver:        driver.Config{SequencerEnabled: enabled, SequencerConfDepth: 2},
 		Rollup:        *rcfg,
 		RPC:           oprpc.CLIConfig{ListenAddr: "127.0.0.1", ListenPort: 0, EnableAdmin: true},
 		InteropConfig: &interop.Config{},
