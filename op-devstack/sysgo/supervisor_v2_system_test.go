@@ -36,6 +36,144 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+func TestSimpleTest(gt *testing.T) {
+	const targetHeight = uint64(8)
+	const numRuns = 3
+
+	//////////////////////////////////////////////////////////////////////
+	// set up a minimal system with SV2 embedding an op-node
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithInterop2ActivationOffsetForSV2(4),
+		WithSupervisorV2OnFirstChain(),
+		// Start a batcher against the embedded op-node (via CL registered by SV2) as part of orchestrator lifecycle
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(stack.NewL2BatcherID("main", cid), stack.NewL1ELNodeID("l1", DefaultL1ID), stack.NewL2CLNodeID("embedded", cid), stack.NewL2ELNodeID("sequencer", cid))
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	gt.Log("SimpleTest: Starting test setup")
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	gt.Log("SimpleTest: Hydrating system")
+	orch.Hydrate(system)
+
+	// Get EL client
+	l2Net := system.L2Networks()[0]
+	el := l2Net.L2ELNode(match.FirstL2EL)
+
+	ctx, cancel := context.WithTimeout(t.Ctx(), 60*time.Second)
+	defer cancel()
+
+	// wait for the system to be ready
+	gt.Log("SimpleTest: Waiting for SV2 to be ready")
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
+	gt.Log("SimpleTest: SV2 is ready")
+
+	//////////////////////////////////////////////////////////////////////
+	// wait for target blocks
+	gt.Logf("SimpleTest: Waiting for %d safe blocks to be produced", targetHeight)
+	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+		ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Safe)
+		if err != nil {
+			return err
+		}
+		if ref.Number < targetHeight {
+			return fmt.Errorf("waiting for safe blocks, got %d", ref.Number)
+		}
+		return nil
+	})
+	gt.Logf("SimpleTest: Chain has reached %d safe blocks", targetHeight)
+
+	//////////////////////////////////////////////////////////////////////
+	// collect the hash of the block at target height
+	for run := 1; run <= numRuns; run++ {
+		gt.Logf("SimpleTest: Collecting hash of block at height %d", targetHeight)
+		var originalBlock struct {
+			Hash string `json:"hash"`
+		}
+		targetHeightHex := fmt.Sprintf("0x%x", targetHeight)
+		err := el.L2EthClient().RPC().CallContext(ctx, &originalBlock, "eth_getBlockByNumber", targetHeightHex, false)
+		t.Require().NoError(err)
+		t.Require().NotEmpty(originalBlock.Hash)
+		gt.Logf("SimpleTest: Original block %d hash: %s", targetHeight, originalBlock.Hash)
+
+		// trigger a rollback
+		rollbackHeight := targetHeight - 1
+		gt.Logf("SimpleTest: Triggering rollback to block %d", rollbackHeight)
+		toNum := rollbackHeight
+		reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
+		resp, err := http.Post(sv2URL+"/admin/rollback", "application/json", bytes.NewReader(reqBody))
+		t.Require().NoError(err)
+		if resp != nil {
+			defer resp.Body.Close()
+			t.Require().Equal(http.StatusNoContent, resp.StatusCode)
+		}
+		gt.Log("SimpleTest: Rollback triggered successfully")
+
+		// wait for the system to be ready
+		gt.Log("SimpleTest: Waiting for SV2 to be ready after rollback")
+		{
+			ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+			defer cancel2()
+			t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+		}
+		gt.Log("SimpleTest: SV2 is ready after rollback")
+
+		// wait for target blocks
+		gt.Logf("SimpleTest: Waiting for chain to advance to %d safe blocks again", targetHeight)
+		_ = retry.Do0(ctx, 200, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+			ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Safe)
+			if err != nil {
+				return err
+			}
+			if ref.Number < targetHeight {
+				return fmt.Errorf("waiting for safe blocks after rollback, got %d", ref.Number)
+			}
+			return nil
+		})
+		gt.Logf("SimpleTest: Chain has advanced to %d safe blocks again after rollback", targetHeight)
+
+		// collect the hash of the block at target height
+		gt.Logf("SimpleTest: Collecting hash of block at height %d after rollback", targetHeight)
+		var newBlock struct {
+			Hash string `json:"hash"`
+		}
+		err = el.L2EthClient().RPC().CallContext(ctx, &newBlock, "eth_getBlockByNumber", targetHeightHex, false)
+		t.Require().NoError(err)
+		t.Require().NotEmpty(newBlock.Hash)
+		gt.Logf("SimpleTest: New block %d hash: %s", targetHeight, newBlock.Hash)
+
+		// assert that the original block at target height has the same hash as the new block at target height
+		gt.Log("SimpleTest: Comparing block hashes to verify deterministic behavior")
+		t.Require().Equal(originalBlock.Hash, newBlock.Hash, fmt.Sprintf("block hash at height %d should be the same after rollback", targetHeight))
+		gt.Log("SimpleTest: Test completed successfully - block hashes match!")
+	}
+}
+
 // TestSupervisorV2Rollback exercises Supervisor v2 rollback + denylist behavior in a single-chain sysgo preset.
 // It performs an end-to-end flow and validates each property explicitly:
 //
@@ -1153,7 +1291,7 @@ func TestSupervisorV2TwoChainInvalidExecMessage(gt *testing.T) {
 	var suspectParent struct {
 		Hash string `json:"hash"`
 	}
-	_ = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+	err = retry.Do0(ctx, 60, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
 		// get current head number
 		var bnHex string
 		if err := elB.L2EthClient().RPC().CallContext(ctx, &bnHex, "eth_blockNumber"); err != nil {
@@ -1186,9 +1324,10 @@ func TestSupervisorV2TwoChainInvalidExecMessage(gt *testing.T) {
 		}
 		return nil
 	})
+	t.Require().NoError(err)
 
 	// Wait until SV2 auto-rollback replaces the suspect block: same height, different hash; parent stays the same
-	_ = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+	err = retry.Do0(ctx, 240, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
 		// determine height of suspect by querying its block header again
 		// First get current head number (ensure chain advanced back to at least that height)
 		var bnHex string
@@ -1235,6 +1374,7 @@ func TestSupervisorV2TwoChainInvalidExecMessage(gt *testing.T) {
 		}
 		return nil
 	})
+	t.Require().NoError(err)
 
 	// Now execute the valid message once to confirm happy path still works
 	txB := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](planBob)
