@@ -35,8 +35,8 @@ func TestSV2RollbackSingleChain(gt *testing.T) {
 	var ids DefaultMinimalSystemIDs
 	opt := stack.Combine[*Orchestrator](
 		DefaultMinimalSystemNoCL(&ids),
-		WithSupervisorV2OnFirstChain(),
 		WithInterop2ActivationOffsetForSV2(6),
+		WithSupervisorV2OnFirstChain(),
 		// Start a batcher against the embedded op-node (via CL registered by SV2)
 		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
 			nets := orch.l2Nets.Values()
@@ -640,8 +640,8 @@ func TestSV2SingleChainSafeAdvancesQuick(gt *testing.T) {
 	var ids DefaultMinimalSystemIDs
 	opt := stack.Combine[*Orchestrator](
 		DefaultMinimalSystemNoCL(&ids),
-		WithSupervisorV2OnFirstChain(),
 		WithInterop2ActivationOffsetForSV2(6),
+		WithSupervisorV2OnFirstChain(),
 		// Start a batcher against the embedded op-node (via CL registered by SV2)
 		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
 			nets := orch.l2Nets.Values()
@@ -940,8 +940,8 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 	var ids DefaultMinimalSystemIDs
 	opt := stack.Combine[*Orchestrator](
 		DefaultMinimalSystemNoCL(&ids),
-		WithSupervisorV2OnFirstChain(),
 		WithInterop2ActivationOffsetForSV2(6),
+		WithSupervisorV2OnFirstChain(),
 		// Start a batcher against the embedded op-node (via CL registered by SV2)
 		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
 			nets := orch.l2Nets.Values()
@@ -1063,8 +1063,8 @@ func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
 		// add second and third ELs up-front so they are available in the system
 		WithL2ELNode(verifierELID, nil),
 		WithL2ELNode(verifierELID2, nil),
-		WithSupervisorV2OnFirstChain(),
 		WithInterop2ActivationOffsetForSV2(6),
+		WithSupervisorV2OnFirstChain(),
 		// Start a batcher against the embedded op-node (via CL registered by SV2)
 		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
 			nets := orch.l2Nets.Values()
@@ -1161,6 +1161,169 @@ func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
 	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
 	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
 
+	// Record current sequencer safe height
+	seqOp := fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
+	cliSeq, err := opclient.NewRPC(ctx, t.Logger(), seqOp, opclient.WithLazyDial())
+	t.Require().NoError(err)
+	defer cliSeq.Close()
+	rollSeq := sources.NewRollupClient(cliSeq)
+	st0, err := rollSeq.SyncStatus(ctx)
+	t.Require().NoError(err)
+	baseSafe := st0.SafeL2.Number
+
+	// Submit a tx to create activity
+	planAlice := txplan.Combine(
+		txplan.WithPrivateKey(alicePriv),
+		txplan.WithChainID(elSeq.EthClient()),
+		txplan.WithPendingNonce(elSeq.EthClient()),
+		txplan.WithAgainstLatestBlock(elSeq.EthClient()),
+		txplan.WithEstimator(elSeq.EthClient(), true),
+		txplan.WithRetrySubmission(elSeq.EthClient(), 5, retry.Exponential()),
+	)
+	_, err = txplan.NewPlannedTx(planAlice).Submitted.Eval(t.Ctx())
+	t.Require().NoError(err)
+
+	// Wait until all report Safe >= baseSafe+2
+	verOp := fmt.Sprintf("%s/opnode/%d/", verifierURL, chainID)
+	verOp2 := fmt.Sprintf("%s/opnode/%d/", verifierURL2, chainID)
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, baseSafe+2, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, baseSafe+2, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, baseSafe+2, t.Logger()))
+
+	// Resolve a common target height: min of the three SafeL2 heads (>= baseSafe+2)
+	readSafe := func(url string) uint64 {
+		cli, err := opclient.NewRPC(ctx, t.Logger(), url, opclient.WithLazyDial())
+		t.Require().NoError(err)
+		defer cli.Close()
+		roll := sources.NewRollupClient(cli)
+		st, err := roll.SyncStatus(ctx)
+		t.Require().NoError(err)
+		return st.SafeL2.Number
+	}
+	seqSafe := readSafe(seqOp)
+	verSafe := readSafe(verOp)
+	ver2Safe := readSafe(verOp2)
+	target := seqSafe
+	if verSafe < target {
+		target = verSafe
+	}
+	if ver2Safe < target {
+		target = ver2Safe
+	}
+	if target < baseSafe+2 {
+		target = baseSafe + 2
+	}
+
+	// Ensure all nodes are at or above target
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, target, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, target, t.Logger()))
+	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, target, t.Logger()))
+
+	// Fetch the block hash at includeNum from each EL directly and assert equality
+	getELHash := func(node stack.L2ELNode, num uint64) string {
+		var out struct {
+			Hash string `json:"hash"`
+		}
+		hexNum := fmt.Sprintf("0x%x", num)
+		// Retry more to avoid transient not-found right after reorgs/resets
+		t.Require().NoError(retry.Do0(ctx, 300, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+			out.Hash = ""
+			if err := node.L2EthClient().RPC().CallContext(ctx, &out, "eth_getBlockByNumber", hexNum, false); err != nil {
+				return err
+			}
+			if out.Hash == "" {
+				return fmt.Errorf("empty hash")
+			}
+			return nil
+		}))
+		return out.Hash
+	}
+	seqHash := getELHash(elSeq, target)
+	verHash := getELHash(elVer, target)
+	verHash2 := getELHash(elVer2, target)
+	t.Require().Equal(seqHash, verHash)
+	t.Require().Equal(seqHash, verHash2)
+}
+
+// TestSV2SeqVerifiersDivergenceDiagnostics brings up sequencer + two verifiers (SV2-managed),
+// does NOT rollback, sends a tx, waits for Safe >= inclusion on all, compares hashes, and if
+// mismatched, finds and logs the first divergence height and differing hashes.
+func TestSV2SeqVerifiersDivergenceDiagnostics(gt *testing.T) {
+	verifierELID := stack.NewL2ELNodeID("verifier", DefaultL2AID)
+	verifierELID2 := stack.NewL2ELNodeID("verifier2", DefaultL2AID)
+
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+		WithL2ELNode(verifierELID, nil),
+		WithL2ELNode(verifierELID2, nil),
+		WithInterop2ActivationOffsetForSV2(6),
+		WithSupervisorV2OnFirstChain(),
+		stack.Finally[*Orchestrator](func(orch *Orchestrator) {
+			nets := orch.l2Nets.Values()
+			if len(nets) == 0 {
+				return
+			}
+			net := nets[0]
+			cid := net.id.ChainID()
+			optB := WithBatcher(
+				stack.NewL2BatcherID("main", cid),
+				stack.NewL1ELNodeID("l1", DefaultL1ID),
+				stack.NewL2CLNodeID("embedded", cid),
+				stack.NewL2ELNodeID("sequencer", cid),
+			)
+			optB.AfterDeploy(orch)
+		}),
+	)
+
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	var verifierURL, verifierURL2 string
+	stack.ApplyOptionLifecycle(stack.Combine[*Orchestrator](
+		opt,
+		WithSecondSupervisorV2ForEL(verifierELID, func(url string) { verifierURL = url }),
+		WithSecondSupervisorV2ForEL(verifierELID2, func(url string) { verifierURL2 = url }),
+	), orch)
+
+	t := devtest.SerialT(gt)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+
+	l2Net := system.L2Networks()[0]
+	elSeq := l2Net.L2ELNode(match.FirstL2EL)
+	elVer := l2Net.L2ELNode(verifierELID)
+	elVer2 := l2Net.L2ELNode(verifierELID2)
+
+	sv2SequencerURL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2SequencerURL)
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
+	defer cancel()
+	t.Require().NoError(WaitSV2Ready(ctx, sv2SequencerURL))
+	t.Require().NoError(WaitOpNodeProxyReady(ctx, sv2SequencerURL, chainID, t.Logger()))
+	t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		if verifierURL == "" {
+			return fmt.Errorf("verifier sv2 not ready")
+		}
+		return WaitOpNodeProxyReady(ctx, verifierURL, chainID, t.Logger())
+	}))
+	t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 250 * time.Millisecond}, func() error {
+		if verifierURL2 == "" {
+			return fmt.Errorf("verifier2 sv2 not ready")
+		}
+		return WaitOpNodeProxyReady(ctx, verifierURL2, chainID, t.Logger())
+	}))
+
+	// Send a tx to ensure activity and capture inclusion block
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
+	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
+	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
 	planAlice := txplan.Combine(
 		txplan.WithPrivateKey(alicePriv),
 		txplan.WithChainID(elSeq.EthClient()),
@@ -1178,7 +1341,7 @@ func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
 	t.Require().NoError(err)
 	includeNum := incRef.Number
 
-	// Wait until all report Safe >= includeNum
+	// Wait Safe >= inclusion on all three op-node proxies
 	seqOp := fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
 	verOp := fmt.Sprintf("%s/opnode/%d/", verifierURL, chainID)
 	verOp2 := fmt.Sprintf("%s/opnode/%d/", verifierURL2, chainID)
@@ -1186,38 +1349,105 @@ func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
 	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, includeNum, t.Logger()))
 	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, includeNum, t.Logger()))
 
-	// Wait until Safe >= includeNum on all op-node proxies (sequencer + both verifiers)
-	seqOp = fmt.Sprintf("%s/opnode/%d/", sv2SequencerURL, chainID)
-	verOp = fmt.Sprintf("%s/opnode/%d/", verifierURL, chainID)
-	verOp2 = fmt.Sprintf("%s/opnode/%d/", verifierURL2, chainID)
-	t.Require().NoError(WaitSafeAtOrAbove(ctx, seqOp, includeNum, t.Logger()))
-	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp, includeNum, t.Logger()))
-	t.Require().NoError(WaitSafeAtOrAbove(ctx, verOp2, includeNum, t.Logger()))
-
-	// Fetch the block hash at includeNum from each EL directly and assert equality
 	getELHash := func(node stack.L2ELNode, num uint64) string {
 		var out struct {
 			Hash string `json:"hash"`
 		}
 		hexNum := fmt.Sprintf("0x%x", num)
-		// Retry to avoid transient not-found right after reorgs/resets
-		t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 200 * time.Millisecond}, func() error {
+		t.Require().NoError(retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 150 * time.Millisecond}, func() error {
 			out.Hash = ""
 			if err := node.L2EthClient().RPC().CallContext(ctx, &out, "eth_getBlockByNumber", hexNum, false); err != nil {
 				return err
 			}
 			if out.Hash == "" {
 				return fmt.Errorf("empty hash")
-		}
-		return nil
-	}))
+			}
+			return nil
+		}))
 		return out.Hash
 	}
+
 	seqHash := getELHash(elSeq, includeNum)
 	verHash := getELHash(elVer, includeNum)
 	verHash2 := getELHash(elVer2, includeNum)
-	t.Require().Equal(seqHash, verHash)
-	t.Require().Equal(seqHash, verHash2)
+	if seqHash == verHash && seqHash == verHash2 {
+		t.Logger().Info("no divergence at inclusion height", "height", includeNum, "hash", seqHash)
+		return
+	}
+
+	// Find first divergence walking downwards
+	var divAt uint64 = includeNum
+	for h := includeNum; h > 0; h-- {
+		sh := getELHash(elSeq, h)
+		vh := getELHash(elVer, h)
+		// treat verifiers as ground truth; if they disagree with each other, log and break
+		vh2 := getELHash(elVer2, h)
+		if vh != vh2 {
+			t.Logger().Warn("verifiers disagree at height", "height", h, "ver1", vh, "ver2", vh2)
+			divAt = h
+			break
+		}
+		if sh != vh {
+			divAt = h
+			continue
+		}
+		// matched here; divergence starts at the next height up
+		divAt = h + 1
+		break
+	}
+	// Log details at divergence height and neighbors
+	sh := getELHash(elSeq, divAt)
+	vh := getELHash(elVer, divAt)
+	vh2 := getELHash(elVer2, divAt)
+	t.Logger().Info("divergence found", "height", divAt, "seq", sh, "ver", vh, "ver2", vh2)
+	if divAt > 0 {
+		shp := getELHash(elSeq, divAt-1)
+		vhp := getELHash(elVer, divAt-1)
+		v2hp := getELHash(elVer2, divAt-1)
+		t.Logger().Info("parent hashes", "height", divAt-1, "seq", shp, "ver", vhp, "ver2", v2hp)
+	}
+
+	// Fetch and log the verifier block transactions at divergence height
+	{
+		var blk struct {
+			Transactions []struct {
+				Hash  string  `json:"hash"`
+				From  string  `json:"from"`
+				To    *string `json:"to"`
+				Input string  `json:"input"`
+			} `json:"transactions"`
+		}
+		hexNum := fmt.Sprintf("0x%x", divAt)
+		// ask verifier-1
+		t.Require().NoError(elVer.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, true))
+		for i, tx := range blk.Transactions {
+			to := ""
+			if tx.To != nil {
+				to = *tx.To
+			}
+			t.Logger().Info("verifier tx", "idx", i, "hash", tx.Hash, "from", tx.From, "to", to)
+		}
+	}
+	// Fetch and log the sequencer block transactions at divergence height
+	{
+		var blk struct {
+			Transactions []struct {
+				Hash  string  `json:"hash"`
+				From  string  `json:"from"`
+				To    *string `json:"to"`
+				Input string  `json:"input"`
+			} `json:"transactions"`
+		}
+		hexNum := fmt.Sprintf("0x%x", divAt)
+		t.Require().NoError(elSeq.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, true))
+		for i, tx := range blk.Transactions {
+			to := ""
+			if tx.To != nil {
+				to = *tx.To
+			}
+			t.Logger().Info("sequencer tx", "idx", i, "hash", tx.Hash, "from", tx.From, "to", to)
+		}
+	}
 }
 
 // superroot test removed

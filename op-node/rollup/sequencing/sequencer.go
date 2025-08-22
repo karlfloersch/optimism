@@ -537,6 +537,14 @@ func (d *Sequencer) startBuildingBlock() {
 		}
 	}
 
+	// Debug: log interop2 activation decision at sequencing time
+	var i2 uint64
+	if d.rollupCfg.Interop2Time != nil {
+		i2 = *d.rollupCfg.Interop2Time
+	}
+	isI2 := d.rollupCfg.IsInterop2ActivationBlock(uint64(attrs.Timestamp))
+	d.log.Info("Sequencer interop2 check", "nextL2Time", uint64(attrs.Timestamp), "interop2_time", i2, "is_activation", isI2)
+
 	// If our next L2 block timestamp is beyond the Sequencer drift threshold, then we must produce
 	// empty blocks (other than the L1 info deposit and any user deposits). We handle this by
 	// setting NoTxPool to true, which will cause the Sequencer to not include any transactions

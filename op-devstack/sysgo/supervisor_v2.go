@@ -183,6 +183,15 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 			depth = n
 		}
 	}
+	// Log rollup cfg timing for debugging fork activation
+	if l2EL.l2Net.rollupCfg != nil {
+		g := l2EL.l2Net.rollupCfg.Genesis
+		var i2 uint64
+		if l2EL.l2Net.rollupCfg.Interop2Time != nil {
+			i2 = *l2EL.l2Net.rollupCfg.Interop2Time
+		}
+		s.logger.Info("SV2 AddChain rollup timings", "chain", l2EL.id.ChainID(), "genesis_l2_time", g.L2Time, "interop2_time", i2)
+	}
 	_, err = s.sup.AddChain(l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
 	s.p.Require().NoError(err)
 }
@@ -563,6 +572,7 @@ func WithInterop2ActivationOffsetForSV2(offset uint64) stack.Option[*Orchestrato
 			}
 			ts := rcfg.Genesis.L2Time + offset
 			rcfg.Interop2Time = &ts
+			orch.P().Logger().Info("Set Interop2Time", "chain", id.ChainID(), "genesis_l2_time", rcfg.Genesis.L2Time, "interop2_time", ts)
 		}
 	})
 }

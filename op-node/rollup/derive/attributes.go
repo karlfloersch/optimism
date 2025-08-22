@@ -142,35 +142,38 @@ func (ba *FetchingAttributesBuilder) PreparePayloadAttributes(ctx context.Contex
 		upgradeTxs = append(upgradeTxs, isthmus...)
 	}
 
-    if ba.rollupCfg.IsInteropActivationBlock(nextL2Time) {
-        interop, err := InteropNetworkUpgradeTransactions()
-        if err != nil {
-            return nil, NewCriticalError(fmt.Errorf("failed to build interop network upgrade txs: %w", err))
-        }
-        upgradeTxs = append(upgradeTxs, interop...)
+	// Interop (v1)
+	if ba.rollupCfg.IsInteropActivationBlock(nextL2Time) {
+		interop, err := InteropNetworkUpgradeTransactions()
+		if err != nil {
+			return nil, NewCriticalError(fmt.Errorf("failed to build interop network upgrade txs: %w", err))
+		}
+		// no logger available here; the sequencer logs attrs.Please log counts via caller when needed
+		upgradeTxs = append(upgradeTxs, interop...)
 
-        if len(ba.depSet.Chains()) > 1 {
-            txs, err := InteropActivateCrossL2InboxTransactions()
-            if err != nil {
-                return nil, NewCriticalError(fmt.Errorf("failed to build interop cross l2 inbox txs: %w", err))
-            }
-            upgradeTxs = append(upgradeTxs, txs...)
-        }
-    }
+		if len(ba.depSet.Chains()) > 1 {
+			txs, err := InteropActivateCrossL2InboxTransactions()
+			if err != nil {
+				return nil, NewCriticalError(fmt.Errorf("failed to build interop cross l2 inbox txs: %w", err))
+			}
+			upgradeTxs = append(upgradeTxs, txs...)
+		}
+	}
 
-    // Interop2: deploy predeploys and activate cross-L2 inbox unconditionally
-    if ba.rollupCfg.IsInterop2ActivationBlock(nextL2Time) {
-        interop, err := InteropNetworkUpgradeTransactions()
-        if err != nil {
-            return nil, NewCriticalError(fmt.Errorf("failed to build interop2 network upgrade txs: %w", err))
-        }
-        upgradeTxs = append(upgradeTxs, interop...)
-        txs, err := InteropActivateCrossL2InboxTransactions()
-        if err != nil {
-            return nil, NewCriticalError(fmt.Errorf("failed to build interop2 cross l2 inbox txs: %w", err))
-        }
-        upgradeTxs = append(upgradeTxs, txs...)
-    }
+	// Interop2: deploy predeploys and activate cross-L2 inbox unconditionally
+	if ba.rollupCfg.IsInterop2ActivationBlock(nextL2Time) {
+		interop, err := InteropNetworkUpgradeTransactions()
+		if err != nil {
+			return nil, NewCriticalError(fmt.Errorf("failed to build interop2 network upgrade txs: %w", err))
+		}
+		upgradeTxs = append(upgradeTxs, interop...)
+		txs, err := InteropActivateCrossL2InboxTransactions()
+		if err != nil {
+			return nil, NewCriticalError(fmt.Errorf("failed to build interop2 cross l2 inbox txs: %w", err))
+		}
+		upgradeTxs = append(upgradeTxs, txs...)
+		// No logger in this package; caller (sequencer) will log the attributes including tx count
+	}
 
 	l1InfoTx, err := L1InfoDepositBytes(ba.rollupCfg, sysConfig, seqNumber, l1Info, nextL2Time)
 	if err != nil {
