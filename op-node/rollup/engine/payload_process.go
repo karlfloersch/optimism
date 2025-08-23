@@ -47,6 +47,10 @@ func (eq *EngDeriver) onPayloadProcess(ctx context.Context, ev PayloadProcessEve
 				resp.Body.Close()
 				reqCancel()
 				if out.Denylisted {
+					if ev.DerivedFrom != (eth.L1BlockRef{}) && eq.cfg.IsHolocene(ev.DerivedFrom.Time) {
+						eq.emitDepositsOnlyPayloadAttributesRequest(ctx, ev.Ref.ParentID(), ev.DerivedFrom)
+						return
+					}
 					eq.emitter.Emit(ctx, PayloadInvalidEvent{
 						Envelope: ev.Envelope,
 						Err:      fmt.Errorf("sv2 denylisted payload %s", payloadID.Hex()),
