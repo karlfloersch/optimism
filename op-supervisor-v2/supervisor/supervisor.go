@@ -8,7 +8,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +16,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/params"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
-	"github.com/ethereum-optimism/optimism/op-service/apis"
+
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
@@ -26,20 +25,8 @@ import (
 )
 
 type Supervisor struct {
-	log     log.Logger
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	started time.Time
-
-	// polling
-	cancelPoll context.CancelFunc
-
-	// embedded op-node mode
-	embeddedOpNodeUserRPC string
-	stopEmbeddedOpNode    func(ctx context.Context) error
-
-	// restart context
-	embeddedCfg *embeddedConfig
+	log log.Logger
+	mu  sync.Mutex
 
 	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
 	enableOpNodeProxy bool
@@ -67,7 +54,6 @@ type Supervisor struct {
 
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
-	runnerInterval  time.Duration
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
@@ -125,13 +111,7 @@ func NewSupervisor(l log.Logger) *Supervisor {
 		roll := sources.NewRollupClient(cli)
 		return roll.SyncStatus(ctx)
 	}
-	// runner interval (tunable for tests)
-	s.runnerInterval = 500 * time.Millisecond
-	if ms := os.Getenv("SV2_RUNNER_INTERVAL_MS"); ms != "" {
-		if v, err := time.ParseDuration(ms + "ms"); err == nil {
-			s.runnerInterval = v
-		}
-	}
+
 	// rollback indirection for tests
 	s.rollbackFn = s.RollbackChain
 
@@ -187,43 +167,17 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 	return s.l1ScopeLabel
 }
 
-func (s *Supervisor) StartOpNode(binary string, args ...string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cmd != nil {
-		return nil
-	}
-	cmd := exec.Command(binary, args...)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	s.cmd = cmd
-	s.started = time.Now()
-	go func() {
-		_ = cmd.Wait()
-		s.mu.Lock()
-		s.cmd = nil
-		s.mu.Unlock()
-	}()
-	return nil
-}
-
 func (s *Supervisor) Stop() {
+	// Stop all chains
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelPoll != nil {
-		s.cancelPoll()
-		s.cancelPoll = nil
+	chains := make(map[uint64]*chainHandle)
+	for id, h := range s.chains {
+		chains[id] = h
 	}
-	if s.stopEmbeddedOpNode != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = s.stopEmbeddedOpNode(ctx)
-		cancel()
-		s.stopEmbeddedOpNode = nil
-	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-		s.cmd = nil
+	s.mu.Unlock()
+
+	for chainID := range chains {
+		s.RemoveChain(chainID)
 	}
 }
 
@@ -299,17 +253,11 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			})
 			return
 		}
-		// single-chain legacy mode
-		running := s.cmd != nil
-		started := s.started
-		opNodeUser := s.embeddedOpNodeUserRPC
+		// No chains registered - return empty status
 		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"op_node_running":  running,
-			"started_at":       started,
-			"op_node_user_rpc": opNodeUser,
-			"cross_finalized":  s.crossFinalizedFromDBOrFallback(),
-			"l1_scope_label":   string(s.getL1ScopeLabel()),
+			"cross_finalized": s.crossFinalizedFromDBOrFallback(),
+			"l1_scope_label":  string(s.getL1ScopeLabel()),
 		})
 	})
 	// dev-only admin rollback endpoint: POST /admin/rollback { back_n_blocks?: uint64 }
@@ -329,12 +277,12 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			http.Error(w, "missing to_block_number", http.StatusBadRequest)
 			return
 		}
-		// chain-scoped when in multi-chain mode
+		// chain-scoped in multi-chain mode
 		s.mu.Lock()
-		multi := len(s.chains) > 0
+		hasChains := len(s.chains) > 0
 		s.mu.Unlock()
 		var err error
-		if multi {
+		if hasChains {
 			// In multi-chain mode, accept explicit chainId, or default to the primary when only one chain is registered.
 			q := r.URL.Query()
 			var chainID uint64
@@ -356,8 +304,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			}
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {
-			// In single-chain mode we don't support admin rollback anymore; require multi-chain handles.
-			http.Error(w, "embedded mode not running", http.StatusServiceUnavailable)
+			// No chains registered
+			http.Error(w, "no chains registered", http.StatusServiceUnavailable)
 			return
 		}
 		if err != nil {
@@ -382,23 +330,21 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	// Entries are managed internally by supervisor policies/tests; no POST endpoint
 
 	if s.enableOpNodeProxy {
-		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/ or /opnode/{chainId}/
+		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/{chainId}/
 		mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
-			target := s.embeddedOpNodeUserRPC
-			// Try chain-scoped if multi-chain and a chainId segment is present
-			if len(s.chains) > 0 {
-				rest := strings.TrimPrefix(r.URL.Path, "/opnode/")
-				seg := rest
-				if i := strings.IndexByte(rest, '/'); i >= 0 {
-					seg = rest[:i]
-				}
-				if seg != "" {
-					var cid uint64
-					_, _ = fmt.Sscanf(seg, "%d", &cid)
-					if h := s.chains[cid]; h != nil {
-						target = h.embeddedOpNodeUserRPC
-					}
+			var target string
+			// Extract chainId from path
+			rest := strings.TrimPrefix(r.URL.Path, "/opnode/")
+			seg := rest
+			if i := strings.IndexByte(rest, '/'); i >= 0 {
+				seg = rest[:i]
+			}
+			if seg != "" {
+				var cid uint64
+				_, _ = fmt.Sscanf(seg, "%d", &cid)
+				if h := s.chains[cid]; h != nil {
+					target = h.embeddedOpNodeUserRPC
 				}
 			}
 			s.mu.Unlock()
@@ -556,264 +502,20 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 	})
 }
 
-// helper for future graceful shutdowns of subprocess
-func terminateProcess(ctx context.Context, cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	_ = cmd.Process.Signal(os.Interrupt)
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-done:
-		return nil
-	}
-}
-
-// StartPolling starts a background loop that polls op-node sync status and fetches the corresponding L2 block and receipts.
-func (s *Supervisor) StartPolling(opNodeRPC, l2RPC string, interval time.Duration, confirmDepth uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelPoll != nil {
-		return nil
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancelPoll = cancel
-
-	// rollup client (op-node)
-	opNodeCli, err := opclient.NewRPC(ctx, s.log, opNodeRPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	roll := sources.NewRollupClient(opNodeCli)
-
-	// l2 client
-	l2Cli, err := opclient.NewRPC(ctx, s.log, l2RPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	// get rollup config from op-node to configure l2 client caches sanely
-	rcfg, err := roll.RollupConfig(ctx)
-	if err != nil {
-		cancel()
-		return err
-	}
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
-	if err != nil {
-		cancel()
-		return err
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		// Wait for op-node RPC to respond before polling
-		for i := 0; i < 20; i++ {
-			ctxPing, cancelPing := context.WithTimeout(ctx, 500*time.Millisecond)
-			_, err := roll.SyncStatus(ctxPing)
-			cancelPing()
-			if err == nil {
-				break
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctx)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				// Only act on sufficiently confirmed L1 scope; for now just log head info.
-				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
-					continue
-				}
-				// Fetch payload + receipts of local-safe head for indexing later
-				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts error", "num", localSafe.Number, "err", err)
-				}
-			}
-		}
-	}()
-
-	return nil
-}
-
-// StartPollingWithClients is like StartPolling but reuses existing RPC clients and rollup config.
-func (s *Supervisor) StartPollingWithClients(opNodeCli opclient.RPC, l2Cli opclient.RPC, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelPoll != nil {
-		return nil
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancelPoll = cancel
-
-	roll := sources.NewRollupClient(opNodeCli)
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
-	if err != nil {
-		cancel()
-		return err
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctx)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
-					continue
-				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
-				}
-				_ = confirmDepth
-			}
-		}
-	}()
-	return nil
-}
-
-// StartPollingWithRollupClient starts polling using a provided RollupClient and L2 RPC client.
-func (s *Supervisor) StartPollingWithRollupClient(roll apis.RollupClient, l2Cli opclient.RPC, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelPoll != nil {
-		return nil
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancelPoll = cancel
-
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
-	if err != nil {
-		cancel()
-		return err
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctx)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
-					continue
-				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
-				}
-				_ = confirmDepth
-			}
-		}
-	}()
-	return nil
-}
-
-// StartManaged spawns an op-node internally and starts polling it.
-func (s *Supervisor) StartManaged(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelPoll != nil {
-		return nil
-	}
-	// Start embedded op-node
-	userRPC, stopFn, err := s.StartEmbeddedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
-	if err != nil {
-		return err
-	}
-	s.embeddedOpNodeUserRPC = userRPC
-	s.stopEmbeddedOpNode = stopFn
-	s.embeddedCfg = &embeddedConfig{l1RPC: l1RPC, beaconAddr: beaconAddr, l2AuthRPC: l2AuthRPC, l2UserRPC: l2UserRPC, jwtSecret: jwtSecret, rcfg: rcfg, interval: interval, confirmDepth: confirmDepth}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancelPoll = cancel
-
-	// Dial clients
-	opNodeCli, err := opclient.NewRPC(ctx, s.log, userRPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	// Use user RPC (no JWT) for eth_getLogs/receipts
-	l2Cli, err := opclient.NewRPC(ctx, s.log, l2UserRPC)
-	if err != nil {
-		cancel()
-		return err
-	}
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
-	if err != nil {
-		cancel()
-		return err
-	}
-	roll := sources.NewRollupClient(opNodeCli)
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				st, err := roll.SyncStatus(ctx)
-				if err != nil || st == nil {
-					s.log.Warn("poll: sync status error", "err", err)
-					continue
-				}
-				localSafe := st.LocalSafeL2
-				s.log.Info("poll: heads", "unsafe", st.UnsafeL2, "local_safe", localSafe, "safe", st.SafeL2, "finalized", st.FinalizedL2)
-				if localSafe.Number == 0 {
-					continue
-				}
-				if _, _, err := l2.FetchReceiptsByNumber(ctx, localSafe.Number); err != nil {
-					s.log.Debug("poll: fetch receipts", "num", localSafe.Number, "err", err)
-				}
-			}
-		}
-	}()
-	return nil
-}
-
 // performRollback stops the embedded op-node, rolls back the EL to an absolute block number
 // then restarts the op-node and polling.
 // performRollback removed; legacy single-chain rollback is now handled within RollbackChain
 
-// ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node if running.
+// ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node for the primary chain if running.
 func (s *Supervisor) ManagedOpNodeUserRPC() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.embeddedOpNodeUserRPC
+	if s.primaryChainID != 0 {
+		if h := s.chains[s.primaryChainID]; h != nil {
+			return h.embeddedOpNodeUserRPC
+		}
+	}
+	return ""
 }
 
 // EnableOpNodeProxy toggles the /opnode/ reverse proxy in the HTTP handler.
