@@ -34,11 +34,10 @@ type Supervisor struct {
 	// denylist
 	denylist *DenylistStore
 
-	chains       map[uint64]*chainHandle
-	activeChains map[eth.ChainID]struct{}
+	chains         map[uint64]*chainHandle
+	activeChainsMu sync.Mutex
+	activeChains   map[eth.ChainID]struct{}
 
-	// shared linker across all chains for cross-safety checks
-	linkMu       sync.Mutex
 	expiryWindow uint64
 	linkChecker  depset.LinkChecker
 
@@ -67,6 +66,8 @@ type embeddedConfig struct {
 }
 
 func (s *Supervisor) checkExecutingMessageLink(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
+	s.activeChainsMu.Lock()
+	defer s.activeChainsMu.Unlock()
 	if _, ok := s.activeChains[execInChain]; !ok {
 		return false
 	}
@@ -142,18 +143,16 @@ func (s *Supervisor) SetDataDir(dir string) {
 
 // markChainActive marks a chain ID as active via the activeChains set.
 func (s *Supervisor) markChainActive(id eth.ChainID) {
-	s.linkMu.Lock()
-	defer s.linkMu.Unlock()
+	s.activeChainsMu.Lock()
+	defer s.activeChainsMu.Unlock()
 	if s.activeChains == nil {
 		s.activeChains = make(map[eth.ChainID]struct{})
 	}
 	s.activeChains[id] = struct{}{}
 }
 
-// getLinkChecker returns the shared LinkChecker.
+// getLinkChecker returns the supervisor's LinkChecker.
 func (s *Supervisor) getLinkChecker() depset.LinkChecker {
-	s.linkMu.Lock()
-	defer s.linkMu.Unlock()
 	return s.linkChecker
 }
 
