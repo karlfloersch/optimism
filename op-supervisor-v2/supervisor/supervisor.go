@@ -37,8 +37,6 @@ type Supervisor struct {
 	chains       map[uint64]*chainHandle
 	activeChains map[eth.ChainID]struct{}
 
-	primaryChainID uint64
-
 	// shared linker across all chains for cross-safety checks
 	linkMu       sync.Mutex
 	expiryWindow uint64
@@ -68,39 +66,44 @@ type embeddedConfig struct {
 	confirmDepth uint64
 }
 
-func NewSupervisor(l log.Logger) *Supervisor {
+func (s *Supervisor) checkExecutingMessageLink(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
+	if _, ok := s.activeChains[execInChain]; !ok {
+		return false
+	}
+	if _, ok := s.activeChains[initChain]; !ok {
+		return false
+	}
+	if initTs > execTs {
+		return false
+	}
+	if execTs > initTs+s.expiryWindow {
+		return false
+	}
+	return true
+}
 
+// defaultScopeLabel returns the default L1 scope label
+// it can be overridden via env SV2_L1_SCOPE
+func defaultScopeLabel() eth.BlockLabel {
+	switch strings.ToLower(os.Getenv("SV2_L1_SCOPE")) {
+	case "unsafe":
+		return eth.Unsafe
+	case "safe":
+		return eth.Safe
+	case "finalized":
+		return eth.Finalized
+	}
+	return eth.Safe
+}
+
+func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l}
 	// initialize shared linker state
 	s.activeChains = make(map[eth.ChainID]struct{})
 	s.expiryWindow = params.MessageExpiryTimeSecondsInterop
-	s.linkChecker = depset.LinkCheckFn(func(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
-		// with no chains registered yet, nothing can execute
-		if _, ok := s.activeChains[execInChain]; !ok {
-			return false
-		}
-		if _, ok := s.activeChains[initChain]; !ok {
-			return false
-		}
-		if initTs > execTs {
-			return false
-		}
-		// expiry check
-		if execTs > initTs+s.expiryWindow {
-			return false
-		}
-		return true
-	})
-	// default scope label; can be overridden via env SV2_L1_SCOPE
-	s.l1ScopeLabel = eth.Safe
-	switch strings.ToLower(os.Getenv("SV2_L1_SCOPE")) {
-	case "unsafe":
-		s.l1ScopeLabel = eth.Unsafe
-	case "safe":
-		s.l1ScopeLabel = eth.Safe
-	case "finalized":
-		s.l1ScopeLabel = eth.Finalized
-	}
+	s.linkChecker = depset.LinkCheckFn(s.checkExecutingMessageLink)
+	s.l1ScopeLabel = defaultScopeLabel()
+
 	// default fetcher dials the op-node and returns SyncStatus
 	s.fetchSyncStatus = func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
 		cli, err := opclient.NewRPC(ctx, s.log, rpc)
@@ -137,8 +140,8 @@ func (s *Supervisor) SetDataDir(dir string) {
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
 }
 
-// registerChainForLinker registers a chain ID into the shared linker set.
-func (s *Supervisor) registerChainForLinker(id eth.ChainID) {
+// markChainActive marks a chain ID as active via the activeChains set.
+func (s *Supervisor) markChainActive(id eth.ChainID) {
 	s.linkMu.Lock()
 	defer s.linkMu.Unlock()
 	if s.activeChains == nil {
@@ -147,8 +150,8 @@ func (s *Supervisor) registerChainForLinker(id eth.ChainID) {
 	s.activeChains[id] = struct{}{}
 }
 
-// getLinker returns the shared LinkChecker.
-func (s *Supervisor) getLinker() depset.LinkChecker {
+// getLinkChecker returns the shared LinkChecker.
+func (s *Supervisor) getLinkChecker() depset.LinkChecker {
 	s.linkMu.Lock()
 	defer s.linkMu.Unlock()
 	return s.linkChecker
@@ -201,7 +204,9 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		if len(s.chains) > 0 {
 			// multi-chain mode
 			if chainID == 0 {
-				chainID = s.primaryChainID
+				http.Error(w, "missing chainId parameter", http.StatusBadRequest)
+				s.mu.Unlock()
+				return
 			}
 			h := s.chains[chainID]
 			s.mu.Unlock()
@@ -283,24 +288,15 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 		s.mu.Unlock()
 		var err error
 		if hasChains {
-			// In multi-chain mode, accept explicit chainId, or default to the primary when only one chain is registered.
+			// In multi-chain mode, require explicit chainId parameter.
 			q := r.URL.Query()
 			var chainID uint64
 			if cidStr := q.Get("chainId"); cidStr != "" {
 				_, _ = fmt.Sscanf(cidStr, "%d", &chainID)
 			}
 			if chainID == 0 {
-				// default to primary if exactly one chain
-				s.mu.Lock()
-				primary := s.primaryChainID
-				num := len(s.chains)
-				s.mu.Unlock()
-				if num == 1 && primary != 0 {
-					chainID = primary
-				} else {
-					http.Error(w, "missing chainId", http.StatusBadRequest)
-					return
-				}
+				http.Error(w, "missing chainId parameter", http.StatusBadRequest)
+				return
 			}
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {
@@ -506,12 +502,14 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 // then restarts the op-node and polling.
 // performRollback removed; legacy single-chain rollback is now handled within RollbackChain
 
-// ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node for the primary chain if running.
+// ManagedOpNodeUserRPC returns the user RPC URL of the embedded op-node for the first available chain if running.
+// Returns empty string if no chains are available.
 func (s *Supervisor) ManagedOpNodeUserRPC() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.primaryChainID != 0 {
-		if h := s.chains[s.primaryChainID]; h != nil {
+	// Return the first available chain's op-node RPC
+	for _, h := range s.chains {
+		if h != nil {
 			return h.embeddedOpNodeUserRPC
 		}
 	}

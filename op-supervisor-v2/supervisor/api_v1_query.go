@@ -134,7 +134,8 @@ func (s *Supervisor) resolveChainFromQuery(w http.ResponseWriter, r *http.Reques
 		return 0, nil
 	}
 	if chainID == 0 {
-		chainID = s.primaryChainID
+		http.Error(w, "missing chainId parameter", http.StatusBadRequest)
+		return 0, nil
 	}
 	h := s.chains[chainID]
 	if h == nil {

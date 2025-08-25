@@ -193,7 +193,7 @@ func (s *Supervisor) newCrosssafeAdapter(h *chainHandle, l1 *sources.L1Client, l
 // runCrossSafeStep executes one adapter step and logs the outcome.
 func (s *Supervisor) runCrossSafeStep(ctx context.Context, adapter *crosssafeAdapter, chainID uint64) {
 	s.log.Info("crosssafe: run", "chain", chainID)
-	if err := adapter.runCrossSafeOnce(s.log, s.getLinker()); err != nil {
+	if err := adapter.runCrossSafeOnce(s.log, s.getLinkChecker()); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "future data") || strings.Contains(msg, "past last entry") {
 			s.log.Info("crosssafe: waiting for ingest", "chain", chainID, "err", err)
@@ -231,7 +231,7 @@ func (s *Supervisor) startChainPolling(ctxPoll context.Context, h *chainHandle, 
 	}
 
 	// register this chain in the shared linker
-	s.registerChainForLinker(eth.ChainIDFromUInt64(chainID))
+	s.markChainActive(eth.ChainIDFromUInt64(chainID))
 
 	for {
 		select {
@@ -356,9 +356,6 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		s.chains = make(map[uint64]*chainHandle)
 	}
 	s.chains[chainID] = h
-	if s.primaryChainID == 0 {
-		s.primaryChainID = chainID
-	}
 	s.mu.Unlock()
 
 	// Finalized runner removed; cross-safe advancement is driven by per-chain pollers
