@@ -34,13 +34,13 @@ type Supervisor struct {
 	// denylist
 	denylist *DenylistStore
 
-	// multi-chain management
-	chains         map[uint64]*chainHandle
+	chains       map[uint64]*chainHandle
+	activeChains map[eth.ChainID]struct{}
+
 	primaryChainID uint64
 
 	// shared linker across all chains for cross-safety checks
 	linkMu       sync.Mutex
-	linkChains   map[eth.ChainID]struct{}
 	expiryWindow uint64
 	linkChecker  depset.LinkChecker
 
@@ -72,14 +72,14 @@ func NewSupervisor(l log.Logger) *Supervisor {
 
 	s := &Supervisor{log: l}
 	// initialize shared linker state
-	s.linkChains = make(map[eth.ChainID]struct{})
+	s.activeChains = make(map[eth.ChainID]struct{})
 	s.expiryWindow = params.MessageExpiryTimeSecondsInterop
 	s.linkChecker = depset.LinkCheckFn(func(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
 		// with no chains registered yet, nothing can execute
-		if _, ok := s.linkChains[execInChain]; !ok {
+		if _, ok := s.activeChains[execInChain]; !ok {
 			return false
 		}
-		if _, ok := s.linkChains[initChain]; !ok {
+		if _, ok := s.activeChains[initChain]; !ok {
 			return false
 		}
 		if initTs > execTs {
@@ -141,10 +141,10 @@ func (s *Supervisor) SetDataDir(dir string) {
 func (s *Supervisor) registerChainForLinker(id eth.ChainID) {
 	s.linkMu.Lock()
 	defer s.linkMu.Unlock()
-	if s.linkChains == nil {
-		s.linkChains = make(map[eth.ChainID]struct{})
+	if s.activeChains == nil {
+		s.activeChains = make(map[eth.ChainID]struct{})
 	}
-	s.linkChains[id] = struct{}{}
+	s.activeChains[id] = struct{}{}
 }
 
 // getLinker returns the shared LinkChecker.
