@@ -445,11 +445,9 @@ func runSysgo() error {
 				fmt.Fprintf(os.Stderr, "sv2 http listen error: %v\n", err)
 			}
 		}()
-		// Note: This is a simplified integration - in a real scenario you'd need proper L1/L2 RPC endpoints
-		// For now, we'll just create the supervisor without polling since this is a test/dev environment
-		_ = roll
-		_ = elUserRPC
-		_ = rcfg
+		if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
+			return err
+		}
 	}
 
 	<-ctx.Done()

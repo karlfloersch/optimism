@@ -123,9 +123,10 @@ func TestSimpleTest(gt *testing.T) {
 		// trigger a rollback
 		rollbackHeight := targetHeight - 1
 		gt.Logf("SimpleTest: Triggering rollback to block %d", rollbackHeight)
+		chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 		toNum := rollbackHeight
 		reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
-		resp, err := http.Post(sv2URL+"/admin/rollback", "application/json", bytes.NewReader(reqBody))
+		resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, chainID), "application/json", bytes.NewReader(reqBody))
 		t.Require().NoError(err)
 		if resp != nil {
 			defer resp.Body.Close()
@@ -310,9 +311,10 @@ func TestSupervisorV2Rollback(gt *testing.T) {
 		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
 	}
 	// Roll back to an absolute block number (preRef.Number - 1)
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 	toNum := preRef.Number - 1
 	reqBody, _ := json.Marshal(map[string]uint64{"to_block_number": toNum})
-	resp, err := http.Post(sv2URL+"/admin/rollback", "application/json", bytes.NewReader(reqBody))
+	resp, err := http.Post(fmt.Sprintf("%s/admin/rollback?chainId=%d", sv2URL, chainID), "application/json", bytes.NewReader(reqBody))
 	t.Require().NoError(err)
 	if resp != nil {
 		defer resp.Body.Close()

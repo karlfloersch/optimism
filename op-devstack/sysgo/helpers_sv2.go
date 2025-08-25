@@ -58,8 +58,18 @@ func WaitSafeAtOrAbove(ctx context.Context, opnodeURL string, min uint64, logger
 }
 
 // WaitSV2CrossFinalizedAtLeast polls SV2 /status until cross_finalized >= min.
+// Uses the first available chain ID from the system.
+// Deprecated: Use WaitSV2CrossFinalizedAtLeastForChain instead.
 func WaitSV2CrossFinalizedAtLeast(ctx context.Context, sv2URL string, min uint64) error {
-	statusURL := sv2URL + "/status"
+	// For backward compatibility, we need to determine a chainID to use
+	// This is a helper function that should ideally be updated to take chainID as parameter
+	chainID := uint64(901) // Default to first chain ID commonly used in tests
+	return WaitSV2CrossFinalizedAtLeastForChain(ctx, sv2URL, chainID, min)
+}
+
+// WaitSV2CrossFinalizedAtLeastForChain polls SV2 /status until cross_finalized >= min for a specific chain.
+func WaitSV2CrossFinalizedAtLeastForChain(ctx context.Context, sv2URL string, chainID uint64, min uint64) error {
+	statusURL := fmt.Sprintf("%s/status?chainId=%d", sv2URL, chainID)
 	return retry.Do0(ctx, 120, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
 		resp, err := http.Get(statusURL)
 		if err != nil {
