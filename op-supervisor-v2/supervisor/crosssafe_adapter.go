@@ -185,7 +185,7 @@ func (a *crosssafeAdapter) CandidateCrossSafe(chain eth.ChainID) (types.DerivedB
 			return cand, nil
 		} // else: fall back to local mapping
 	}
-	// fallback: use local DB to resolve last-derived for this L1 source
+	// fallback: select immediate next derived after current cross-safe head within this L1 scope
 	var localDB *fromda.DB
 	if chain == a.chainID {
 		localDB = a.local
@@ -199,12 +199,19 @@ func (a *crosssafeAdapter) CandidateCrossSafe(chain eth.ChainID) (types.DerivedB
 	if localDB == nil {
 		return types.DerivedBlockRefPair{}, fmt.Errorf("local DB not found for chain %v", chain)
 	}
-	seal, err := localDB.SourceToLastDerived(l1Ref.ID())
+	lastInScope, err := localDB.SourceToLastDerived(l1Ref.ID())
 	if err != nil {
 		return types.DerivedBlockRefPair{}, err
 	}
-	// build full derived BlockRef
-	env, e := a.l2.PayloadByNumber(context.Background(), seal.Number)
+	if after.Number >= lastInScope.Number {
+		// No in-scope next block; request scope bump
+		return types.DerivedBlockRefPair{Source: l1Ref, Derived: eth.BlockRef{}}, types.ErrOutOfScope
+	}
+	nextNum := after.Number + 1
+	if nextNum > lastInScope.Number {
+		nextNum = lastInScope.Number
+	}
+	env, e := a.l2.PayloadByNumber(context.Background(), nextNum)
 	if e != nil {
 		return types.DerivedBlockRefPair{}, e
 	}
@@ -212,7 +219,13 @@ func (a *crosssafeAdapter) CandidateCrossSafe(chain eth.ChainID) (types.DerivedB
 	if derr != nil {
 		return types.DerivedBlockRefPair{}, derr
 	}
-	return types.DerivedBlockRefPair{Source: l1Ref, Derived: br.BlockRef()}, nil
+	// types.BlockSeal has WithParent helpers; convert to seal for linkage
+	seal := types.BlockSealFromRef(br.BlockRef())
+	dref, perr := seal.WithParent(after)
+	if perr != nil {
+		return types.DerivedBlockRefPair{}, perr
+	}
+	return types.DerivedBlockRefPair{Source: l1Ref, Derived: dref}, nil
 }
 
 func (a *crosssafeAdapter) NextSource(chain eth.ChainID, source eth.BlockID) (eth.BlockRef, error) {

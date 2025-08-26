@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
+	supertypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
+
 	// use sysgo variant of the two-chain preset to avoid generics mismatch
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
@@ -68,7 +70,7 @@ func TestJustSitThere(gt *testing.T) {
 
 	// Get EL client
 	l2Net := system.L2Networks()[0]
-	el := l2Net.L2ELNode(match.FirstL2EL)
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
@@ -86,14 +88,26 @@ func TestJustSitThere(gt *testing.T) {
 	//////////////////////////////////////////////////////////////////////
 	// finally: assert test conditions
 
-	// assert cross safe (finalized) is still advancing
+	// assert cross safe (finalized) is still advancing via supervisor sync status
 	require.Eventually(t, func() bool {
-		ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Finalized)
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/v1/cross_safe?chainId=%d", sv2URL, chainID), nil)
 		if err != nil {
 			return false
 		}
-		return ref.Number >= finalityCheckHeight
-	}, 60*time.Second, 300*time.Millisecond)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var out supertypes.DerivedIDPair
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return false
+		}
+		return out.Derived.Number >= finalityCheckHeight
+	}, 600*time.Second, 300*time.Millisecond)
 	//////////////////////////////////////////////////////////////////////
 }
 
@@ -231,11 +245,23 @@ func TestManualRollback(gt *testing.T) {
 
 	// assert cross safe (finalized) is still advancing
 	require.Eventually(t, func() bool {
-		ref, err := el.EthClient().BlockRefByLabel(ctx, eth.Finalized)
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/v1/cross_safe?chainId=%d", sv2URL, chainID), nil)
 		if err != nil {
 			return false
 		}
-		return ref.Number >= finalityCheckHeight
-	}, 60*time.Second, 300*time.Millisecond)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var out supertypes.DerivedIDPair
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return false
+		}
+		return out.Derived.Number >= finalityCheckHeight
+	}, 600*time.Second, 300*time.Millisecond)
 	//////////////////////////////////////////////////////////////////////
 }

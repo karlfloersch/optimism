@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -43,6 +44,7 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 				out = pair.IDs()
 			}
 		}
+		fmt.Println("AXELAXEL cross_safe out", out)
 		h.stateMu.Unlock()
 		_ = json.NewEncoder(w).Encode(out)
 	})
