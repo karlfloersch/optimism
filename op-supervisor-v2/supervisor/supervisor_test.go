@@ -1,21 +1,8 @@
 package supervisor
 
 import (
-	"context"
 	"testing"
-
-	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
-
-// fake status producer for tests
-func fakeFetcher(seq []uint64) func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
-	idx := 0
-	return func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
-		n := seq[idx%len(seq)]
-		idx++
-		return &eth.SyncStatus{FinalizedL2: eth.L2BlockRef{Number: n}}, nil
-	}
-}
 
 func TestCrossFinalizedFromDBOrFallbackZeroOnEmpty(t *testing.T) {
 	s := NewSupervisor(testLogger())
