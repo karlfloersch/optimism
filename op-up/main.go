@@ -33,10 +33,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/endpoint"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
 	"github.com/ethereum-optimism/optimism/op-service/testreq"
-	supv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
@@ -424,31 +422,8 @@ func runSysgo() error {
 		}
 	}()
 
-	// Start supervisor-v2 polling against sysgo L2
-	{
-		// Use the RollupAPI from the L2 CL shim directly and the EL RPC from the L2 EL shim
-		roll := l2Net.L2CLNode(match.FirstL2CL).RollupAPI()
-		elUserRPC := elNode.L2EthClient().RPC()
-
-		logCfg := oplog.DefaultCLIConfig()
-		lgr := oplog.NewLogger(os.Stdout, logCfg)
-		rcfg, err := roll.RollupConfig(t.Ctx())
-		if err != nil {
-			return err
-		}
-		s := supv2.NewSupervisor(lgr)
-		// Expose SV2 HTTP for health and /opnode/ proxy so external tools can query sync status
-		s.EnableOpNodeProxy(true)
-		go func() {
-			addr := "127.0.0.1:9750"
-			if err := http.ListenAndServe(addr, s.HTTPHandler()); err != nil {
-				fmt.Fprintf(os.Stderr, "sv2 http listen error: %v\n", err)
-			}
-		}()
-		if err := s.StartPollingWithRollupClient(roll, elUserRPC, rcfg, time.Second, 40); err != nil {
-			return err
-		}
-	}
+	// Note: Supervisor v2 initialization removed for single-chain local mode
+	// Multi-chain modes with external L1 or OP_LOCAL_TWO_CHAIN=1 use SV2 via sysgo presets
 
 	<-ctx.Done()
 

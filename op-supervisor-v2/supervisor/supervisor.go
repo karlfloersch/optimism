@@ -117,7 +117,96 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	// initialize denylist under data dir by default
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+	go s.ProgressCrossSafe()
 	return s
+}
+
+func (s *Supervisor) ProgressCrossSafe() {
+	oldMinTimestamp := uint64(0)
+	for {
+		s.log.Info("ProgressCrossSafe: loop start")
+		ctx := context.Background()
+
+		// copy active chains to avoid race conditions
+		s.activeChainsMu.Lock()
+		activeChains := make([]eth.ChainID, 0, len(s.activeChains))
+		for id := range s.activeChains {
+			activeChains = append(activeChains, id)
+		}
+		s.activeChainsMu.Unlock()
+
+		// step 1: identify the minimum latest timestamp across all chains
+		var minTimestamp uint64
+		for _, id := range activeChains {
+			chainID, _ := id.Uint64()
+			s.mu.Lock()
+			h := s.chains[chainID]
+			s.mu.Unlock()
+
+			if h == nil {
+				continue
+			}
+
+			h.stateMu.Lock()
+			userRPC := h.embeddedOpNodeUserRPC
+			h.stateMu.Unlock()
+
+			if userRPC == "" {
+				continue
+			}
+
+			// Get latest safe timestamp from sync status
+			if st, err := s.fetchSyncStatus(ctx, userRPC); err == nil && st != nil {
+				latestTimestamp := st.SafeL2.Time
+				s.log.Info("ProgressCrossSafe: latest timestamp", "chain", chainID, "timestamp", latestTimestamp)
+				// if unset or less than minTimestamp, update minTimestamp
+				if minTimestamp == 0 || (latestTimestamp > 0 && latestTimestamp < minTimestamp) {
+					minTimestamp = latestTimestamp
+				}
+			}
+		}
+
+		// step 1.5
+		// check L1 blocks based on the minimums and confirm that confirmation depth (L1) is met
+		// recede any chains outside of finality space to just the L1 finality block
+
+		// step 2: if the minimum timestamp has changed, ensure all chains have ingested up to the minimum timestamp
+		if minTimestamp > 0 && minTimestamp != oldMinTimestamp {
+			s.log.Info("ProgressCrossSafe: minimum timestamp changed", "old", oldMinTimestamp, "new", minTimestamp)
+			oldMinTimestamp = minTimestamp
+
+			for _, id := range activeChains {
+				// identify target block based on timestamp
+				chainID, _ := id.Uint64()
+				h := s.chains[chainID]
+				if h == nil {
+					continue
+				}
+				rcfg := h.virtualCfg.Rcfg
+				targetNumber := uint64(0)
+				timestamp := uint64(0)
+				for timestamp < minTimestamp {
+					targetNumber++
+					timestamp = rcfg.TimestampForBlock(targetNumber)
+				}
+				s.log.Info("ProgressCrossSafe: would ingest to local safe", "chain", id, "timestamp", timestamp, "blockHeight", targetNumber)
+				// TODO: ingest to local safe
+			}
+		}
+
+		// step 3: for each chain, run cross safe validation
+		for _, id := range activeChains {
+			s.log.Info("ProgressCrossSafe: *would be* running cross safe validation", "chain", id)
+		}
+
+		// step 4: for any failures, invalidate / denylist etc
+		for _, id := range activeChains {
+			s.log.Info("ProgressCrossSafe: *would be* considering invalidating / denyinglist", "chain", id)
+		}
+
+		// step 999: sleep for 1 second
+		time.Sleep(1 * time.Second)
+	}
 }
 
 // getDataDir returns the base data directory for chain DBs
