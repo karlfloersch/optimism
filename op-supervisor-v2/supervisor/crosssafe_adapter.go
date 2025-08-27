@@ -232,15 +232,15 @@ func (a *crosssafeAdapter) NextSource(chain eth.ChainID, source eth.BlockID) (et
 	var db *fromda.DB
 	var err error
 	if chain == a.chainID {
-		db = a.cross
-	} else if a.lookupCross != nil {
-		db, err = a.lookupCross(chain)
+		db = a.local
+	} else if a.lookupLocal != nil {
+		db, err = a.lookupLocal(chain)
 	}
 	if db == nil {
 		if err != nil {
 			return eth.BlockRef{}, err
 		}
-		return eth.BlockRef{}, fmt.Errorf("cross DB not found for chain %v", chain)
+		return eth.BlockRef{}, fmt.Errorf("local DB not found for chain %v", chain)
 	}
 	seal, err := db.NextSource(source)
 	if err != nil {
