@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sort"
 
@@ -44,7 +43,6 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 				out = pair.IDs()
 			}
 		}
-		fmt.Println("AXELAXEL cross_safe out", out)
 		h.stateMu.Unlock()
 		_ = json.NewEncoder(w).Encode(out)
 	})
@@ -123,7 +121,7 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 }
 
 // resolveChainFromQuery parses chainId and returns the chain handle, replying with errors if invalid.
-func (s *Supervisor) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *chainHandle) {
+func (s *Supervisor) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *ChainHandle) {
 	q := r.URL.Query()
 	var chainID uint64
 	if cidStr := q.Get("chainId"); cidStr != "" {

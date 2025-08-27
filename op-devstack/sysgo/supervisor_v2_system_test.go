@@ -29,7 +29,7 @@ func TestJustSitThere(gt *testing.T) {
 	//////////////////////////////////////////////////////////////////////
 	// variables to control test behavior
 	const testName = "JustSitThere"
-	const finalityCheckHeight = uint64(10)
+	const finalityCheckHeight = uint64(55)
 
 	//////////////////////////////////////////////////////////////////////
 	// set up a minimal system with SV2 embedding an op-node

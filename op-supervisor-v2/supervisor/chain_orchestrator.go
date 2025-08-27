@@ -2,222 +2,47 @@ package supervisor
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
-	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	"github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
 	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// ensureL1Client lazily initializes the L1 client using the given RPC URL.
-func (s *Supervisor) ensureL1Client(ctx context.Context, l1Cli opclient.RPC, l1 *sources.L1Client, l1RPC string, rcfg *rollup.Config) (opclient.RPC, *sources.L1Client) {
-	if l1 != nil {
-		return l1Cli, l1
-	}
-	if l1Cli == nil {
-		if c, e := opclient.NewRPC(ctx, s.log, l1RPC); e == nil {
-			l1Cli = c
-		}
-	}
-	if l1Cli != nil {
-		if l1Client, e := sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard)); e == nil {
-			l1 = l1Client
-		}
-	}
-	return l1Cli, l1
-}
+// ChainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
+type ChainHandle struct {
+	stateMu sync.Mutex
 
-// ingestToLocalSafe computes the ingest range and ingests up to target.
-func (s *Supervisor) ingestToLocalSafe(ctx context.Context, h *chainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64, target uint64) {
-	var startLogs uint64 = 0
-	if last, ok := h.logsDB.LatestSealedBlock(); ok {
-		startLogs = last.Number + 1
-		if last.Number >= target {
-			return
-		}
-	}
-	var startLocal uint64 = 0
-	if pair, err := h.localDB.Last(); err == nil {
-		startLocal = pair.Derived.Number + 1
-	}
-	start := startLogs
-	if startLocal < start {
-		start = startLocal
-	}
-	if start > target {
-		start = target
-	}
-	s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target)
-	if err := ingestRange(ctx, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target); err != nil {
-		s.log.Info("ingest: deferred", "err", err)
-	}
-}
+	// runtime state
+	embeddedOpNodeUserRPC string
+	stopEmbeddedOpNode    func(ctx context.Context) error
+	cancelPoll            context.CancelFunc
+	started               time.Time
 
-// seedLocalIfEmpty seeds the first derived mapping from the current target if local DB is empty.
-func (s *Supervisor) seedLocalIfEmpty(ctx context.Context, h *chainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64, target uint64) {
-	if !h.localDB.IsEmpty() {
-		return
-	}
-	env, err := l2.PayloadByNumber(ctx, target)
-	if err != nil {
-		return
-	}
-	if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
-		l1Ref, e1 := l1.BlockRefByNumber(ctx, br.L1Origin.Number)
-		if e1 == nil && l1Ref.Hash == br.L1Origin.Hash {
-			if did, _ := s.ensureDerived(h.localDB, l1Ref, br.BlockRef(), types.RevisionAny); did {
-				s.log.Info("seed: local derived from target", "chain", chainID, "l1", l1Ref, "l2", br.BlockRef())
-			}
-		}
-	}
-}
+	// config for restart/rollback
+	virtualCfg *virtual_node.VirtualNodeConfig
 
-// debugIngestHeads logs the heads of logs/local/cross for observability.
-func (s *Supervisor) debugIngestHeads(h *chainHandle, chainID uint64) {
-	if blk, ok := h.logsDB.LatestSealedBlock(); ok {
-		s.log.Info("ingest: logs head", "chain", chainID, "num", blk.Number)
-	}
-	if pair, err := h.localDB.Last(); err == nil {
-		s.log.Info("ingest: local head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
-	} else {
-		s.log.Info("ingest: local head err", "chain", chainID, "err", err)
-	}
-	if h.crossDB != nil {
-		if pair, err := h.crossDB.Last(); err == nil {
-			s.log.Info("ingest: cross head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
-		} else {
-			s.log.Info("ingest: cross head err", "chain", chainID, "err", err)
-		}
-	}
-}
-
-// ensureDerived performs a guarded AddDerived write that only appends when advancing.
-// Returns true if a write was performed.
-func (s *Supervisor) ensureDerived(db *fromda.DB, l1Ref eth.BlockRef, l2Ref eth.BlockRef, rev types.Revision) (bool, error) {
-	if db == nil {
-		return false, nil
-	}
-	if pair, err := db.Last(); err == nil {
-		if pair.Derived.Number >= l2Ref.Number {
-			return false, nil
-		}
-	}
-	if err := db.AddDerived(l1Ref, l2Ref, rev); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// bootstrapCrossIfEmpty initializes cross DB from local DB once.
-func (s *Supervisor) bootstrapCrossIfEmpty(ctx context.Context, h *chainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64) {
-	if !h.crossDB.IsEmpty() {
-		return
-	}
-	if pair, err := h.localDB.Last(); err == nil {
-		l1Ref, err1 := l1.BlockRefByNumber(ctx, pair.Source.Number)
-		env, err2 := l2.PayloadByNumber(ctx, pair.Derived.Number)
-		var dref eth.BlockRef
-		if err2 == nil {
-			if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
-				dref = br.BlockRef()
-			}
-		}
-		if err1 == nil && dref.Number == pair.Derived.Number {
-			if did, _ := s.ensureDerived(h.crossDB, l1Ref, dref, types.RevisionAny); did {
-				s.log.Info("bootstrap cross DB from local", "chain", chainID, "l1", l1Ref, "l2", dref)
-			}
-		}
-	}
-}
-
-// newCrosssafeAdapter builds the adapter with closures to look up per-chain DBs.
-func (s *Supervisor) newCrosssafeAdapter(h *chainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64) *crosssafeAdapter {
-	return &crosssafeAdapter{
-		logger:  s.log,
-		chainID: eth.ChainIDFromUInt64(chainID),
-		logs:    h.logsDB,
-		local:   h.localDB,
-		cross:   h.crossDB,
-		lookupLogs: func(cid eth.ChainID) (*logsdb.DB, error) {
-			if v, ok := cid.Uint64(); ok {
-				s.mu.Lock()
-				h2 := s.chains[v]
-				s.mu.Unlock()
-				if h2 != nil {
-					return h2.logsDB, nil
-				}
-			}
-			return nil, fmt.Errorf("unknown chain %v", cid)
-		},
-		lookupLocal: func(cid eth.ChainID) (*fromda.DB, error) {
-			if v, ok := cid.Uint64(); ok {
-				s.mu.Lock()
-				h2 := s.chains[v]
-				s.mu.Unlock()
-				if h2 != nil {
-					return h2.localDB, nil
-				}
-			}
-			return nil, fmt.Errorf("unknown chain %v", cid)
-		},
-		lookupCross: func(cid eth.ChainID) (*fromda.DB, error) {
-			if v, ok := cid.Uint64(); ok {
-				s.mu.Lock()
-				h2 := s.chains[v]
-				s.mu.Unlock()
-				if h2 != nil {
-					return h2.crossDB, nil
-				}
-			}
-			return nil, fmt.Errorf("unknown chain %v", cid)
-		},
-		reads:          reads.NewRegistry(s.log),
-		l1:             l1,
-		l2:             l2,
-		addDenylist:    func(cid uint64, id string) error { return s.denylist.Add(cid, id) },
-		rollback:       s.RollbackChain,
-		l1ConfirmDepth: h.embeddedCfg.confirmDepth,
-		l1ScopeLabel:   s.getL1ScopeLabel(),
-	}
-}
-
-// runCrossSafeStep executes one adapter step and logs the outcome.
-func (s *Supervisor) runCrossSafeStep(ctx context.Context, adapter *crosssafeAdapter, chainID uint64) {
-	s.log.Info("crosssafe: run", "chain", chainID)
-	if err := adapter.runCrossSafeOnce(s.log, s.getLinkChecker()); err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "future data") || strings.Contains(msg, "past last entry") {
-			s.log.Info("crosssafe: waiting for ingest", "chain", chainID, "err", err)
-		} else {
-			s.log.Warn("crosssafe: error", "chain", chainID, "err", err)
-		}
-	}
-	if cs, err := adapter.cross.Last(); err == nil {
-		s.log.Info("crosssafe: head", "chain", chainID, "derived", cs.Derived)
-	} else {
-		s.log.Warn("crosssafe: last error", "chain", chainID, "err", err)
-	}
+	// v1 DBs per chain
+	logsDB  *logsdb.DB
+	localDB *fromda.DB
+	crossDB *fromda.DB
 }
 
 // startChainPolling starts the main polling loop for a chain with full supervisor functionality.
-func (s *Supervisor) startChainPolling(ctxPoll context.Context, h *chainHandle, roll *sources.RollupClient, l2 *sources.L2Client, chainID uint64) {
-	ticker := time.NewTicker(h.embeddedCfg.interval)
+func (s *Supervisor) startChainPolling(ctxPoll context.Context, h *ChainHandle, roll *sources.RollupClient, l2 *sources.L2Client, chainID uint64) {
+	ticker := time.NewTicker(h.virtualCfg.Interval)
 	defer ticker.Stop()
 
 	// lazy L1 client for ingest
-	l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l1RPC)
+	l1Cli, _ := opclient.NewRPC(ctxPoll, s.log, h.virtualCfg.L1RPC)
 	var l1 *sources.L1Client
 	if l1Cli != nil {
-		l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(h.embeddedCfg.rcfg, true, sources.RPCKindStandard))
+		l1, _ = sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(h.virtualCfg.Rcfg, true, sources.RPCKindStandard))
 	}
 
 	// open DBs if not already
@@ -231,69 +56,50 @@ func (s *Supervisor) startChainPolling(ctxPoll context.Context, h *chainHandle, 
 	}
 
 	// register this chain in the shared linker
-	s.markChainActive(eth.ChainIDFromUInt64(chainID))
+	s.MarkChainActive(eth.ChainIDFromUInt64(chainID))
 
 	for {
 		select {
 		case <-ctxPoll.Done():
 			return
 		case <-ticker.C:
-			st, err := roll.SyncStatus(ctxPoll)
-			if err != nil || st == nil {
+			// Ensure L1 client is initialized (may fail early before L1 comes up)
+			l1Cli, l1 = s.EnsureL1Client(ctxPoll, l1Cli, l1, h.virtualCfg.L1RPC, h.virtualCfg.Rcfg)
+
+			// Get sync status from rollup client
+			syncStatus, err := roll.SyncStatus(ctxPoll)
+			if err != nil || syncStatus == nil {
 				s.log.Warn("poll: sync status error", "err", err)
 				continue
 			}
-			// Ensure L1 client is initialized (may fail early before L1 comes up)
-			l1Cli, l1 = s.ensureL1Client(ctxPoll, l1Cli, l1, h.embeddedCfg.l1RPC, h.embeddedCfg.rcfg)
-			// Ingest strictly up to local-safe; skip until local-safe progresses
-			target := st.LocalSafeL2
-			// Include cross-safe (from cross DB) for observability
-			var crossSafe any
-			if h.crossDB != nil {
-				if pair, err := h.crossDB.Last(); err == nil {
-					crossSafe = pair.Derived
-				}
-			}
-			s.log.Info("poll: heads", "chain", chainID, "unsafe", st.UnsafeL2, "local_safe", st.LocalSafeL2, "safe", st.SafeL2, "finalized", st.FinalizedL2, "cross_safe", crossSafe)
+			s.log.Info("poll: heads",
+				"chain", chainID,
+				"unsafe", syncStatus.UnsafeL2,
+				"local_safe", syncStatus.LocalSafeL2,
+				"safe", syncStatus.SafeL2,
+				"finalized", syncStatus.FinalizedL2)
+
+			target := syncStatus.LocalSafeL2
 			if target.Number == 0 {
 				continue
 			}
 			// Ingest and optionally seed/debug if there is new work
 			if h.logsDB != nil && h.localDB != nil && l1 != nil {
-				s.ingestToLocalSafe(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID, target.Number)
-				s.seedLocalIfEmpty(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID, target.Number)
-				s.debugIngestHeads(h, chainID)
+				s.IngestToLocalSafe(ctxPoll, h, l1, l2, h.virtualCfg.Rcfg, chainID, target.Number)
+				s.SeedLocalIfEmpty(ctxPoll, h, l1, l2, h.virtualCfg.Rcfg, chainID, target.Number)
+				s.DebugIngestHeads(h, chainID)
 			}
 			// bootstrap cross DB once from latest local derived so cross-safe can start progressing
 			if h.crossDB != nil && h.localDB != nil {
-				s.bootstrapCrossIfEmpty(ctxPoll, h, l1, l2, h.embeddedCfg.rcfg, chainID)
+				s.BootstrapCrossIfEmpty(ctxPoll, h, l1, l2, h.virtualCfg.Rcfg, chainID)
 			}
 			// drive one step of cross-safe update
 			if h.logsDB != nil && h.localDB != nil && h.crossDB != nil {
-				adapter := s.newCrosssafeAdapter(h, l1, l2, h.embeddedCfg.rcfg, chainID)
-				s.runCrossSafeStep(ctxPoll, adapter, chainID)
+				adapter := s.newCrosssafeAdapter(h, l1, l2, h.virtualCfg.Rcfg, chainID)
+				s.RunCrossSafeStep(ctxPoll, adapter, chainID)
 			}
 		}
 	}
-}
-
-// chainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
-type chainHandle struct {
-	stateMu sync.Mutex
-
-	// runtime state
-	embeddedOpNodeUserRPC string
-	stopEmbeddedOpNode    func(ctx context.Context) error
-	cancelPoll            context.CancelFunc
-	started               time.Time
-
-	// config for restart/rollback
-	embeddedCfg *embeddedConfig
-
-	// v1 DBs per chain
-	logsDB  *logsdb.DB
-	localDB *fromda.DB
-	crossDB *fromda.DB
 }
 
 // AddChain starts an embedded op-node and polling for the given rollup config and RPCs.
@@ -302,23 +108,23 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	chainID := rcfg.L2ChainID.Uint64()
 
 	// Start embedded op-node
-	userRPC, stopFn, err := s.StartEmbeddedOpNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg)
+	userRPC, stopFn, err := virtual_node.StartVirtualNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg, s.log)
 	if err != nil {
 		return 0, err
 	}
 
-	h := &chainHandle{
+	h := &ChainHandle{
 		embeddedOpNodeUserRPC: userRPC,
 		stopEmbeddedOpNode:    stopFn,
-		embeddedCfg: &embeddedConfig{
-			l1RPC:        l1RPC,
-			beaconAddr:   beaconAddr,
-			l2AuthRPC:    l2AuthRPC,
-			l2UserRPC:    l2UserRPC,
-			jwtSecret:    jwtSecret,
-			rcfg:         rcfg,
-			interval:     interval,
-			confirmDepth: confirmDepth,
+		virtualCfg: &virtual_node.VirtualNodeConfig{
+			L1RPC:        l1RPC,
+			BeaconAddr:   beaconAddr,
+			L2AuthRPC:    l2AuthRPC,
+			L2UserRPC:    l2UserRPC,
+			JwtSecret:    jwtSecret,
+			Rcfg:         rcfg,
+			Interval:     interval,
+			ConfirmDepth: confirmDepth,
 		},
 		started: time.Now(),
 	}
@@ -353,7 +159,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	// Register handle
 	s.mu.Lock()
 	if s.chains == nil {
-		s.chains = make(map[uint64]*chainHandle)
+		s.chains = make(map[uint64]*ChainHandle)
 	}
 	s.chains[chainID] = h
 	s.mu.Unlock()
@@ -392,7 +198,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	s.mu.Lock()
 	h := s.chains[chainID]
 	s.mu.Unlock()
-	if h == nil || h.embeddedCfg == nil {
+	if h == nil || h.virtualCfg == nil {
 		return nil
 	}
 	h.stateMu.Lock()
@@ -410,12 +216,12 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	}
 
 	// Roll back EL head to the absolute target via pluggable implementation
-	if err := rollbackEL(ctx, h.embeddedCfg.l2UserRPC, toBlock); err != nil {
+	if err := rollbackEL(ctx, h.virtualCfg.L2UserRPC, toBlock); err != nil {
 		return err
 	}
 
 	// Restart embedded op-node and polling
-	userRPC, stopFn2, err := s.StartEmbeddedOpNode(h.embeddedCfg.l1RPC, h.embeddedCfg.beaconAddr, h.embeddedCfg.l2AuthRPC, h.embeddedCfg.jwtSecret, h.embeddedCfg.rcfg)
+	userRPC, stopFn2, err := virtual_node.StartVirtualNode(h.virtualCfg.L1RPC, h.virtualCfg.BeaconAddr, h.virtualCfg.L2AuthRPC, h.virtualCfg.JwtSecret, h.virtualCfg.Rcfg, s.log)
 	if err != nil {
 		return err
 	}
@@ -430,12 +236,12 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		cancel()
 		return err
 	}
-	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, h.embeddedCfg.l2UserRPC)
+	l2Cli, err := opclient.NewRPC(ctxPoll, s.log, h.virtualCfg.L2UserRPC)
 	if err != nil {
 		cancel()
 		return err
 	}
-	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.embeddedCfg.rcfg, true))
+	l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(h.virtualCfg.Rcfg, true))
 	if err != nil {
 		cancel()
 		return err

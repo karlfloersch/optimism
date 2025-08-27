@@ -16,11 +16,16 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/params"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
+	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -34,7 +39,7 @@ type Supervisor struct {
 	// denylist
 	denylist *DenylistStore
 
-	chains         map[uint64]*chainHandle
+	chains         map[uint64]*ChainHandle
 	activeChainsMu sync.Mutex
 	activeChains   map[eth.ChainID]struct{}
 
@@ -52,17 +57,6 @@ type Supervisor struct {
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
-}
-
-type embeddedConfig struct {
-	l1RPC        string
-	beaconAddr   string
-	l2AuthRPC    string
-	l2UserRPC    string
-	jwtSecret    [32]byte
-	rcfg         *rollup.Config
-	interval     time.Duration
-	confirmDepth uint64
 }
 
 func (s *Supervisor) checkExecutingMessageLink(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
@@ -98,7 +92,7 @@ func defaultScopeLabel() eth.BlockLabel {
 }
 
 func NewSupervisor(l log.Logger) *Supervisor {
-	s := &Supervisor{log: l}
+	s := &Supervisor{log: l.New("service", "supervisor_v2")}
 	// initialize shared linker state
 	s.activeChains = make(map[eth.ChainID]struct{})
 	s.expiryWindow = params.MessageExpiryTimeSecondsInterop
@@ -141,8 +135,8 @@ func (s *Supervisor) SetDataDir(dir string) {
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
 }
 
-// markChainActive marks a chain ID as active via the activeChains set.
-func (s *Supervisor) markChainActive(id eth.ChainID) {
+// MarkChainActive marks a chain ID as active via the activeChains set.
+func (s *Supervisor) MarkChainActive(id eth.ChainID) {
 	s.activeChainsMu.Lock()
 	defer s.activeChainsMu.Unlock()
 	if s.activeChains == nil {
@@ -172,7 +166,7 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 func (s *Supervisor) Stop() {
 	// Stop all chains
 	s.mu.Lock()
-	chains := make(map[uint64]*chainHandle)
+	chains := make(map[uint64]*ChainHandle)
 	for id, h := range s.chains {
 		chains[id] = h
 	}
@@ -366,7 +360,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 // computed value when DBs are not open yet.
 func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
 	s.mu.Lock()
-	chains := make(map[uint64]*chainHandle, len(s.chains))
+	chains := make(map[uint64]*ChainHandle, len(s.chains))
 	for id, h := range s.chains {
 		chains[id] = h
 	}
@@ -399,7 +393,7 @@ func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
 func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/sync_status", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		chains := make(map[uint64]*chainHandle, len(s.chains))
+		chains := make(map[uint64]*ChainHandle, len(s.chains))
 		for id, h := range s.chains {
 			chains[id] = h
 		}
@@ -517,3 +511,193 @@ func (s *Supervisor) ManagedOpNodeUserRPC() string {
 
 // EnableOpNodeProxy toggles the /opnode/ reverse proxy in the HTTP handler.
 func (s *Supervisor) EnableOpNodeProxy(v bool) { s.enableOpNodeProxy = v }
+
+// EnsureL1Client lazily initializes the L1 client using the given RPC URL.
+func (s *Supervisor) EnsureL1Client(ctx context.Context, l1Cli opclient.RPC, l1 *sources.L1Client, l1RPC string, rcfg *rollup.Config) (opclient.RPC, *sources.L1Client) {
+	if l1 != nil {
+		return l1Cli, l1
+	}
+	if l1Cli == nil {
+		if c, e := opclient.NewRPC(ctx, s.log, l1RPC); e == nil {
+			l1Cli = c
+		}
+	}
+	if l1Cli != nil {
+		if l1Client, e := sources.NewL1Client(l1Cli, s.log, nil, sources.L1ClientDefaultConfig(rcfg, true, sources.RPCKindStandard)); e == nil {
+			l1 = l1Client
+		}
+	}
+	return l1Cli, l1
+}
+
+// IngestToLocalSafe computes the ingest range and ingests up to target.
+func (s *Supervisor) IngestToLocalSafe(ctx context.Context, h *ChainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64, target uint64) {
+	var startLogs uint64 = 0
+	if last, ok := h.logsDB.LatestSealedBlock(); ok {
+		startLogs = last.Number + 1
+		if last.Number >= target {
+			return
+		}
+	}
+	var startLocal uint64 = 0
+	if pair, err := h.localDB.Last(); err == nil {
+		startLocal = pair.Derived.Number + 1
+	}
+	start := startLogs
+	if startLocal < start {
+		start = startLocal
+	}
+	if start > target {
+		start = target
+	}
+	s.log.Info("ingest: range", "chain", chainID, "start", start, "end", target)
+	if err := ingestRange(ctx, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, target); err != nil {
+		s.log.Info("ingest: deferred", "err", err)
+	}
+}
+
+// SeedLocalIfEmpty seeds the first derived mapping from the current target if local DB is empty.
+func (s *Supervisor) SeedLocalIfEmpty(ctx context.Context, h *ChainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64, target uint64) {
+	if !h.localDB.IsEmpty() {
+		return
+	}
+	env, err := l2.PayloadByNumber(ctx, target)
+	if err != nil {
+		return
+	}
+	if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
+		l1Ref, e1 := l1.BlockRefByNumber(ctx, br.L1Origin.Number)
+		if e1 == nil && l1Ref.Hash == br.L1Origin.Hash {
+			if did, _ := s.ensureDerived(h.localDB, l1Ref, br.BlockRef(), types.RevisionAny); did {
+				s.log.Info("seed: local derived from target", "chain", chainID, "l1", l1Ref, "l2", br.BlockRef())
+			}
+		}
+	}
+}
+
+// DebugIngestHeads logs the heads of logs/local/cross for observability.
+func (s *Supervisor) DebugIngestHeads(h *ChainHandle, chainID uint64) {
+	if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+		s.log.Info("ingest: logs head", "chain", chainID, "num", blk.Number)
+	}
+	if pair, err := h.localDB.Last(); err == nil {
+		s.log.Info("ingest: local head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
+	} else {
+		s.log.Info("ingest: local head err", "chain", chainID, "err", err)
+	}
+	if h.crossDB != nil {
+		if pair, err := h.crossDB.Last(); err == nil {
+			s.log.Info("ingest: cross head", "chain", chainID, "l1", pair.Source, "l2", pair.Derived)
+		} else {
+			s.log.Info("ingest: cross head err", "chain", chainID, "err", err)
+		}
+	}
+}
+
+// ensureDerived performs a guarded AddDerived write that only appends when advancing.
+// Returns true if a write was performed.
+func (s *Supervisor) ensureDerived(db *fromda.DB, l1Ref eth.BlockRef, l2Ref eth.BlockRef, rev types.Revision) (bool, error) {
+	if db == nil {
+		return false, nil
+	}
+	if pair, err := db.Last(); err == nil {
+		if pair.Derived.Number >= l2Ref.Number {
+			return false, nil
+		}
+	}
+	if err := db.AddDerived(l1Ref, l2Ref, rev); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BootstrapCrossIfEmpty initializes cross DB from local DB once.
+func (s *Supervisor) BootstrapCrossIfEmpty(ctx context.Context, h *ChainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64) {
+	if !h.crossDB.IsEmpty() {
+		return
+	}
+	if pair, err := h.localDB.Last(); err == nil {
+		l1Ref, err1 := l1.BlockRefByNumber(ctx, pair.Source.Number)
+		env, err2 := l2.PayloadByNumber(ctx, pair.Derived.Number)
+		var dref eth.BlockRef
+		if err2 == nil {
+			if br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload); derr == nil {
+				dref = br.BlockRef()
+			}
+		}
+		if err1 == nil && dref.Number == pair.Derived.Number {
+			if did, _ := s.ensureDerived(h.crossDB, l1Ref, dref, types.RevisionAny); did {
+				s.log.Info("bootstrap cross DB from local", "chain", chainID, "l1", l1Ref, "l2", dref)
+			}
+		}
+	}
+}
+
+// newCrosssafeAdapter builds the adapter with closures to look up per-chain DBs.
+func (s *Supervisor) newCrosssafeAdapter(h *ChainHandle, l1 *sources.L1Client, l2 *sources.L2Client, rcfg *rollup.Config, chainID uint64) *crosssafeAdapter {
+	return &crosssafeAdapter{
+		logger:  s.log,
+		chainID: eth.ChainIDFromUInt64(chainID),
+		logs:    h.logsDB,
+		local:   h.localDB,
+		cross:   h.crossDB,
+		lookupLogs: func(cid eth.ChainID) (*logsdb.DB, error) {
+			if v, ok := cid.Uint64(); ok {
+				s.mu.Lock()
+				h2 := s.chains[v]
+				s.mu.Unlock()
+				if h2 != nil {
+					return h2.logsDB, nil
+				}
+			}
+			return nil, fmt.Errorf("unknown chain %v", cid)
+		},
+		lookupLocal: func(cid eth.ChainID) (*fromda.DB, error) {
+			if v, ok := cid.Uint64(); ok {
+				s.mu.Lock()
+				h2 := s.chains[v]
+				s.mu.Unlock()
+				if h2 != nil {
+					return h2.localDB, nil
+				}
+			}
+			return nil, fmt.Errorf("unknown chain %v", cid)
+		},
+		lookupCross: func(cid eth.ChainID) (*fromda.DB, error) {
+			if v, ok := cid.Uint64(); ok {
+				s.mu.Lock()
+				h2 := s.chains[v]
+				s.mu.Unlock()
+				if h2 != nil {
+					return h2.crossDB, nil
+				}
+			}
+			return nil, fmt.Errorf("unknown chain %v", cid)
+		},
+		reads:          reads.NewRegistry(s.log),
+		l1:             l1,
+		l2:             l2,
+		addDenylist:    func(cid uint64, id string) error { return s.denylist.Add(cid, id) },
+		rollback:       s.RollbackChain,
+		l1ConfirmDepth: h.virtualCfg.ConfirmDepth,
+		l1ScopeLabel:   s.getL1ScopeLabel(),
+	}
+}
+
+// RunCrossSafeStep executes one adapter step and logs the outcome.
+func (s *Supervisor) RunCrossSafeStep(ctx context.Context, adapter *crosssafeAdapter, chainID uint64) {
+	s.log.Info("crosssafe: run", "chain", chainID)
+	if err := adapter.runCrossSafeOnce(s.log, s.getLinkChecker()); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "future data") || strings.Contains(msg, "past last entry") {
+			s.log.Info("crosssafe: waiting for ingest", "chain", chainID, "err", err)
+		} else {
+			s.log.Warn("crosssafe: error", "chain", chainID, "err", err)
+		}
+	}
+	if cs, err := adapter.cross.Last(); err == nil {
+		s.log.Info("crosssafe: head", "chain", chainID, "derived", cs.Derived)
+	} else {
+		s.log.Warn("crosssafe: last error", "chain", chainID, "err", err)
+	}
+}

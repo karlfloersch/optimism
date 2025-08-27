@@ -36,7 +36,7 @@ func TestSafeWriterPersistsLocalMapping(t *testing.T) {
 
 	// Since building full mocks for sources.L1Client/L2Client here is extensive, assert DBs are wired in handle
 	s.mu.Lock()
-	s.chains = map[uint64]*chainHandle{
+	s.chains = map[uint64]*ChainHandle{
 		chainID: {localDB: local, crossDB: cross, logsDB: logs},
 	}
 	s.mu.Unlock()
