@@ -227,6 +227,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		// Step 5: get executing messages, validate them, and rollback if needed
 		// TODO: Fix
 		execByChain := s.getExecutingMessages(refs, ts)
+		s.log.Info("xsafe: executing messages", "execByChain", execByChain)
 		valid := s.validateExecutingMessages(refs, execByChain)
 		if !valid {
 			s.log.Info("xsafe: validation detected issues (rollback to be handled in step 6)")
@@ -945,10 +946,14 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 // Expects pre-resolved handles and computed target blocks. Idempotent: skips blocks already sealed.
 func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pairs map[uint64]types.DerivedBlockRefPair) bool {
 	ready := true
+	// Share a single L1 client across chains
+	var l1Cli opclient.RPC
+	var l1 *sources.L1Client
 	for _, r := range refs {
 		v := r.id
 		h := r.h
-		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil {
+		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "h", h)
+		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil || h.localDB == nil {
 			continue
 		}
 		targetPair, ok := pairs[v]
@@ -966,6 +971,15 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 		}
 		rcfg := h.virtualCfg.Rcfg
 		s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
+
+		// Ensure L1 client
+		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
+		if l1 == nil {
+			s.log.Info("xsafe: missing L1 client", "chain", v)
+			ready = false
+			break
+		}
+
 		// Build L2 client (EL user RPC)
 		l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
 		if err != nil {
@@ -978,32 +992,20 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 			ready = false
 			break
 		}
-		// Determine starting point
-		start := uint64(0)
+
+		// Determine ingest start
+		start := targetNum
 		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
 			start = blk.Number + 1
-		}
-		// Manually seal blocks up to target, skipping if already sealed
-		for num := start; num <= targetNum; num++ {
-			env, err := l2.PayloadByNumber(ctx, num)
-			if err != nil {
-				ready = false
-				break
-			}
-			br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload)
-			if derr != nil {
-				ready = false
-				break
-			}
-			// Seal with zero logs (we're not adding per-log entries here)
-			if err := h.logsDB.SealBlock(br.ParentHash, br.BlockRef().ID(), br.Time); err != nil {
-				s.log.Info("xsafe: seal failed", "chain", v, "num", num, "err", err)
-				ready = false
-				break
+			if start > targetNum {
+				start = targetNum
 			}
 		}
-		if !ready {
+		s.log.Info("xsafe: ingest range", "chain", v, "start", start, "end", targetNum)
+		if err := ingestRange(ctx, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, targetNum); err != nil {
+			s.log.Info("xsafe: ingest failed", "chain", v, "err", err)
 			l2Cli.Close()
+			ready = false
 			break
 		}
 		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
@@ -1017,6 +1019,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 // getExecutingMessages returns the executing messages per chain at the target block for ts.
 func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
 	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(refs))
+	s.log.Info("xsafe: getExecutingMessages", "refs", refs, "ts", ts)
 	for _, r := range refs {
 		v := r.id
 		h := r.h
@@ -1030,7 +1033,8 @@ func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64
 			s.log.Info("xsafe: validation target before genesis", "chain", v, "ts", ts)
 			continue
 		}
-		_, _, execMsgs, err := h.logsDB.OpenBlock(targetNum)
+		_, logcount, execMsgs, err := h.logsDB.OpenBlock(targetNum)
+		s.log.Info("xsafe: getExecutingMessages", "chain", v, "logcount", logcount, "execMsgs", execMsgs)
 		if err != nil {
 			s.log.Info("xsafe: validation open block failed", "chain", v, "block", targetNum, "err", err)
 			continue
