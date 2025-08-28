@@ -62,6 +62,12 @@ type Supervisor struct {
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
+// chainRef is a lightweight pair of chain ID and handle used to avoid repeated global lookups
+type chainRef struct {
+	id uint64
+	h  *ChainHandle
+}
+
 func (s *Supervisor) checkExecutingMessageLink(execInChain eth.ChainID, execTs uint64, initChain eth.ChainID, initTs uint64) bool {
 	s.activeChainsMu.Lock()
 	defer s.activeChainsMu.Unlock()
@@ -162,19 +168,22 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.log.Info("xsafe: loop start")
 		ctx := context.Background()
 
-		// Step 0: snapshot active chains
-		s.activeChainsMu.Lock()
-		activeChains := make([]eth.ChainID, 0, len(s.activeChains))
-		for id := range s.activeChains {
-			activeChains = append(activeChains, id)
-		}
-		s.activeChainsMu.Unlock()
-
-		// Step 0: early exit if there are no active chains
+		// Step 0: snapshot active chains and early-exit if none
+		activeChains := s.xsafeSnapshotActiveChains()
 		if len(activeChains) == 0 {
 			s.log.Info("xsafe: no active chains; skipping")
 			time.Sleep(tick)
 			continue
+		}
+		// Resolve chain handles once to reduce global lookups
+		var refs []chainRef
+		for _, id := range activeChains {
+			if v, ok := id.Uint64(); ok {
+				s.mu.Lock()
+				h := s.chains[v]
+				s.mu.Unlock()
+				refs = append(refs, chainRef{id: v, h: h})
+			}
 		}
 
 		// Step 1: initialization — set to min genesis if unset
@@ -183,22 +192,9 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.mu.Unlock()
 		s.log.Info("xsafe: current timestamp", "ts", ts)
 		if ts == 0 {
-			var minGenesis uint64
-			s.mu.Lock()
-			for _, h := range s.chains {
-				if h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
-					gts := h.virtualCfg.Rcfg.Genesis.L2Time
-					if minGenesis == 0 || gts < minGenesis {
-						minGenesis = gts
-					}
-				}
-			}
-			s.mu.Unlock()
-			if minGenesis != 0 {
+			if minGenesis := s.getMinGenesisTimestamp(refs); minGenesis != 0 {
 				s.mu.Lock()
-				if s.crossSafeTimestamp == 0 { // re-check
-					s.crossSafeTimestamp = minGenesis
-				}
+				s.crossSafeTimestamp = minGenesis
 				s.mu.Unlock()
 				// next tick will try to advance beyond genesis
 				time.Sleep(tick)
@@ -212,113 +208,32 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.mu.Unlock()
 		s.log.Info("xsafe: candidate next timestamp", "ts", ts)
 
-		// Step 3: gate — require SafeL2.Time >= ts per chain
-		ready := true
-		for _, id := range activeChains {
-			v, _ := id.Uint64()
-			s.mu.Lock()
-			h := s.chains[v]
-			s.mu.Unlock()
-			if h == nil || h.embeddedOpNodeUserRPC == "" {
-				s.log.Info("xsafe: gate missing chain/opnode", "chain", v)
-				ready = false
-				break
-			}
-			st, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC)
-			if err != nil || st == nil || st.SafeL2.Time < ts {
-				safe := uint64(0)
-				unsafe := uint64(0)
-				fin := uint64(0)
-				if st != nil {
-					safe = st.SafeL2.Time
-					unsafe = st.UnsafeL2.Time
-					fin = st.FinalizedL2.Time
-				}
-				s.log.Info("xsafe: gate not ready", "chain", v, "need_ts", ts, "safe_ts", safe, "unsafe_ts", unsafe, "finalized_ts", fin, "err", err)
-				ready = false
-				break
-			}
-			s.log.Info("xsafe: gate ok", "chain", v, "safe_ts", st.SafeL2.Time, "need_ts", ts)
+		// Step 3: obtain L1<>L2 block pairs that meet or preceed ts
+		pairs, err := s.getBlocksAtTimestamp(ctx, refs, ts)
+		if err != nil {
+			s.log.Info("xsafe: blocks not ready", "err", err)
+			time.Sleep(tick)
+			continue
 		}
+		s.log.Info("xsafe: blocks at ts", "ts", ts, "chains", len(pairs))
 
+		// Step 4: per-chain target and ingest up to it (manual seals) using pairs
+		ready := s.xsafeIngestLogsTo(ctx, refs, pairs)
 		if !ready {
 			time.Sleep(tick)
 			continue
 		}
 
-		// Step 4: per-chain target and ingest up to it
-		var l1Cli opclient.RPC
-		var l1 *sources.L1Client
-		for _, id := range activeChains {
-			v, _ := id.Uint64()
-			s.mu.Lock()
-			h := s.chains[v]
-			s.mu.Unlock()
-			if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil {
-				continue
-			}
-			rcfg := h.virtualCfg.Rcfg
-			targetNum, err := rcfg.TargetBlockNumber(ts)
-			if err != nil {
-				s.log.Info("xsafe: target block before genesis", "chain", v, "ts", ts, "genesis", rcfg.Genesis.L2Time)
-				ready = false
-				break
-			}
-			// Heads before ingest
-			if blk, ok := h.logsDB.LatestSealedBlock(); ok {
-				s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
-			}
-			if pair, err := h.localDB.Last(); err == nil {
-				s.log.Info("xsafe: local head before", "chain", v, "l2", pair.Derived.Number, "l1", pair.Source.Number)
-			}
-			s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
-
-			// Ensure L1 client
-			l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
-
-			// Build L2 client (EL user RPC)
-			l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
-			if err != nil {
-				ready = false
-				break
-			}
-			l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
-			if err != nil {
-				l2Cli.Close()
-				ready = false
-				break
-			}
-
-			// Seed local mapping if needed, then ingest up to target
-			s.SeedLocalIfEmpty(ctx, h, l1, l2, rcfg, v, targetNum)
-			s.IngestToLocalSafe(ctx, h, l1, l2, rcfg, v, targetNum)
-			// Heads after ingest
-			if blk, ok := h.logsDB.LatestSealedBlock(); ok {
-				s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
-			}
-			if pair, err := h.localDB.Last(); err == nil {
-				s.log.Info("xsafe: local head after", "chain", v, "l2", pair.Derived.Number, "l1", pair.Source.Number)
-			}
-			l2Cli.Close()
+		// Step 5: get executing messages, validate them, and rollback if needed
+		// TODO: Fix
+		execByChain := s.getExecutingMessages(refs, ts)
+		valid := s.validateExecutingMessages(refs, execByChain)
+		if !valid {
+			s.log.Info("xsafe: validation detected issues (rollback to be handled in step 6)")
 		}
+		s.xsafeRollbackPlaceholder(activeChains)
 
-		if !ready {
-			time.Sleep(tick)
-			continue
-		}
-
-		// Step 5: validation (placeholder)
-		for _, id := range activeChains {
-			s.log.Info("xsafe: validation TODO", "chain", id)
-		}
-
-		// Step 6: rollback on validation errors (placeholder)
-		for _, id := range activeChains {
-			// TODO: if validation failed for this chain, compute rollback target and call s.rollbackFn
-			s.log.Info("xsafe: rollback TODO", "chain", id)
-		}
-
-		// Step 7: commit new timestamp
+		// Step 6: commit new timestamp
 		s.mu.Lock()
 		s.crossSafeTimestamp = ts
 		s.log.Info("xsafe: committed new timestamp", "ts", ts)
@@ -891,5 +806,261 @@ func (s *Supervisor) RunCrossSafeStep(ctx context.Context, adapter *crosssafeAda
 		s.log.Info("crosssafe: head", "chain", chainID, "derived", cs.Derived)
 	} else {
 		s.log.Warn("crosssafe: last error", "chain", chainID, "err", err)
+	}
+}
+
+func (s *Supervisor) xsafeSnapshotActiveChains() []eth.ChainID {
+	s.activeChainsMu.Lock()
+	defer s.activeChainsMu.Unlock()
+	out := make([]eth.ChainID, 0, len(s.activeChains))
+	for id := range s.activeChains {
+		out = append(out, id)
+	}
+	return out
+}
+
+// getMinGenesisTimestamp computes the minimum L2 genesis timestamp across the provided chain refs.
+// Returns 0 if none of the refs have a rollup config.
+func (s *Supervisor) getMinGenesisTimestamp(refs []chainRef) uint64 {
+	var minGenesis uint64
+	for _, r := range refs {
+		h := r.h
+		if h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
+			gts := h.virtualCfg.Rcfg.Genesis.L2Time
+			if minGenesis == 0 || gts < minGenesis {
+				minGenesis = gts
+			}
+		}
+	}
+	return minGenesis
+}
+
+// (removed xsafeNextCandidate: compute candidate inline where used)
+
+// blockAtTimestampFromConfig returns the L2 block number whose timestamp is <= ts, using rollup config.
+// It clamps to genesis and accounts for non-zero genesis block numbers.
+func blockAtTimestampFromConfig(rcfg *rollup.Config, ts uint64) (uint64, error) {
+	if rcfg == nil {
+		return 0, fmt.Errorf("nil rollup config")
+	}
+	if rcfg.BlockTime == 0 {
+		return 0, fmt.Errorf("blockTime must be a positive integer")
+	}
+	genesisTime := rcfg.Genesis.L2Time
+	genesisNum := rcfg.Genesis.L2.Number
+	if ts <= genesisTime {
+		return genesisNum, nil
+	}
+	return genesisNum + ((ts - genesisTime) / rcfg.BlockTime), nil
+}
+
+// getBlocksAtTimestamp returns, for each chain, the (L1,L2) block refs corresponding to the floor
+// L2 block at the given timestamp. It first gates on having SafeL2 at least at that block number.
+func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, ts uint64) (map[uint64]types.DerivedBlockRefPair, error) {
+	pairs := make(map[uint64]types.DerivedBlockRefPair, len(refs))
+	var l1Cli opclient.RPC
+	var l1 *sources.L1Client
+	for _, r := range refs {
+		v := r.id
+		h := r.h
+		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.embeddedOpNodeUserRPC == "" {
+			return nil, fmt.Errorf("missing handle/config/opnode for chain %d", v)
+		}
+		// Compute expected L2 block number at ts (floor)
+		rcfg := h.virtualCfg.Rcfg
+		targetNum, err := blockAtTimestampFromConfig(rcfg, ts)
+		if err != nil {
+			return nil, fmt.Errorf("chain %d: compute target num: %w", v, err)
+		}
+		// Gate: SafeL2 must be at or beyond targetNum
+		st, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC)
+		if err != nil || st == nil {
+			return nil, fmt.Errorf("chain %d: fetch sync status: %w", v, err)
+		}
+		if st.SafeL2.Number < targetNum {
+			return nil, fmt.Errorf("chain %d: safe head too low: have %d need %d", v, st.SafeL2.Number, targetNum)
+		}
+		s.log.Info("xsafe: gate ok", "chain", v, "safe_num", st.SafeL2.Number, "need_num", targetNum)
+		// Ensure clients
+		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
+		l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
+		if err != nil {
+			return nil, fmt.Errorf("chain %d: dial L2: %w", v, err)
+		}
+		l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
+		if err != nil {
+			l2Cli.Close()
+			return nil, fmt.Errorf("chain %d: new L2 client: %w", v, err)
+		}
+		// Fetch L2 and its L1 origin
+		env, err := l2.PayloadByNumber(ctx, targetNum)
+		if err != nil {
+			l2Cli.Close()
+			return nil, fmt.Errorf("chain %d: payload by number %d: %w", v, targetNum, err)
+		}
+		br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload)
+		if derr != nil {
+			l2Cli.Close()
+			return nil, fmt.Errorf("chain %d: payload to block ref: %w", v, derr)
+		}
+		l1Ref, e1 := l1.BlockRefByNumber(ctx, br.L1Origin.Number)
+		l2Cli.Close()
+		if e1 != nil {
+			return nil, fmt.Errorf("chain %d: l1 block by number %d: %w", v, br.L1Origin.Number, e1)
+		}
+		pairs[v] = types.DerivedBlockRefPair{Source: l1Ref, Derived: br.BlockRef()}
+	}
+	return pairs, nil
+}
+
+// xsafeIngestLogsTo manually seals blocks in logsDB up to the provided target pairs (no ingestRange).
+// Expects pre-resolved handles and computed target blocks. Idempotent: skips blocks already sealed.
+func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pairs map[uint64]types.DerivedBlockRefPair) bool {
+	ready := true
+	for _, r := range refs {
+		v := r.id
+		h := r.h
+		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil {
+			continue
+		}
+		targetPair, ok := pairs[v]
+		if !ok {
+			// No target for this chain in the pair set
+			continue
+		}
+		targetNum := targetPair.Derived.Number
+		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+			s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
+			if blk.Number >= targetNum {
+				// Already at or past target; skip
+				continue
+			}
+		}
+		rcfg := h.virtualCfg.Rcfg
+		s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
+		// Build L2 client (EL user RPC)
+		l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
+		if err != nil {
+			ready = false
+			break
+		}
+		l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
+		if err != nil {
+			l2Cli.Close()
+			ready = false
+			break
+		}
+		// Determine starting point
+		start := uint64(0)
+		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+			start = blk.Number + 1
+		}
+		// Manually seal blocks up to target, skipping if already sealed
+		for num := start; num <= targetNum; num++ {
+			env, err := l2.PayloadByNumber(ctx, num)
+			if err != nil {
+				ready = false
+				break
+			}
+			br, derr := derive.PayloadToBlockRef(rcfg, env.ExecutionPayload)
+			if derr != nil {
+				ready = false
+				break
+			}
+			// Seal with zero logs (we're not adding per-log entries here)
+			if err := h.logsDB.SealBlock(br.ParentHash, br.BlockRef().ID(), br.Time); err != nil {
+				s.log.Info("xsafe: seal failed", "chain", v, "num", num, "err", err)
+				ready = false
+				break
+			}
+		}
+		if !ready {
+			l2Cli.Close()
+			break
+		}
+		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+			s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
+		}
+		l2Cli.Close()
+	}
+	return ready
+}
+
+// getExecutingMessages returns the executing messages per chain at the target block for ts.
+func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
+	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(refs))
+	for _, r := range refs {
+		v := r.id
+		h := r.h
+		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil {
+			s.log.Info("xsafe: validation skip (missing cfg/db)", "chain", v)
+			continue
+		}
+		rcfg := h.virtualCfg.Rcfg
+		targetNum, err := rcfg.TargetBlockNumber(ts)
+		if err != nil {
+			s.log.Info("xsafe: validation target before genesis", "chain", v, "ts", ts)
+			continue
+		}
+		_, _, execMsgs, err := h.logsDB.OpenBlock(targetNum)
+		if err != nil {
+			s.log.Info("xsafe: validation open block failed", "chain", v, "block", targetNum, "err", err)
+			continue
+		}
+		if len(execMsgs) == 0 {
+			s.log.Info("xsafe: validation no executing messages", "chain", v, "block", targetNum)
+		}
+		for logIdx, msg := range execMsgs {
+			if msg == nil {
+				continue
+			}
+			s.log.Info("xsafe: exec found", "chain", v, "block", targetNum, "logIdx", logIdx, "init_chain", msg.ChainID, "init_block", msg.BlockNum, "init_log", msg.LogIdx, "ts", msg.Timestamp)
+		}
+		out[v] = execMsgs
+	}
+	return out
+}
+
+// validateExecutingMessages verifies that each executing message references an initiating log present on the initiating chain.
+func (s *Supervisor) validateExecutingMessages(refs []chainRef, execByChain map[uint64]map[uint32]*types.ExecutingMessage) bool {
+	allValid := true
+	invalidCount := 0
+	totalCount := 0
+	for _, r := range refs {
+		v := r.id
+		execMsgs := execByChain[v]
+		for _, msg := range execMsgs {
+			if msg == nil {
+				continue
+			}
+			totalCount++
+			if initCID, ok := msg.ChainID.Uint64(); ok {
+				s.mu.Lock()
+				initH := s.chains[initCID]
+				s.mu.Unlock()
+				if initH == nil || initH.logsDB == nil {
+					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
+					allValid = false
+					invalidCount++
+					continue
+				}
+				query := types.ContainsQuery{BlockNum: msg.BlockNum, LogIdx: msg.LogIdx, Timestamp: msg.Timestamp, Checksum: msg.Checksum}
+				if _, err := initH.logsDB.Contains(query); err != nil {
+					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
+					allValid = false
+					invalidCount++
+				} else {
+					s.log.Info("xsafe: exec validation ok", "exec_chain", v, "init_chain", initCID)
+				}
+			}
+		}
+	}
+	s.log.Info("xsafe: exec validation summary", "total", totalCount, "invalid", invalidCount)
+	return allValid
+}
+
+func (s *Supervisor) xsafeRollbackPlaceholder(chains []eth.ChainID) {
+	for _, id := range chains {
+		s.log.Info("xsafe: rollback TODO", "chain", id)
 	}
 }
