@@ -415,6 +415,34 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				http.Error(w, "missing chainId parameter", http.StatusBadRequest)
 				return
 			}
+
+			// Step 1: rewind logsDB to target block and collect its timestamp
+			s.mu.Lock()
+			h := s.chains[chainID]
+			s.mu.Unlock()
+			if h == nil || h.logsDB == nil {
+				http.Error(w, "missing logsDB for chain", http.StatusServiceUnavailable)
+				return
+			}
+			ref, _, _, openErr := h.logsDB.OpenBlock(*req.ToBlockNumber)
+			if openErr != nil {
+				http.Error(w, "target block not found in logsDB", http.StatusConflict)
+				return
+			}
+			inv := reads.NewRegistry(s.log)
+			if rewindErr := h.logsDB.Rewind(inv, ref.ID()); rewindErr != nil {
+				http.Error(w, rewindErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.log.Info("admin: logsDB rewound", "chain", chainID, "to_block", *req.ToBlockNumber)
+
+			// Step 2: roll back the cross-safe head to the block timestamp
+			s.mu.Lock()
+			s.crossSafeTimestamp = ref.Time
+			s.mu.Unlock()
+			s.log.Info("admin: cross-safe timestamp rewound", "chain", chainID, "ts", ref.Time, "to_block", *req.ToBlockNumber)
+
+			// Existing behavior: roll back EL/op-node for the chain as well
 			err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
 		} else {
 			// No chains registered

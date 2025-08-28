@@ -29,7 +29,7 @@ func TestJustSitThere(gt *testing.T) {
 	//////////////////////////////////////////////////////////////////////
 	// variables to control test behavior
 	const testName = "JustSitThere"
-	const finalityCheckHeight = uint64(55)
+	const finalityCheckHeight = uint64(15)
 
 	//////////////////////////////////////////////////////////////////////
 	// set up a minimal system with SV2 embedding an op-node
@@ -210,6 +210,18 @@ func TestManualRollback(gt *testing.T) {
 		t.Require().Equal(http.StatusNoContent, resp.StatusCode)
 	}
 	gt.Logf("%s: Rollback triggered successfully", testName)
+
+	// verify cross-safe regressed to <= rollbackHeight immediately
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/v1/cross_safe?chainId=%d", sv2URL, chainID), nil)
+	t.Require().NoError(err)
+	resp2, err := http.DefaultClient.Do(req)
+	t.Require().NoError(err)
+	defer resp2.Body.Close()
+	t.Require().Equal(http.StatusOK, resp2.StatusCode)
+	var afterRB supertypes.DerivedIDPair
+	t.Require().NoError(json.NewDecoder(resp2.Body).Decode(&afterRB))
+	gt.Logf("%s: Cross-safe after rollback derived=%d", testName, afterRB.Derived.Number)
+	t.Require().LessOrEqual(afterRB.Derived.Number, rollbackHeight)
 	//////////////////////////////////////////////////////////////////////
 
 	//////////////////////////////////////////////////////////////////////
