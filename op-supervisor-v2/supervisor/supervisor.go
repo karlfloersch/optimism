@@ -568,17 +568,10 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 			var localID, crossID eth.BlockID
 			var localUnsafe eth.BlockRef
 			var finalizedID eth.BlockID
-			if h != nil {
-				h.stateMu.Lock()
-				if h.localDB != nil {
-					if pair, err := h.localDB.Last(); err == nil {
-						localID = pair.Derived.ID()
-					}
-				}
-				h.stateMu.Unlock()
-			}
 			if st != nil {
 				localUnsafe = st.UnsafeL2.BlockRef()
+				// Source LocalSafe directly from the op-node SafeL2
+				localID = st.SafeL2.ID()
 				if !haveMinL1 || st.CurrentL1.Number < minL1.Number || (st.CurrentL1.Number == minL1.Number && st.CurrentL1.Hash != minL1.Hash) {
 					minL1 = st.CurrentL1
 					haveMinL1 = true
