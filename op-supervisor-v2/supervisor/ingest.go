@@ -91,20 +91,6 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 		if err := logs.SealBlock(ref.ParentHash, eth.ToBlockID(info), ref.Time); err != nil {
 			return err
 		}
-		// Add local-safe link
-		l1Source := ref.L1Origin
-		// Rehydrate full L1 block ref to include parent/time
-		l1Ref, err := l1.BlockRefByNumber(ctx, l1Source.Number)
-		if err != nil {
-			return err
-		}
-		if l1Ref.Hash != l1Source.Hash {
-			return fmt.Errorf("l1 reference mismatch at %d", l1Source.Number)
-		}
-		derivedRef := ref.BlockRef()
-		if err := addDerivedWithDiagonalSplit(ctx, l2, local, rollupCfg, l1Ref, derivedRef); err != nil {
-			return err
-		}
 	}
 	return nil
 }

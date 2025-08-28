@@ -228,7 +228,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		// TODO: Fix
 		execByChain := s.getExecutingMessages(refs, ts)
 		s.log.Info("xsafe: executing messages", "execByChain", execByChain)
-		valid := s.validateExecutingMessages(refs, execByChain)
+		valid := s.validateExecutingMessages(ctx, refs, ts, execByChain)
 		if !valid {
 			s.log.Info("xsafe: validation detected issues (rollback to be handled in step 6)")
 		}
@@ -1054,10 +1054,17 @@ func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64
 }
 
 // validateExecutingMessages verifies that each executing message references an initiating log present on the initiating chain.
-func (s *Supervisor) validateExecutingMessages(refs []chainRef, execByChain map[uint64]map[uint32]*types.ExecutingMessage) bool {
+func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chainRef, ts uint64, execByChain map[uint64]map[uint32]*types.ExecutingMessage) bool {
 	allValid := true
 	invalidCount := 0
 	totalCount := 0
+	// quick lookup of handles by chain id
+	refByID := make(map[uint64]*ChainHandle, len(refs))
+	for _, r := range refs {
+		refByID[r.id] = r.h
+	}
+	// avoid duplicate rollbacks per chain in a single step
+	rolledBack := make(map[uint64]bool)
 	for _, r := range refs {
 		v := r.id
 		execMsgs := execByChain[v]
@@ -1081,6 +1088,31 @@ func (s *Supervisor) validateExecutingMessages(refs []chainRef, execByChain map[
 					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
 					allValid = false
 					invalidCount++
+					// Side-effects: mark denylist and rollback the executing chain before the block at this ts
+					if !rolledBack[v] {
+						if h := refByID[v]; h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil && h.logsDB != nil {
+							if targetNum, terr := h.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
+								if ref, _, _, oerr := h.logsDB.OpenBlock(targetNum); oerr == nil {
+									if s.denylist != nil {
+										_ = s.denylist.Add(v, ref.Hash.Hex())
+										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
+									}
+								}
+								to := uint64(0)
+								if targetNum > 0 {
+									to = targetNum - 1
+								}
+								if s.rollbackFn != nil {
+									if rerr := s.rollbackFn(ctx, v, to); rerr != nil {
+										s.log.Warn("xsafe: rollback failed", "chain", v, "to", to, "err", rerr)
+									} else {
+										s.log.Info("xsafe: rollback executed", "chain", v, "to", to)
+									}
+								}
+								rolledBack[v] = true
+							}
+						}
+					}
 				} else {
 					s.log.Info("xsafe: exec validation ok", "exec_chain", v, "init_chain", initCID)
 				}

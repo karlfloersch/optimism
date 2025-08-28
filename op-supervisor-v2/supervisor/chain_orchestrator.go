@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
 	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 )
 
 // ChainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
@@ -125,6 +126,22 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_ = h.stopEmbeddedOpNode(c)
 		cancel()
+	}
+
+	// Attempt to record the soon-to-be-invalidated block (toBlock+1) in the denylist
+	if h.logsDB != nil && s.denylist != nil {
+		invalidNum := toBlock + 1
+		if ref, _, _, err := h.logsDB.OpenBlock(invalidNum); err == nil {
+			_ = s.denylist.Add(chainID, ref.Hash.Hex())
+		}
+	}
+
+	// Roll back logsDB to the target block number
+	if h.logsDB != nil {
+		if ref, _, _, openErr := h.logsDB.OpenBlock(toBlock); openErr == nil {
+			inv := reads.NewRegistry(s.log)
+			_ = h.logsDB.Rewind(inv, ref.ID())
+		}
 	}
 
 	// Roll back EL head to the absolute target via pluggable implementation
