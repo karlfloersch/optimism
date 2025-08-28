@@ -486,11 +486,55 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	//////////////////////////////////////////////////////////////////////
 	// variables to control test behavior
 	const testName = "InvalidExecutingMessage"
-	const finalityCheckHeight = uint64(10)
 
 	//////////////////////////////////////////////////////////////////////
 	// set up a minimal system with SV2 embedding an op-node
 
+	// test setup and minimal system bring-up
+	t, ctx, cancel, _, l2Net, chainID, sv2URL := setupMinimalSystemSV2(gt, testName)
+	defer cancel()
+
+	// test preparation complete
+	//////////////////////////////////////////////////////////////////////
+
+	// Build funded tx plan and get EL handle
+	plan, el := buildFundedPlan(ctx, t, l2Net)
+
+	// send initiating and invalid executing messages via helpers
+	initTx := mustSendValidInitiatingMessage(ctx, t, plan)
+	execTxHash, execBlockNum, execBlockHash := mustSendInvalidExecutingMessage(ctx, t, plan, initTx)
+
+	// wait until cross-safe reaches execBlockNum + 5
+	target := execBlockNum + 5
+	waitCrossSafeAtLeast(ctx, t, sv2URL, chainID, target, 600*time.Second)
+
+	// verify the block at execBlockNum has a different hash now (reorg occurred)
+	var blk struct {
+		Hash string `json:"hash"`
+	}
+	blockNumHex := fmt.Sprintf("0x%x", execBlockNum)
+	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", blockNumHex, false))
+	t.Require().NotEmpty(blk.Hash)
+	t.Require().NotEqual(execBlockHash, blk.Hash, "block at original inclusion height should have a different hash after cross-safe progresses")
+
+	// verify the invalid executing tx is not included (no receipt yet)
+	var rec struct {
+		BlockHash string `json:"blockHash"`
+	}
+	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &rec, "eth_getTransactionReceipt", execTxHash))
+	t.Require().Empty(rec.BlockHash, "invalid executing tx should not be included yet")
+
+	gt.Logf("%s: Test completed - invalid executing message handled, cross-safe advanced, and reorg observed", testName)
+	//////////////////////////////////////////////////////////////////////
+}
+
+//////////////////////////////////////////////////////////////////////
+// Helpers
+
+// setupMinimalSystemSV2 performs the common test setup used by these system tests and brings up
+// a minimal system with Supervisor V2 on the first chain and an embedded op-node. It returns
+// the test context, package scope, context with timeout, cancel func, and hydrated system.
+func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.Context, context.CancelFunc, stack.ExtensibleSystem, stack.L2Network, uint64, string) {
 	// test setup
 	t := devtest.SerialT(gt)
 	gt.Logf("%s: Starting system setup", testName)
@@ -499,7 +543,6 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
 	gt.Cleanup(p.Close)
 	ctx, cancel := context.WithTimeout(t.Ctx(), 600*time.Second)
-	defer cancel()
 
 	// stack setup
 	var ids DefaultMinimalSystemIDs
@@ -525,12 +568,7 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	orch.Hydrate(system)
 	gt.Logf("%s: System setup complete", testName)
 
-	// Get EL client and setup EOA for transactions
-	l2Net := system.L2Networks()[0]
-	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-
-	// wait for the system to be ready
-	gt.Logf("%s: Waiting for SV2 to be ready", testName)
+	// Wait for SV2 to be ready
 	sv2URL := os.Getenv("SV2_DENYLIST_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
@@ -540,31 +578,15 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	}
 	gt.Logf("%s: SV2 is ready", testName)
 
-	// test preparation complete
-	//////////////////////////////////////////////////////////////////////
+	// Provide common handles useful to tests
+	l2Net := system.L2Networks()[0]
+	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
+	return t, ctx, cancel, system, l2Net, chainID, sv2URL
+}
 
-	// TODO: create a initiating message on the chain
-	//////////////////////////////////////////////////////////////////////
-	// Build a funded EOA using devkeys and request faucet funds
-	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
-	t.Require().NoError(err)
-	alicePriv, _ := keys.Secret(devkeys.UserKey(0))
-	aliceAddr, _ := keys.Address(devkeys.UserKey(0))
-	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), aliceAddr, eth.OneTenthEther)
-
-	// Use the EL client for tx planning
-	el := l2Net.L2ELNode(match.FirstL2EL)
-	plan := txplan.Combine(
-		txplan.WithPrivateKey(alicePriv),
-		txplan.WithChainID(el.EthClient()),
-		txplan.WithPendingNonce(el.EthClient()),
-		txplan.WithAgainstLatestBlock(el.EthClient()),
-		txplan.WithEstimator(el.EthClient(), true),
-		txplan.WithRetrySubmission(el.EthClient(), 5, retry.Exponential()),
-		txplan.WithRetryInclusion(el.EthClient(), 5, retry.Exponential()),
-		txplan.WithBlockInclusionInfo(el.EthClient()),
-	)
-
+// mustSendValidInitiatingMessage deploys the EventLogger contract and submits a valid initiating message.
+// It returns the initiating intent, which can be referenced by an executing message.
+func mustSendValidInitiatingMessage(ctx context.Context, t devtest.T, plan txplan.Option) *txintent.IntentTx[*txintent.InitTrigger, *txintent.InteropOutput] {
 	// Deploy EventLogger contract to emit initiating event
 	deployTx := txplan.NewPlannedTx(plan, txplan.WithData(common.FromHex(bindings.EventloggerBin)))
 	deployReceipt, err := deployTx.Included.Eval(t.Ctx())
@@ -579,14 +601,14 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	}
 	initTx := txintent.NewIntent[*txintent.InitTrigger, *txintent.InteropOutput](plan)
 	initTx.Content.Set(init)
-	initReceipt, err := initTx.PlannedTx.Included.Eval(t.Ctx())
+	_, err = initTx.PlannedTx.Included.Eval(t.Ctx())
 	t.Require().NoError(err)
-	_ = initReceipt
+	return initTx
+}
 
-	// TODO: create a valid executing message based on the initiating message
-	//////////////////////////////////////////////////////////////////////
-	// Build an executing message that references the initiating message,
-	// but tamper the payload hash to make it invalid (incorrect log hash)
+// mustSendInvalidExecutingMessage submits an executing message referencing the given initTx but corrupts the
+// payload to make it invalid. It returns the tx hash, inclusion block number, and inclusion block hash.
+func mustSendInvalidExecutingMessage(ctx context.Context, t devtest.T, plan txplan.Option, initTx *txintent.IntentTx[*txintent.InitTrigger, *txintent.InteropOutput]) (string, uint64, string) {
 	execTx := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](plan)
 	execTx.Content.DependOn(&initTx.Result)
 	execTx.Content.Fn(func(ctx context.Context) (*txintent.ExecTrigger, error) {
@@ -596,103 +618,18 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 			return nil, err
 		}
 		bad := tr.Msg
-		bad.PayloadHash[0] ^= 0xff // corrupt payload hash -> wrong log hash
+		bad.PayloadHash[0] ^= 0xff
 		tr.Msg = bad
 		return tr, nil
 	})
-	execReceipt, err := execTx.PlannedTx.Included.Eval(t.Ctx())
+	rec, err := execTx.PlannedTx.Included.Eval(t.Ctx())
 	t.Require().NoError(err)
-	// one ExecutingMessage log is still expected to be emitted by the contract
-	t.Require().Equal(1, len(execReceipt.Logs))
-	// record original inclusion block hash for later comparison
-	origExecBlockHash := execReceipt.BlockHash.Hex()
-	//////////////////////////////////////////////////////////////////////
+	t.Require().Equal(1, len(rec.Logs))
+	return rec.TxHash.Hex(), rec.BlockNumber.Uint64(), rec.BlockHash.Hex()
+}
 
-	time.Sleep(10 * time.Second)
-
-	// For now, just verify basic system setup is working
-	gt.Logf("%s: Basic system verification - checking L2 EL node", testName)
-	l2EL := l2Net.L2ELNode(match.FirstL2EL)
-	head, err := l2EL.EthClient().BlockRefByLabel(ctx, eth.Unsafe)
-	t.Require().NoError(err, "should be able to get unsafe head")
-	gt.Logf("%s: L2 unsafe head at block %d", testName, head.Number)
-
-	// confirm the executing tx was re-included in a different block after rollback
-	// if it is not re-included (receipt not found), accept that as well
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		var r struct {
-			BlockHash string `json:"blockHash"`
-		}
-		err := el.L2EthClient().RPC().CallContext(ctx, &r, "eth_getTransactionReceipt", execReceipt.TxHash.Hex())
-		if err != nil {
-			// keep polling; RPC may be mid-reorg
-			time.Sleep(300 * time.Millisecond)
-			continue
-		}
-		if r.BlockHash == "" {
-			// not re-included (yet)
-			time.Sleep(300 * time.Millisecond)
-			continue
-		}
-		if r.BlockHash != origExecBlockHash {
-			gt.Logf("%s: Executing tx re-included in new block. old=%s new=%s", testName, origExecBlockHash, r.BlockHash)
-			break
-		}
-		// still the same block, keep waiting
-		time.Sleep(300 * time.Millisecond)
-	}
-
-	// scan blocks and confirm both initiating and executing receipts are present
-	startNum := initReceipt.BlockNumber.Uint64()
-	if execReceipt.BlockNumber.Uint64() < startNum {
-		startNum = execReceipt.BlockNumber.Uint64()
-	}
-	foundInit := false
-	foundExec := false
-	for num := startNum; num <= head.Number; num++ {
-		hexNum := fmt.Sprintf("0x%x", num)
-		var blk struct {
-			Transactions []struct {
-				Hash string `json:"hash"`
-			} `json:"transactions"`
-		}
-		t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &blk, "eth_getBlockByNumber", hexNum, true))
-		for _, tx := range blk.Transactions {
-			var r struct {
-				TransactionHash string `json:"transactionHash"`
-				Logs            []struct {
-					Topics []string `json:"topics"`
-				} `json:"logs"`
-			}
-			t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &r, "eth_getTransactionReceipt", tx.Hash))
-			if r.TransactionHash == initReceipt.TxHash.Hex() {
-				foundInit = true
-			}
-			if r.TransactionHash == execReceipt.TxHash.Hex() {
-				foundExec = true
-				// ensure ExecutingMessage event is present in the executing tx receipt
-				executingMessageTopic := crypto.Keccak256Hash([]byte("ExecutingMessage(bytes32,(address,uint256,uint256,uint256,uint256))")).Hex()
-				seenExecEvent := false
-				for _, lg := range r.Logs {
-					if len(lg.Topics) > 0 && lg.Topics[0] == executingMessageTopic {
-						seenExecEvent = true
-						break
-					}
-				}
-				t.Require().True(seenExecEvent, "executing tx must emit ExecutingMessage event")
-			}
-		}
-		if foundInit && foundExec {
-			break
-		}
-	}
-	t.Require().True(foundInit, "initiating receipt not found in chain blocks")
-	if !foundExec {
-		gt.Logf("%s: Executing receipt not found in chain blocks post-rollback (acceptable)", testName)
-	}
-
-	// assert cross safe (finalized) is advancing
+// waitCrossSafeAtLeast blocks until the cross-safe derived number reaches at least target.
+func waitCrossSafeAtLeast(ctx context.Context, t devtest.T, sv2URL string, chainID uint64, target uint64, timeout time.Duration) {
 	require.Eventually(t, func() bool {
 		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/v1/cross_safe?chainId=%d", sv2URL, chainID), nil)
 		if err != nil {
@@ -710,9 +647,28 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return false
 		}
-		gt.Logf("%s: Cross-safe at block %d, target %d", testName, out.Derived.Number, finalityCheckHeight)
-		return out.Derived.Number >= finalityCheckHeight
-	}, 600*time.Second, 300*time.Millisecond)
-	gt.Logf("%s: Test completed - invalid executing message emitted and cross-safe advanced", testName)
-	//////////////////////////////////////////////////////////////////////
+		return out.Derived.Number >= target
+	}, timeout, 300*time.Millisecond)
+}
+
+// buildFundedPlan creates a funded EOA and returns a txplan and the L2 EL handle.
+func buildFundedPlan(ctx context.Context, t devtest.T, l2Net stack.L2Network) (txplan.Option, stack.L2ELNode) {
+	keys, err := devkeys.NewSaltedDevKeys(devkeys.TestMnemonic, os.Getenv("OP_DEVSTACK_SALT"))
+	t.Require().NoError(err)
+	privKey, _ := keys.Secret(devkeys.UserKey(0))
+	addr, _ := keys.Address(devkeys.UserKey(0))
+	_ = l2Net.Faucet(match.FirstFaucet).API().RequestETH(t.Ctx(), addr, eth.OneTenthEther)
+
+	el := l2Net.L2ELNode(match.FirstL2EL)
+	plan := txplan.Combine(
+		txplan.WithPrivateKey(privKey),
+		txplan.WithChainID(el.EthClient()),
+		txplan.WithPendingNonce(el.EthClient()),
+		txplan.WithAgainstLatestBlock(el.EthClient()),
+		txplan.WithEstimator(el.EthClient(), true),
+		txplan.WithRetrySubmission(el.EthClient(), 5, retry.Exponential()),
+		txplan.WithRetryInclusion(el.EthClient(), 5, retry.Exponential()),
+		txplan.WithBlockInclusionInfo(el.EthClient()),
+	)
+	return plan, el
 }
