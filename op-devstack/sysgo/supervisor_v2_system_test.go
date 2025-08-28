@@ -528,6 +528,76 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	//////////////////////////////////////////////////////////////////////
 }
 
+func TestTwoChainValidExecutingMessage(gt *testing.T) {
+	//////////////////////////////////////////////////////////////////////
+	// variables to control test behavior
+	const testName = "TwoChainValidExecutingMessage"
+	const interopOffset = uint64(6)
+	const confirmDepth = uint64(1)
+	const crossSafeTarget = uint64(8)
+
+	//////////////////////////////////////////////////////////////////////
+	// bring up a two-chain system with SV2 across both chains and batchers
+
+	// test setup
+	t := devtest.SerialT(gt)
+	gt.Logf("%s: Starting two-chain system setup", testName)
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+	ctx, cancel := context.WithTimeout(t.Ctx(), 600*time.Second)
+	defer cancel()
+
+	// compose two-chain minimal with SV2 on all chains and batchers
+	opt := stack.Combine[*Orchestrator](WithSV2TwoChainMinimalDepth(interopOffset, confirmDepth))
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+	system := shim.NewSystem(t)
+	orch.Hydrate(system)
+	gt.Logf("%s: Two-chain system setup complete", testName)
+
+	// wait for SV2 to be ready
+	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	t.Require().NotEmpty(sv2URL)
+	{
+		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
+		defer cancel2()
+		t.Require().NoError(WaitSV2Ready(ctx2, sv2URL))
+	}
+
+	// fetch both L2 networks and their chain IDs
+	l2Nets := system.L2Networks()
+	t.Require().GreaterOrEqual(len(l2Nets), 2)
+	l2A := l2Nets[0]
+	l2B := l2Nets[1]
+	chainB := l2B.RollupConfig().L2ChainID.Uint64()
+
+	// build funded plans on both chains
+	planA, _ := buildFundedPlan(ctx, t, l2A)
+	planB, elB := buildFundedPlan(ctx, t, l2B)
+
+	// create initiating message on chain A
+	initTx := mustSendValidInitiatingMessage(ctx, t, planA)
+
+	// create valid executing message on chain B (referencing chain A init)
+	execTxHash, execBlockNum, execBlockHash := mustSendValidExecutingMessage(ctx, t, planB, initTx)
+
+	// wait until cross-safe on chain B reaches execBlockNum + 5
+	target := execBlockNum + 5
+	waitCrossSafeAtLeast(ctx, t, sv2URL, chainB, target, 600*time.Second)
+
+	// verify the executing tx is still included with the same block hash
+	var rec struct {
+		BlockHash string `json:"blockHash"`
+	}
+	t.Require().NoError(elB.L2EthClient().RPC().CallContext(ctx, &rec, "eth_getTransactionReceipt", execTxHash))
+	t.Require().Equal(execBlockHash, rec.BlockHash, "valid executing tx must remain included after cross-safe advances")
+
+	gt.Logf("%s: Valid executing tx remained included after cross-safe >= %d on chain %d", testName, target, chainB)
+	//////////////////////////////////////////////////////////////////////
+}
+
 //////////////////////////////////////////////////////////////////////
 // Helpers
 
@@ -622,6 +692,18 @@ func mustSendInvalidExecutingMessage(ctx context.Context, t devtest.T, plan txpl
 		tr.Msg = bad
 		return tr, nil
 	})
+	rec, err := execTx.PlannedTx.Included.Eval(t.Ctx())
+	t.Require().NoError(err)
+	t.Require().Equal(1, len(rec.Logs))
+	return rec.TxHash.Hex(), rec.BlockNumber.Uint64(), rec.BlockHash.Hex()
+}
+
+// mustSendValidExecutingMessage submits a valid executing message referencing the given initTx.
+// It returns the tx hash, inclusion block number, and inclusion block hash.
+func mustSendValidExecutingMessage(ctx context.Context, t devtest.T, plan txplan.Option, initTx *txintent.IntentTx[*txintent.InitTrigger, *txintent.InteropOutput]) (string, uint64, string) {
+	execTx := txintent.NewIntent[*txintent.ExecTrigger, *txintent.InteropOutput](plan)
+	execTx.Content.DependOn(&initTx.Result)
+	execTx.Content.Fn(txintent.ExecuteIndexed(constants.CrossL2Inbox, &initTx.Result, 0))
 	rec, err := execTx.PlannedTx.Included.Eval(t.Ctx())
 	t.Require().NoError(err)
 	t.Require().Equal(1, len(rec.Logs))
