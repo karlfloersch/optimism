@@ -54,6 +54,9 @@ type Supervisor struct {
 
 	// finalized runner removed; no in-memory cross_finalized or checkers
 
+	// crossSafeTimestamp is the global cross-safe timestamp (monotonic, non-decreasing)
+	crossSafeTimestamp uint64
+
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
@@ -121,13 +124,45 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	return s
 }
 
+// ProgressCrossSafe advances a global cross-safe timestamp without using the cross DB.
+//
+// Overview
+// - State: s.crossSafeTimestamp (monotonic, never decreases)
+// - Inputs per chain:
+//   - op-node SyncStatus timestamps (Unsafe/Safe/Finalized)
+//   - rollup.Config (TimestampForBlock / TargetBlockNumber mapping)
+//   - logsDB + localDB (for ingestion and per-chain derived mapping)
+//
+// - Output surface:
+//   - /v1/cross_safe computes an L2 block number on-the-fly via TargetBlockNumber(s.crossSafeTimestamp)
+//   - /v1/sync_status reports CrossSafe/Finalized derived from the same timestamp
+//
+// Steps (each tick ~500ms)
+// 0) Early exit if there are no active chains (prevents pre-genesis advancement).
+// 1) Initialization (once): if crossSafeTimestamp == 0, set it to min(genesis L2 time) across active chains.
+// 2) Candidate: ts := crossSafeTimestamp + 1.
+// 3) Gate: require each active chain to have SyncStatus.SafeL2.Time >= ts (scope can be generalized later).
+// 4) For each chain:
+//   - Compute target L2 block number = floor(TargetBlockNumber(ts)). If ts < genesis, wait.
+//   - Ensure L1/L2 clients.
+//   - Seed local DB if empty from the target (best-effort).
+//   - Ingest logs/local up to the target number.
+//
+// 5) Validation: placeholder (log-only for now; message-link checks can be added later).
+// 6) Rollback on validation errors: placeholder (log-only for now; will call rollbackFn per-chain).
+// 7) Commit: if gates passed and ingest completed, set crossSafeTimestamp = ts.
+//
+// Invariants
+// - crossSafeTimestamp only increases when all chains can model ts.
+// - No adapter/cross DB usage; all derived lookups are via logsDB/localDB and rollup.Config.
 func (s *Supervisor) ProgressCrossSafe() {
-	oldMinTimestamp := uint64(0)
+	// configure loop tick duration
+	tick := 500 * time.Millisecond
 	for {
-		s.log.Info("ProgressCrossSafe: loop start")
+		s.log.Info("xsafe: loop start")
 		ctx := context.Background()
 
-		// copy active chains to avoid race conditions
+		// Step 0: snapshot active chains
 		s.activeChainsMu.Lock()
 		activeChains := make([]eth.ChainID, 0, len(s.activeChains))
 		for id := range s.activeChains {
@@ -135,77 +170,162 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 		s.activeChainsMu.Unlock()
 
-		// step 1: identify the minimum latest timestamp across all chains
-		var minTimestamp uint64
-		for _, id := range activeChains {
-			chainID, _ := id.Uint64()
+		// Step 0: early exit if there are no active chains
+		if len(activeChains) == 0 {
+			s.log.Info("xsafe: no active chains; skipping")
+			time.Sleep(tick)
+			continue
+		}
+
+		// Step 1: initialization — set to min genesis if unset
+		s.mu.Lock()
+		ts := s.crossSafeTimestamp
+		s.mu.Unlock()
+		s.log.Info("xsafe: current timestamp", "ts", ts)
+		if ts == 0 {
+			var minGenesis uint64
 			s.mu.Lock()
-			h := s.chains[chainID]
+			for _, h := range s.chains {
+				if h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
+					gts := h.virtualCfg.Rcfg.Genesis.L2Time
+					if minGenesis == 0 || gts < minGenesis {
+						minGenesis = gts
+					}
+				}
+			}
 			s.mu.Unlock()
-
-			if h == nil {
+			if minGenesis != 0 {
+				s.mu.Lock()
+				if s.crossSafeTimestamp == 0 { // re-check
+					s.crossSafeTimestamp = minGenesis
+				}
+				s.mu.Unlock()
+				// next tick will try to advance beyond genesis
+				time.Sleep(tick)
 				continue
 			}
+		}
 
-			h.stateMu.Lock()
-			userRPC := h.embeddedOpNodeUserRPC
-			h.stateMu.Unlock()
+		// Step 2: compute candidate timestamp
+		s.mu.Lock()
+		ts = s.crossSafeTimestamp + 1
+		s.mu.Unlock()
+		s.log.Info("xsafe: candidate next timestamp", "ts", ts)
 
-			if userRPC == "" {
+		// Step 3: gate — require SafeL2.Time >= ts per chain
+		ready := true
+		for _, id := range activeChains {
+			v, _ := id.Uint64()
+			s.mu.Lock()
+			h := s.chains[v]
+			s.mu.Unlock()
+			if h == nil || h.embeddedOpNodeUserRPC == "" {
+				s.log.Info("xsafe: gate missing chain/opnode", "chain", v)
+				ready = false
+				break
+			}
+			st, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC)
+			if err != nil || st == nil || st.SafeL2.Time < ts {
+				safe := uint64(0)
+				unsafe := uint64(0)
+				fin := uint64(0)
+				if st != nil {
+					safe = st.SafeL2.Time
+					unsafe = st.UnsafeL2.Time
+					fin = st.FinalizedL2.Time
+				}
+				s.log.Info("xsafe: gate not ready", "chain", v, "need_ts", ts, "safe_ts", safe, "unsafe_ts", unsafe, "finalized_ts", fin, "err", err)
+				ready = false
+				break
+			}
+			s.log.Info("xsafe: gate ok", "chain", v, "safe_ts", st.SafeL2.Time, "need_ts", ts)
+		}
+
+		if !ready {
+			time.Sleep(tick)
+			continue
+		}
+
+		// Step 4: per-chain target and ingest up to it
+		var l1Cli opclient.RPC
+		var l1 *sources.L1Client
+		for _, id := range activeChains {
+			v, _ := id.Uint64()
+			s.mu.Lock()
+			h := s.chains[v]
+			s.mu.Unlock()
+			if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil {
 				continue
 			}
-
-			// Get latest safe timestamp from sync status
-			if st, err := s.fetchSyncStatus(ctx, userRPC); err == nil && st != nil {
-				latestTimestamp := st.SafeL2.Time
-				s.log.Info("ProgressCrossSafe: latest timestamp", "chain", chainID, "timestamp", latestTimestamp)
-				// if unset or less than minTimestamp, update minTimestamp
-				if minTimestamp == 0 || (latestTimestamp > 0 && latestTimestamp < minTimestamp) {
-					minTimestamp = latestTimestamp
-				}
+			rcfg := h.virtualCfg.Rcfg
+			targetNum, err := rcfg.TargetBlockNumber(ts)
+			if err != nil {
+				s.log.Info("xsafe: target block before genesis", "chain", v, "ts", ts, "genesis", rcfg.Genesis.L2Time)
+				ready = false
+				break
 			}
-		}
-
-		// step 1.5
-		// check L1 blocks based on the minimums and confirm that confirmation depth (L1) is met
-		// recede any chains outside of finality space to just the L1 finality block
-
-		// step 2: if the minimum timestamp has changed, ensure all chains have ingested up to the minimum timestamp
-		if minTimestamp > 0 && minTimestamp != oldMinTimestamp {
-			s.log.Info("ProgressCrossSafe: minimum timestamp changed", "old", oldMinTimestamp, "new", minTimestamp)
-			oldMinTimestamp = minTimestamp
-
-			for _, id := range activeChains {
-				// identify target block based on timestamp
-				chainID, _ := id.Uint64()
-				h := s.chains[chainID]
-				if h == nil {
-					continue
-				}
-				rcfg := h.virtualCfg.Rcfg
-				targetNumber := uint64(0)
-				timestamp := uint64(0)
-				for timestamp < minTimestamp {
-					targetNumber++
-					timestamp = rcfg.TimestampForBlock(targetNumber)
-				}
-				s.log.Info("ProgressCrossSafe: would ingest to local safe", "chain", id, "timestamp", timestamp, "blockHeight", targetNumber)
-				// TODO: ingest to local safe
+			// Heads before ingest
+			if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+				s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
 			}
+			if pair, err := h.localDB.Last(); err == nil {
+				s.log.Info("xsafe: local head before", "chain", v, "l2", pair.Derived.Number, "l1", pair.Source.Number)
+			}
+			s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
+
+			// Ensure L1 client
+			l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
+
+			// Build L2 client (EL user RPC)
+			l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
+			if err != nil {
+				ready = false
+				break
+			}
+			l2, err := sources.NewL2Client(l2Cli, s.log, nil, sources.L2ClientDefaultConfig(rcfg, true))
+			if err != nil {
+				l2Cli.Close()
+				ready = false
+				break
+			}
+
+			// Seed local mapping if needed, then ingest up to target
+			s.SeedLocalIfEmpty(ctx, h, l1, l2, rcfg, v, targetNum)
+			s.IngestToLocalSafe(ctx, h, l1, l2, rcfg, v, targetNum)
+			// Heads after ingest
+			if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+				s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
+			}
+			if pair, err := h.localDB.Last(); err == nil {
+				s.log.Info("xsafe: local head after", "chain", v, "l2", pair.Derived.Number, "l1", pair.Source.Number)
+			}
+			l2Cli.Close()
 		}
 
-		// step 3: for each chain, run cross safe validation
+		if !ready {
+			time.Sleep(tick)
+			continue
+		}
+
+		// Step 5: validation (placeholder)
 		for _, id := range activeChains {
-			s.log.Info("ProgressCrossSafe: *would be* running cross safe validation", "chain", id)
+			s.log.Info("xsafe: validation TODO", "chain", id)
 		}
 
-		// step 4: for any failures, invalidate / denylist etc
+		// Step 6: rollback on validation errors (placeholder)
 		for _, id := range activeChains {
-			s.log.Info("ProgressCrossSafe: *would be* considering invalidating / denyinglist", "chain", id)
+			// TODO: if validation failed for this chain, compute rollback target and call s.rollbackFn
+			s.log.Info("xsafe: rollback TODO", "chain", id)
 		}
 
-		// step 999: sleep for 1 second
-		time.Sleep(1 * time.Second)
+		// Step 7: commit new timestamp
+		s.mu.Lock()
+		s.crossSafeTimestamp = ts
+		s.log.Info("xsafe: committed new timestamp", "ts", ts)
+		s.mu.Unlock()
+
+		// Step end: wait for next tick
+		time.Sleep(tick)
 	}
 }
 
@@ -492,10 +612,6 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		out := eth.SupervisorSyncStatus{Chains: make(map[eth.ChainID]*eth.SupervisorChainSyncStatus)}
 		var haveMinL1 bool
 		var minL1 eth.L1BlockRef
-		var haveSafeTs bool
-		var minSafeTs uint64
-		var haveFinTs bool
-		var minFinTs uint64
 
 		ctx := r.Context()
 		for id, h := range chains {
@@ -506,7 +622,6 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 				}
 			}
 			var localID, crossID eth.BlockID
-			var crossTs uint64
 			var localUnsafe eth.BlockRef
 			var finalizedID eth.BlockID
 			if h != nil {
@@ -514,14 +629,6 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 				if h.localDB != nil {
 					if pair, err := h.localDB.Last(); err == nil {
 						localID = pair.Derived.ID()
-					}
-				}
-				if h.crossDB != nil {
-					if pair, err := h.crossDB.Last(); err == nil {
-						crossID = pair.Derived.ID()
-						crossTs = pair.Derived.Timestamp
-						// Cross-finalized equals cross-safe for now
-						finalizedID = crossID
 					}
 				}
 				h.stateMu.Unlock()
@@ -533,16 +640,14 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 					haveMinL1 = true
 				}
 			}
-			// Derive global minima from cross DB timestamps to match v1 semantics,
-			// and since cross-finalized == cross-safe for now.
-			if crossID.Number > 0 {
-				if !haveSafeTs || crossTs < minSafeTs {
-					minSafeTs = crossTs
-					haveSafeTs = true
-				}
-				if !haveFinTs || crossTs < minFinTs {
-					minFinTs = crossTs
-					haveFinTs = true
+			// Cross-safe from global timestamp
+			s.mu.Lock()
+			ts := s.crossSafeTimestamp
+			s.mu.Unlock()
+			if ts > 0 && h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
+				if num, err := h.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
+					crossID.Number = num
+					finalizedID = crossID
 				}
 			}
 			if st != nil && (st.UnsafeL2.Number > 0 || st.SafeL2.Number > 0 || st.FinalizedL2.Number > 0) {
@@ -566,12 +671,10 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		if haveMinL1 {
 			out.MinSyncedL1 = minL1
 		}
-		if haveSafeTs {
-			out.SafeTimestamp = minSafeTs
-		}
-		if haveFinTs {
-			out.FinalizedTimestamp = minFinTs
-		}
+		s.mu.Lock()
+		out.SafeTimestamp = s.crossSafeTimestamp
+		out.FinalizedTimestamp = s.crossSafeTimestamp
+		s.mu.Unlock()
 		if !ready {
 			http.Error(w, "supervisor status tracker not ready", http.StatusServiceUnavailable)
 			return

@@ -37,13 +37,15 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 			return
 		}
 		var out types.DerivedIDPair
-		h.stateMu.Lock()
-		if h.crossDB != nil {
-			if pair, err := h.crossDB.Last(); err == nil {
-				out = pair.IDs()
+		// Compute derived number from global crossSafeTimestamp; ignore hash
+		s.mu.Lock()
+		ts := s.crossSafeTimestamp
+		s.mu.Unlock()
+		if ts > 0 && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
+			if num, err := h.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
+				out.Derived.Number = num
 			}
 		}
-		h.stateMu.Unlock()
 		_ = json.NewEncoder(w).Encode(out)
 	})
 
