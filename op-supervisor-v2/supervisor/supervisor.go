@@ -136,7 +136,7 @@ func NewSupervisor(l log.Logger) *Supervisor {
 // - No adapter/cross DB usage; all derived lookups are via logsDB/localDB and rollup.Config.
 func (s *Supervisor) ProgressCrossSafe() {
 	// configure loop tick duration
-	tick := 500 * time.Millisecond
+	tick := 50 * time.Millisecond
 	for {
 		s.log.Info("xsafe: loop start")
 		ctx := context.Background()
@@ -853,6 +853,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 				initH := s.chains[initCID]
 				s.mu.Unlock()
 				if initH == nil || initH.logsDB == nil {
+					// TODO: Ensure timestamp < exe msg timestamp
 					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
 					allValid = false
 					invalidCount++
