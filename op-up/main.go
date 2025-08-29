@@ -57,6 +57,12 @@ func run() error {
 		}
 		opDir = filepath.Join(homeDir, ".op")
 	}
+
+	// Ensure Supervisor v2 binds to a fixed HTTP port early, before any components start.
+	// This enables reliable access for health checks and clients across all modes (local two-chain and external multi-chain).
+	if os.Getenv("OP_SV2_HTTP_PORT") == "" {
+		_ = os.Setenv("OP_SV2_HTTP_PORT", "9750")
+	}
 	if err := os.MkdirAll(opDir, 0o755); err != nil {
 		return fmt.Errorf("create the op dir: %w", err)
 	}
@@ -289,6 +295,8 @@ func runSysgo() error {
 	fmt.Printf("Test Account Private Key: %s\n", "0x"+common.Bytes2Hex(crypto.FromECDSA(funderPrivKey)))
 	fmt.Printf("EL Node URL: %s\n", "http://localhost:8545")
 
+	// OP_SV2_HTTP_PORT default is set early in run(); do not override here
+
 	orch := presets.Orchestrator()
 	t := &testingT{
 		ctx:      ctx,
@@ -422,8 +430,7 @@ func runSysgo() error {
 		}
 	}()
 
-	// Note: Supervisor v2 initialization removed for single-chain local mode
-	// Multi-chain modes with external L1 or OP_LOCAL_TWO_CHAIN=1 use SV2 via sysgo presets
+	// Supervisor v2 is managed via presets in multi-chain modes; no explicit single-chain polling here
 
 	<-ctx.Done()
 

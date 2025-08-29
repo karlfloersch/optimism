@@ -99,8 +99,12 @@ func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 	// Expose embedded op-node user RPC via HTTP reverse proxy for tests
 	s.sup.EnableOpNodeProxy(true)
 
-	// Start HTTP server on ephemeral port
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Start HTTP server; allow fixed port via OP_SV2_HTTP_PORT
+	addr := "127.0.0.1:0"
+	if p := os.Getenv("OP_SV2_HTTP_PORT"); strings.TrimSpace(p) != "" {
+		addr = "127.0.0.1:" + p
+	}
+	ln, err := net.Listen("tcp", addr)
 	s.p.Require().NoError(err)
 	s.ln = ln
 	s.httpURL = "http://" + ln.Addr().String()
@@ -140,8 +144,12 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.srv == nil {
-		// Ensure HTTP is up to expose health/status
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		// Ensure HTTP is up to expose health/status; allow fixed port via OP_SV2_HTTP_PORT
+		addr := "127.0.0.1:0"
+		if p := os.Getenv("OP_SV2_HTTP_PORT"); strings.TrimSpace(p) != "" {
+			addr = "127.0.0.1:" + p
+		}
+		ln, err := net.Listen("tcp", addr)
 		s.p.Require().NoError(err)
 		s.ln = ln
 		s.httpURL = "http://" + ln.Addr().String()
