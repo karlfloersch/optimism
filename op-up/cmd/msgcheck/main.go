@@ -126,12 +126,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "valid-msg":
+		// Use messenger path like earlier: send initiating msg via L2ToL2CrossDomainMessenger, relay via CrossL2Inbox
 		srcRPC, dstChain := pickSrcDst(*fromChain, *rpc901, *rpc902)
 		var target common.Address
 		if *targetFlag != "" {
 			target = common.HexToAddress(*targetFlag)
 		} else {
-			// default: EOA self on destination chain
 			pkObj, err := parseECDSA(privKey)
 			if err != nil {
 				fmt.Printf("ERROR: parse key: %v\n", err)
@@ -148,45 +148,61 @@ func main() {
 			fmt.Println("ERROR: missing receipt or block number")
 			os.Exit(1)
 		}
-		// Build relay payload from SentMessage log
 		msgLog, sentPayload, id, err := buildRelayFromReceipt(srcRPC, receipt)
 		if err != nil {
 			fmt.Printf("ERROR: build relay payload: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Prepared relay payload from SentMessage (logIndex=%d)\n", msgLog.Index)
-		// Relay on destination chain
-		if err := relayMessage(dstChain, privKey, id, sentPayload); err != nil {
+		recRelay, err := relayMessage(dstChain, privKey, id, sentPayload)
+		if err != nil {
 			fmt.Printf("ERROR: relayMessage: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("relayMessage succeeded on destination chain")
+		if recRelay == nil || recRelay.Status != types.ReceiptStatusSuccessful {
+			fmt.Println("ERROR: relay receipt missing or non-success")
+			os.Exit(1)
+		}
+		fmt.Printf("relayMessage succeeded on destination chain; block=%s\n", recRelay.BlockNumber.String())
 		srcChain := strings.TrimSpace(*fromChain)
 		if srcChain != "901" && srcChain != "902" {
 			srcChain = "901"
 		}
-		fmt.Printf("Valid message mined in block %d on src chain %s; hash=%s. Now waiting for CrossSafe to pass this height...\n",
+		fmt.Printf("Valid message mined in block %d on src chain %s; hash=%s. Now waiting for CrossSafe to pass tx+5...\n",
 			receipt.BlockNumber.Uint64(), srcChain, receipt.BlockHash.Hex())
 		dl := time.Now().Add(*timeout)
-		// New: wait for LocalSafe to reach the tx block before waiting on CrossSafe
 		if sv2URL != "" {
 			if err := waitSV2LocalSafeAtLeast(sv2URL, srcChain, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
 				fmt.Printf("ERROR: SV2 local-safe progression: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Println("SV2 LocalSafe reached tx block; now waiting for CrossSafe...")
+			fmt.Println("SV2 LocalSafe reached tx block; now waiting for CrossSafe > tx+5...")
 		}
-		if err := waitSV2CrossPast(sv2URL, srcChain, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
+		targetPlus := receipt.BlockNumber.Uint64() + 5
+		if err := waitSV2CrossPast(sv2URL, srcChain, targetPlus, dl, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 cross-safe progression: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("SV2 CrossSafe progressed beyond tx block; verifying canonicality of the tx block...")
+		fmt.Println("SV2 CrossSafe progressed beyond tx+5; verifying canonicality of the tx block...")
 		if err := verifyCanonicalBlock(srcRPC, receipt.BlockNumber, receipt.BlockHash); err != nil {
 			fmt.Printf("ERROR: canonicality check failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("SUCCESS: tx block %d (%s) remains canonical after CrossSafe progressed.\n",
-			receipt.BlockNumber.Uint64(), receipt.BlockHash.Hex())
+		// Also verify the destination relay receipt's block is still canonical
+		var dstRPC string
+		if dstChain == "901" {
+			dstRPC = *rpc901
+		} else if dstChain == "902" {
+			dstRPC = *rpc902
+		}
+		if recRelay != nil && recRelay.BlockNumber != nil && dstRPC != "" {
+			if err := verifyCanonicalBlock(dstRPC, recRelay.BlockNumber, recRelay.BlockHash); err != nil {
+				fmt.Printf("ERROR: destination canonicality check failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("SUCCESS: tx block %d (%s) and relay dest block %d (%s) remain canonical after CrossSafe progressed.\n",
+			receipt.BlockNumber.Uint64(), receipt.BlockHash.Hex(), recRelay.BlockNumber.Uint64(), recRelay.BlockHash.Hex())
 	case "invalid-msg":
 		srcRPC, dstChain := pickSrcDst(*fromChain, *rpc901, *rpc902)
 		var target common.Address
@@ -213,11 +229,57 @@ func main() {
 			fmt.Println("Mutated Identifier: incremented LogIndex by +1 to force invalid execution")
 		}
 		// Expect relay to succeed on-chain (ValidateMessage) but SV2 should later detect and rollback
-		if err := relayMessage(dstChain, privKey, id, sentPayload); err != nil {
+		recRelay, err := relayMessage(dstChain, privKey, id, sentPayload)
+		if err != nil {
 			fmt.Printf("relayMessage error (unexpected): %v\n", err)
 		} else {
-			fmt.Println("relayMessage succeeded (expected on-chain). Watching for SV2 invalidation/rollback...")
+			fmt.Printf("relayMessage succeeded (expected on-chain). Watching for SV2 invalidation/rollback... tx=%s block=%d hash=%s\n",
+				recRelay.TxHash.Hex(), recRelay.BlockNumber.Uint64(), recRelay.BlockHash.Hex())
 		}
+		// Wait for CrossSafe on the destination chain to surpass the executing block + 5
+		dl := time.Now().Add(*timeout)
+		targetPlus := recRelay.BlockNumber.Uint64() + 5
+		if err := waitSV2CrossPast(sv2URL, dstChain, targetPlus, dl, *pollInterval); err != nil {
+			fmt.Printf("ERROR: SV2 cross-safe progression (dst): %v\n", err)
+			os.Exit(1)
+		}
+		// Verify the original destination block at exec height has changed hash (reorg)
+		var dstRPC string
+		if dstChain == "901" {
+			dstRPC = *rpc901
+		} else if dstChain == "902" {
+			dstRPC = *rpc902
+		}
+		if strings.TrimSpace(dstRPC) == "" {
+			fmt.Println("WARN: missing dst RPC; skipping canonicality check")
+			return
+		}
+		{
+			ctx, cancel := contextWithTimeout(20 * time.Second)
+			defer cancel()
+			cli, err := ethclient.DialContext(ctx, dstRPC)
+			if err != nil {
+				fmt.Printf("ERROR: dial dst RPC: %v\n", err)
+				os.Exit(1)
+			}
+			defer cli.Close()
+			hdr, err := cli.HeaderByNumber(ctx, recRelay.BlockNumber)
+			if err != nil {
+				fmt.Printf("ERROR: fetch dst header: %v\n", err)
+				os.Exit(1)
+			}
+			if hdr.Hash() == recRelay.BlockHash {
+				fmt.Printf("ERROR: expected reorg at exec height %d on dst; block hash unchanged %s\n", recRelay.BlockNumber.Uint64(), hdr.Hash().Hex())
+				os.Exit(1)
+			}
+			// Verify the relay tx is no longer included (no receipt or empty block hash)
+			rec2, err := cli.TransactionReceipt(ctx, recRelay.TxHash)
+			if err == nil && rec2 != nil && rec2.BlockHash != (common.Hash{}) {
+				fmt.Printf("ERROR: expected relay tx to be non-included after reorg; got receipt with block %s\n", rec2.BlockHash.Hex())
+				os.Exit(1)
+			}
+		}
+		fmt.Println("SUCCESS: invalid executing message reorged out and relay tx not included post CrossSafe progression")
 	case "tx+invalid-msg":
 		if err := sendSimpleTxBoth([]string{*rpc901, *rpc902}, privKey, *timeout); err != nil {
 			fmt.Printf("ERROR: send txs: %v\n", err)
@@ -393,20 +455,28 @@ func buildRelayFromReceipt(srcRPC string, receipt *types.Receipt) (*types.Log, [
 	// we rely on geth to return access list / or as a fallback call eth_getTransactionReceipt and fetch log.Data directly.
 	// Since log.Data already contains abi.encode(sender,message), we can use it as sentMessage tail, prefix with topics preimage.
 	// Construct sentMessage = abi.encode(topics...) || log.Data
-	// topics preimage: abi.encode(SENT_SELECTOR, block.chainid, target, nonce)
+	// topics preimage: abi.encode(SENT_SELECTOR, destination, target, nonce)
 	chainID := tx.ChainId()
 	var preimage []byte
 	{
-		// abi.encode(selector, chainID, target, nonce)
+		// abi.encode(selector, destination, target, nonce)
 		// encode each as 32-byte
 		w := make([]byte, 0, 32*4)
 		w = append(w, sentSel.Bytes()...)
-		w = append(w, common.LeftPadBytes(chainID.Bytes(), 32)...)
+		w = append(w, common.LeftPadBytes(destination.Bytes(), 32)...)
 		w = append(w, common.LeftPadBytes(target.Bytes(), 32)...)
 		w = append(w, common.LeftPadBytes(nonce.Bytes(), 32)...)
 		preimage = w
 	}
+	// Debug context for relay encoding
+	fmt.Printf("relay ctx: dest=%s target=%s nonce=%s from=%s l1=%d\n",
+		destination.String(), target.Hex(), nonce.String(), from.Hex(), l.BlockNumber)
+	// Construct final sentMessage: preimage || abi.encode(sender,message) as emitted in log.Data
 	sentMessage := append(preimage, l.Data...)
+	msgHash := crypto.Keccak256Hash(sentMessage)
+	logDataHash := crypto.Keccak256Hash(l.Data)
+	fmt.Printf("relay hashes: sentMessage=%s logData=%s preimageLen=%d dataLen=%d\n",
+		msgHash.Hex(), logDataHash.Hex(), len(preimage), len(l.Data))
 	// Build Identifier tuple (origin=messenger addr, blockNumber, logIndex, timestamp, chainId)
 	// We don't have timestamp here without another call; fetch header.
 	hdr, err := cli.HeaderByNumber(ctx, new(big.Int).SetUint64(l.BlockNumber))
@@ -426,7 +496,7 @@ func buildRelayFromReceipt(srcRPC string, receipt *types.Receipt) (*types.Log, [
 }
 
 // relayMessage calls MESSENGER.relayMessage on the destination chain using the provided tuple and payload.
-func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage []byte) error {
+func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage []byte) (*types.Receipt, error) {
 	// Pick RPC based on chain id string like 901/902 default mapping
 	var rpc string
 	if dstChain == "901" {
@@ -440,28 +510,28 @@ func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage [
 	defer cancel()
 	pk, err := parseECDSA(privKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cli, err := ethclient.DialContext(ctx, rpc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer cli.Close()
 	chainID, err := cli.ChainID(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	auth, err := bind.NewKeyedTransactorWithChainID(pk, chainID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tip, err := cli.SuggestGasTipCap(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hdr, err := cli.HeaderByNumber(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	base := hdr.BaseFee
 	if base == nil {
@@ -485,21 +555,21 @@ func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage [
 	auth.AccessList = al
 	ib, err := inboxbinding.NewInbox(inboxAddr, cli)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tx, err := ib.ValidateMessage(auth, ibID, msgHash)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Printf("relay tx: %s\n", tx.Hash().Hex())
 	r, err := bind.WaitMined(ctx, cli, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if r.Status != types.ReceiptStatusSuccessful {
-		return fmt.Errorf("relay failed, status=%d", r.Status)
+		return r, fmt.Errorf("relay failed, status=%d", r.Status)
 	}
-	return nil
+	return r, nil
 }
 
 // waitSV2CrossPast waits until the CrossSafe head for a chain surpasses the given block number.
