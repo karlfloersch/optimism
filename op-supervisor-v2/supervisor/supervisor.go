@@ -53,17 +53,11 @@ type Supervisor struct {
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
-// chainRef is a lightweight pair of chain ID and container used to avoid repeated global lookups
 // crossSafeMD contains metadata for a cross-safe timestamp entry
 type crossSafeMD struct {
 	Timestamp uint64                               `json:"timestamp"`
 	L1Block   eth.BlockRef                         `json:"l1_block"`  // Latest L1 block (highest number)
 	L2Blocks  map[uint64]types.DerivedBlockRefPair `json:"l2_blocks"` // chainID -> L2 block pair
-}
-
-type chainRef struct {
-	id        uint64
-	container *ChainContainer
 }
 
 // Helper functions for crossSafeHistory management
@@ -121,10 +115,17 @@ func (s *Supervisor) pruneLatestCrossSafeEntry() uint64 {
 }
 
 // pruneContainersToTimestamp prunes all containers back to the specified timestamp
-func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, refs []chainRef, targetTimestamp uint64) {
-	for _, r := range refs {
-		chainID := r.id
-		container := r.container
+func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, activeChains []eth.ChainID, targetTimestamp uint64) {
+	for _, id := range activeChains {
+		chainID, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
+		s.mu.Lock()
+		container := s.chains[chainID]
+		s.mu.Unlock()
+
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			continue
 		}
@@ -208,51 +209,55 @@ func (s *Supervisor) ProgressCrossSafe() {
 			time.Sleep(tick)
 			continue
 		}
-		// Resolve chain handles once to reduce global lookups
-		var refs []chainRef
-		for _, id := range activeChains {
-			if v, ok := id.Uint64(); ok {
-				s.mu.Lock()
-				container := s.chains[v]
-				s.mu.Unlock()
-				refs = append(refs, chainRef{id: v, container: container})
-			}
-		}
-
 		// Step 0.5: Check L1 consistency with latest cross-safe entry
 		if latest := s.getLatestCrossSafe(); latest != nil {
 			// Check if the L1 block from the latest cross-safe entry is still valid
-			if len(refs) > 0 && refs[0].container != nil && refs[0].container.virtualCfg != nil {
-				l1Cli, l1 := s.EnsureL1Client(ctx, nil, nil, refs[0].container.virtualCfg.L1RPC, refs[0].container.virtualCfg.Rcfg)
-				if l1 != nil {
-					// Verify the L1 block from latest entry still exists and matches
-					expectedL1Block := latest.L1Block
-					if currentL1Block, err := l1.BlockRefByNumber(ctx, expectedL1Block.Number); err != nil || currentL1Block.Hash != expectedL1Block.Hash {
-						s.log.Warn("xsafe: L1 consistency check failed - L1 block changed, rolling back",
-							"expected_hash", expectedL1Block.Hash,
-							"expected_num", expectedL1Block.Number,
-							"current_hash", currentL1Block.Hash,
-							"err", err)
+			if len(activeChains) > 0 {
+				// Get first active chain for L1 client setup
+				var firstChainID uint64
+				for _, id := range activeChains {
+					if v, ok := id.Uint64(); ok {
+						firstChainID = v
+						break
+					}
+				}
 
-						// Rollback procedure:
-						// 1. Prune the latest entry from crossSafeHistory
-						newLatestTimestamp := s.pruneLatestCrossSafeEntry()
-						s.log.Info("xsafe: pruned latest cross-safe entry", "new_latest_ts", newLatestTimestamp)
+				s.mu.Lock()
+				firstContainer := s.chains[firstChainID]
+				s.mu.Unlock()
 
-						// 2. Prune all containers back to the new latest timestamp
-						s.pruneContainersToTimestamp(ctx, refs, newLatestTimestamp)
+				if firstContainer != nil && firstContainer.virtualCfg != nil {
+					l1Cli, l1 := s.EnsureL1Client(ctx, nil, nil, firstContainer.virtualCfg.L1RPC, firstContainer.virtualCfg.Rcfg)
+					if l1 != nil {
+						// Verify the L1 block from latest entry still exists and matches
+						expectedL1Block := latest.L1Block
+						if currentL1Block, err := l1.BlockRefByNumber(ctx, expectedL1Block.Number); err != nil || currentL1Block.Hash != expectedL1Block.Hash {
+							s.log.Warn("xsafe: L1 consistency check failed - L1 block changed, rolling back",
+								"expected_hash", expectedL1Block.Hash,
+								"expected_num", expectedL1Block.Number,
+								"current_hash", currentL1Block.Hash,
+								"err", err)
 
-						// 3. Clean up and skip this iteration
+							// Rollback procedure:
+							// 1. Prune the latest entry from crossSafeHistory
+							newLatestTimestamp := s.pruneLatestCrossSafeEntry()
+							s.log.Info("xsafe: pruned latest cross-safe entry", "new_latest_ts", newLatestTimestamp)
+
+							// 2. Prune all containers back to the new latest timestamp
+							s.pruneContainersToTimestamp(ctx, activeChains, newLatestTimestamp)
+
+							// 3. Clean up and skip this iteration
+							if l1Cli != nil {
+								l1Cli.Close()
+							}
+							time.Sleep(tick)
+							continue
+						} else {
+							s.log.Info("xsafe: L1 consistency check passed", "l1_block", expectedL1Block.Number)
+						}
 						if l1Cli != nil {
 							l1Cli.Close()
 						}
-						time.Sleep(tick)
-						continue
-					} else {
-						s.log.Info("xsafe: L1 consistency check passed", "l1_block", expectedL1Block.Number)
-					}
-					if l1Cli != nil {
-						l1Cli.Close()
 					}
 				}
 			}
@@ -262,7 +267,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		ts := s.getCurrentCrossSafeTimestamp()
 		s.log.Info("xsafe: current timestamp", "ts", ts)
 		if ts == 0 {
-			if minGenesis := s.getMinGenesisTimestamp(refs); minGenesis != 0 {
+			if minGenesis := s.getMinGenesisTimestamp(activeChains); minGenesis != 0 {
 				s.setCrossSafeTimestamp(minGenesis)
 				// next tick will try to advance beyond genesis
 				time.Sleep(tick)
@@ -275,7 +280,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.log.Info("xsafe: candidate next timestamp", "ts", ts)
 
 		// Step 3: obtain L1<>L2 block pairs that meet or preceed ts
-		pairs, err := s.getBlocksAtTimestamp(ctx, refs, ts)
+		pairs, err := s.getBlocksAtTimestamp(ctx, activeChains, ts)
 		if err != nil {
 			s.log.Info("xsafe: blocks not ready", "err", err)
 			time.Sleep(tick)
@@ -284,16 +289,16 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.log.Info("xsafe: blocks at ts", "ts", ts, "chains", len(pairs))
 
 		// Step 4: per-chain target and ingest up to it (manual seals) using pairs
-		ready := s.xsafeIngestLogsTo(ctx, refs, pairs)
+		ready := s.xsafeIngestLogsTo(ctx, activeChains, pairs)
 		if !ready {
 			time.Sleep(tick)
 			continue
 		}
 
 		// Step 5: get executing messages, validate them, and rollback if needed
-		execByChain := s.getExecutingMessages(refs, ts)
+		execByChain := s.getExecutingMessages(activeChains, ts)
 		s.log.Info("xsafe: executing messages", "execByChain", execByChain)
-		valid := s.validateExecutingMessages(ctx, refs, ts, execByChain)
+		valid := s.validateExecutingMessages(ctx, activeChains, ts, execByChain)
 		if !valid {
 			s.log.Info("xsafe: validation detected issues (rollback was handled in validateExecutingMessages and it should honestly happen at a higher level idk bro)")
 		}
@@ -684,12 +689,20 @@ func (s *Supervisor) xsafeSnapshotActiveChains() []eth.ChainID {
 	return out
 }
 
-// getMinGenesisTimestamp computes the minimum L2 genesis timestamp across the provided chain refs.
-// Returns 0 if none of the refs have a rollup config.
-func (s *Supervisor) getMinGenesisTimestamp(refs []chainRef) uint64 {
+// getMinGenesisTimestamp computes the minimum L2 genesis timestamp across the provided active chains.
+// Returns 0 if none of the chains have a rollup config.
+func (s *Supervisor) getMinGenesisTimestamp(activeChains []eth.ChainID) uint64 {
 	var minGenesis uint64
-	for _, r := range refs {
-		container := r.container
+	for _, id := range activeChains {
+		chainID, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
+		s.mu.Lock()
+		container := s.chains[chainID]
+		s.mu.Unlock()
+
 		if container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil {
 			gts := container.virtualCfg.Rcfg.Genesis.L2Time
 			if minGenesis == 0 || gts < minGenesis {
@@ -719,13 +732,20 @@ func blockAtTimestampFromConfig(rcfg *rollup.Config, ts uint64) (uint64, error) 
 
 // getBlocksAtTimestamp returns, for each chain, the (L1,L2) block refs corresponding to the floor
 // L2 block at the given timestamp. It first gates on having SafeL2 at least at that block number.
-func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, ts uint64) (map[uint64]types.DerivedBlockRefPair, error) {
-	pairs := make(map[uint64]types.DerivedBlockRefPair, len(refs))
+func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, activeChains []eth.ChainID, ts uint64) (map[uint64]types.DerivedBlockRefPair, error) {
+	pairs := make(map[uint64]types.DerivedBlockRefPair, len(activeChains))
 	var l1Cli opclient.RPC
 	var l1 *sources.L1Client
-	for _, r := range refs {
-		v := r.id
-		container := r.container
+	for _, id := range activeChains {
+		v, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
+		s.mu.Lock()
+		container := s.chains[v]
+		s.mu.Unlock()
+
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.virtualOpNodeUserRPC == "" {
 			return nil, fmt.Errorf("missing container/config/opnode for chain %d", v)
 		}
@@ -778,14 +798,21 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 
 // xsafeIngestLogsTo manually seals blocks in logsDB up to the provided target pairs.
 // Expects pre-resolved handles and computed target blocks. Idempotent: skips blocks already sealed.
-func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pairs map[uint64]types.DerivedBlockRefPair) bool {
+func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.ChainID, pairs map[uint64]types.DerivedBlockRefPair) bool {
 	ready := true
 	// Share a single L1 client across chains
 	var l1Cli opclient.RPC
 	var l1 *sources.L1Client
-	for _, r := range refs {
-		v := r.id
-		container := r.container
+	for _, id := range activeChains {
+		v, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
+		s.mu.Lock()
+		container := s.chains[v]
+		s.mu.Unlock()
+
 		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "container", container)
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			continue
@@ -851,12 +878,19 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 }
 
 // getExecutingMessages returns the executing messages per chain at the target block for ts.
-func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
-	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(refs))
-	s.log.Info("xsafe: getExecutingMessages", "refs", refs, "ts", ts)
-	for _, r := range refs {
-		v := r.id
-		container := r.container
+func (s *Supervisor) getExecutingMessages(activeChains []eth.ChainID, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
+	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(activeChains))
+	s.log.Info("xsafe: getExecutingMessages", "activeChains", activeChains, "ts", ts)
+	for _, id := range activeChains {
+		v, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
+		s.mu.Lock()
+		container := s.chains[v]
+		s.mu.Unlock()
+
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			s.log.Info("xsafe: validation skip (missing cfg/db)", "chain", v)
 			continue
@@ -888,19 +922,18 @@ func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64
 }
 
 // validateExecutingMessages verifies that each executing message references an initiating log present on the initiating chain.
-func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chainRef, ts uint64, execByChain map[uint64]map[uint32]*types.ExecutingMessage) bool {
+func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains []eth.ChainID, ts uint64, execByChain map[uint64]map[uint32]*types.ExecutingMessage) bool {
 	allValid := true
 	invalidCount := 0
 	totalCount := 0
-	// quick lookup of containers by chain id
-	refByID := make(map[uint64]*ChainContainer, len(refs))
-	for _, r := range refs {
-		refByID[r.id] = r.container
-	}
 	// avoid duplicate rollbacks per chain in a single step
 	rolledBack := make(map[uint64]bool)
-	for _, r := range refs {
-		v := r.id
+	for _, id := range activeChains {
+		v, ok := id.Uint64()
+		if !ok {
+			continue
+		}
+
 		execMsgs := execByChain[v]
 		for _, msg := range execMsgs {
 			if msg == nil {
@@ -924,7 +957,10 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 					invalidCount++
 					// Side-effects: mark denylist and rollback the executing chain before the block at this ts
 					if !rolledBack[v] {
-						if container := refByID[v]; container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil && container.logsDB != nil {
+						s.mu.Lock()
+						container := s.chains[v]
+						s.mu.Unlock()
+						if container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil && container.logsDB != nil {
 							if targetNum, terr := container.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
 								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {

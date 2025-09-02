@@ -31,9 +31,7 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 		}
 		var out types.DerivedIDPair
 		// Compute derived number from global crossSafeTimestamp; ignore hash
-		s.mu.Lock()
-		ts := s.crossSafeTimestamp
-		s.mu.Unlock()
+		ts := s.getCurrentCrossSafeTimestamp()
 		if ts > 0 && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
 			if num, err := h.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
 				out.Derived.Number = num
