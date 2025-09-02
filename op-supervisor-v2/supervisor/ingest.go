@@ -50,9 +50,7 @@ func ingestRange(ctx context.Context, l2 *sources.L2Client, logs *logsdb.DB, sta
 		// Collect logs flat in block order
 		var allLogs []*ethTypes.Log
 		for _, r := range receipts {
-			for _, lg := range r.Logs {
-				allLogs = append(allLogs, lg)
-			}
+			allLogs = append(allLogs, r.Logs...)
 		}
 		// Write logs to DB
 		// Identify parent block by number-1

@@ -35,9 +35,8 @@ type Supervisor struct {
 	// denylist
 	denylist *DenylistStore
 
-	chains         map[uint64]*ChainContainer
-	activeChainsMu sync.Mutex
-	activeChains   map[eth.ChainID]struct{}
+	chains   map[uint64]*ChainContainer
+	chainsMu sync.Mutex
 
 	// L1 scope label used for cross-safe L1 confirmation depth gating (default: eth.Safe; tests may override to eth.Unsafe)
 	l1ScopeLabel eth.BlockLabel
@@ -166,7 +165,6 @@ func defaultScopeLabel() eth.BlockLabel {
 func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l.New("service", "supervisor_v2")}
 	// initialize shared linker state
-	s.activeChains = make(map[eth.ChainID]struct{})
 	s.l1ScopeLabel = defaultScopeLabel()
 
 	// default fetcher dials the op-node and returns SyncStatus
@@ -346,16 +344,6 @@ func (s *Supervisor) SetDataDir(dir string) {
 	}
 	s.dataDir = dir
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
-}
-
-// MarkChainActive marks a chain ID as active via the activeChains set.
-func (s *Supervisor) MarkChainActive(id eth.ChainID) {
-	s.activeChainsMu.Lock()
-	defer s.activeChainsMu.Unlock()
-	if s.activeChains == nil {
-		s.activeChains = make(map[eth.ChainID]struct{})
-	}
-	s.activeChains[id] = struct{}{}
 }
 
 // SetL1ScopeLabel overrides the L1 scope label (e.g., eth.Unsafe in tests).
@@ -683,11 +671,11 @@ func (s *Supervisor) EnsureL1Client(ctx context.Context, l1Cli opclient.RPC, l1 
 }
 
 func (s *Supervisor) xsafeSnapshotActiveChains() []eth.ChainID {
-	s.activeChainsMu.Lock()
-	defer s.activeChainsMu.Unlock()
-	out := make([]eth.ChainID, 0, len(s.activeChains))
-	for id := range s.activeChains {
-		out = append(out, id)
+	s.chainsMu.Lock()
+	defer s.chainsMu.Unlock()
+	out := make([]eth.ChainID, 0, len(s.chains))
+	for chainID := range s.chains {
+		out = append(out, eth.ChainIDFromUInt64(chainID))
 	}
 	return out
 }

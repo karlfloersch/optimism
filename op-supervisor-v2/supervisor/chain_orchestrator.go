@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
-	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
@@ -66,8 +65,6 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	}
 	container.logsDB = logsDB
 
-	// Register container
-	s.MarkChainActive(eth.ChainIDFromUInt64(chainID))
 	s.mu.Lock()
 	if s.chains == nil {
 		s.chains = make(map[uint64]*ChainContainer)
