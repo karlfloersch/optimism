@@ -42,17 +42,14 @@ func (s *Supervisor) openChainDBs(logger log.Logger, chainID uint64, dataDir str
 	return logDB, localDB, crossDB, nil
 }
 
-// ingestRange fetches payload, receipts and appends logs + local-safe link (and optionally cross-safe mirror) for [start,end] (inclusive).
-func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client, logs *logsdb.DB, local *fromda.DB, cross *fromda.DB, rollupCfg *sources.L2ClientConfig, start, end uint64) error {
+// ingestRange fetches payload, receipts and appends logs for [start,end] (inclusive).
+func ingestRange(ctx context.Context, l2 *sources.L2Client, logs *logsdb.DB, start, end uint64) error {
 	for n := start; n <= end; n++ {
-		// debug
-		// Note: keep logs lightweight to avoid noise; this helps confirm ingest actually runs.
-		// fmt.Printf("[sv2] ingest block %d\n", n)
 		env, err := l2.PayloadByNumber(ctx, n)
 		if err != nil {
 			return err
 		}
-		ref, err := derive.PayloadToBlockRef(rollupCfg.RollupCfg, env.ExecutionPayload)
+		ref, err := derive.PayloadToBlockRef(l2.RollupConfig(), env.ExecutionPayload)
 		if err != nil {
 			return err
 		}
@@ -74,7 +71,6 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 		if n > 0 {
 			parent = eth.BlockID{Hash: ref.ParentHash, Number: n - 1}
 		}
-		var execIdx uint32
 		for i, lg := range allLogs {
 			// Try to decode ExecutingMessage; may be nil for non-exec logs
 			var exec *types.ExecutingMessage
@@ -84,8 +80,7 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 			if err := logs.AddLog(processors.LogToLogHash(lg), parent, uint32(i), exec); err != nil {
 				return err
 			}
-			execIdx = uint32(i)
-			_ = execIdx
+
 		}
 		// Seal block in logs DB
 		if err := logs.SealBlock(ref.ParentHash, eth.ToBlockID(info), ref.Time); err != nil {
@@ -93,26 +88,4 @@ func ingestRange(ctx context.Context, l1 *sources.L1Client, l2 *sources.L2Client
 		}
 	}
 	return nil
-}
-
-// addDerivedWithDiagonalSplit appends a (source,derived) link to the given DB,
-// splitting a diagonal increment (source+1, derived+1) into two ordered writes:
-// (source+1, derived) followed by (source+1, derived+1).
-func addDerivedWithDiagonalSplit(ctx context.Context, l2 *sources.L2Client, db *fromda.DB, rollupCfg *sources.L2ClientConfig, l1Ref eth.BlockRef, derivedRef eth.BlockRef) error {
-	if last, err := db.Last(); err == nil {
-		if last.Source.Number+1 == l1Ref.Number && last.Derived.Number+1 == derivedRef.Number {
-			prevEnv, perr := l2.PayloadByNumber(ctx, last.Derived.Number)
-			if perr != nil {
-				return perr
-			}
-			prevRef, derr := derive.PayloadToBlockRef(rollupCfg.RollupCfg, prevEnv.ExecutionPayload)
-			if derr != nil {
-				return derr
-			}
-			if err := db.AddDerived(l1Ref, prevRef.BlockRef(), types.RevisionAny); err != nil {
-				return err
-			}
-		}
-	}
-	return db.AddDerived(l1Ref, derivedRef, types.RevisionAny)
 }

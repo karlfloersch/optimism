@@ -45,8 +45,6 @@ type Supervisor struct {
 	// per-instance data directory for DBs
 	dataDir string
 
-	// finalized runner removed; no in-memory cross_finalized or checkers
-
 	// crossSafeTimestamp is the global cross-safe timestamp (monotonic, non-decreasing)
 	crossSafeTimestamp uint64
 
@@ -198,14 +196,12 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 
 		// Step 5: get executing messages, validate them, and rollback if needed
-		// TODO: Fix
 		execByChain := s.getExecutingMessages(refs, ts)
 		s.log.Info("xsafe: executing messages", "execByChain", execByChain)
 		valid := s.validateExecutingMessages(ctx, refs, ts, execByChain)
 		if !valid {
 			s.log.Info("xsafe: validation detected issues (rollback to be handled in step 6)")
 		}
-		s.xsafeRollbackPlaceholder(activeChains)
 
 		// Step 6: commit new timestamp
 		s.mu.Lock()
@@ -588,10 +584,6 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 	})
 }
 
-// performRollback stops the embedded op-node, rolls back the EL to an absolute block number
-// then restarts the op-node and polling.
-// performRollback removed; legacy single-chain rollback is now handled within RollbackChain
-
 // EnableOpNodeProxy toggles the /opnode/ reverse proxy in the HTTP handler.
 func (s *Supervisor) EnableOpNodeProxy(v bool) { s.enableOpNodeProxy = v }
 
@@ -638,8 +630,6 @@ func (s *Supervisor) getMinGenesisTimestamp(refs []chainRef) uint64 {
 	}
 	return minGenesis
 }
-
-// (removed xsafeNextCandidate: compute candidate inline where used)
 
 // blockAtTimestampFromConfig returns the L2 block number whose timestamp is <= ts, using rollup config.
 // It clamps to genesis and accounts for non-zero genesis block numbers.
@@ -717,7 +707,7 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 	return pairs, nil
 }
 
-// xsafeIngestLogsTo manually seals blocks in logsDB up to the provided target pairs (no ingestRange).
+// xsafeIngestLogsTo manually seals blocks in logsDB up to the provided target pairs.
 // Expects pre-resolved handles and computed target blocks. Idempotent: skips blocks already sealed.
 func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pairs map[uint64]types.DerivedBlockRefPair) bool {
 	ready := true
@@ -728,7 +718,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 		v := r.id
 		h := r.h
 		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "h", h)
-		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil || h.localDB == nil {
+		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil {
 			continue
 		}
 		targetPair, ok := pairs[v]
@@ -777,7 +767,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 			}
 		}
 		s.log.Info("xsafe: ingest range", "chain", v, "start", start, "end", targetNum)
-		if err := ingestRange(ctx, l1, l2, h.logsDB, h.localDB, h.crossDB, sources.L2ClientDefaultConfig(rcfg, true), start, targetNum); err != nil {
+		if err := ingestRange(ctx, l2, h.logsDB, start, targetNum); err != nil {
 			s.log.Info("xsafe: ingest failed", "chain", v, "err", err)
 			l2Cli.Close()
 			ready = false
@@ -853,7 +843,6 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 				initH := s.chains[initCID]
 				s.mu.Unlock()
 				if initH == nil || initH.logsDB == nil {
-					// TODO: Ensure timestamp < exe msg timestamp
 					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
 					allValid = false
 					invalidCount++
@@ -897,10 +886,4 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 	}
 	s.log.Info("xsafe: exec validation summary", "total", totalCount, "invalid", invalidCount)
 	return allValid
-}
-
-func (s *Supervisor) xsafeRollbackPlaceholder(chains []eth.ChainID) {
-	for _, id := range chains {
-		s.log.Info("xsafe: rollback TODO", "chain", id)
-	}
 }

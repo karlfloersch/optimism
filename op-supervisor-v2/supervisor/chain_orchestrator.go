@@ -59,7 +59,8 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		started: time.Now(),
 	}
 
-	// Open per-chain DBs (logs/local/cross). Cross may not be used yet but is harmless to open.
+	// Open per-chain DBs (logs/local/cross).
+	// Note: local/cross DBs are opened for v1 API compatibility but are not actively written to in v2.
 	logsDB, localDB, crossDB, err := s.openChainDBs(s.log, chainID, s.getDataDir())
 	if err != nil {
 		// Stop the embedded op-node before returning the error
