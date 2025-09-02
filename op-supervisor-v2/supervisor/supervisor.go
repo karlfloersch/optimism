@@ -45,8 +45,8 @@ type Supervisor struct {
 	// per-instance data directory for DBs
 	dataDir string
 
-	// crossSafeTimestamp is the global cross-safe timestamp (monotonic, non-decreasing)
-	crossSafeTimestamp uint64
+	// crossSafeHistory is the global cross-safe timestamp history (monotonic, non-decreasing)
+	crossSafeHistory []crossSafeMD
 
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
@@ -54,9 +54,98 @@ type Supervisor struct {
 }
 
 // chainRef is a lightweight pair of chain ID and container used to avoid repeated global lookups
+// crossSafeMD contains metadata for a cross-safe timestamp entry
+type crossSafeMD struct {
+	Timestamp uint64                               `json:"timestamp"`
+	L1Block   eth.BlockRef                         `json:"l1_block"`  // Latest L1 block (highest number)
+	L2Blocks  map[uint64]types.DerivedBlockRefPair `json:"l2_blocks"` // chainID -> L2 block pair
+}
+
 type chainRef struct {
 	id        uint64
 	container *ChainContainer
+}
+
+// Helper functions for crossSafeHistory management
+
+// getCurrentCrossSafeTimestamp returns the latest cross-safe timestamp, or 0 if none exists
+func (s *Supervisor) getCurrentCrossSafeTimestamp() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.crossSafeHistory) == 0 {
+		return 0
+	}
+	return s.crossSafeHistory[len(s.crossSafeHistory)-1].Timestamp
+}
+
+// getLatestCrossSafe returns the latest cross-safe entry, or nil if none exists
+func (s *Supervisor) getLatestCrossSafe() *crossSafeMD {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.crossSafeHistory) == 0 {
+		return nil
+	}
+	return &s.crossSafeHistory[len(s.crossSafeHistory)-1]
+}
+
+// addCrossSafeEntry adds a new cross-safe entry to the history
+func (s *Supervisor) addCrossSafeEntry(entry crossSafeMD) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.crossSafeHistory = append(s.crossSafeHistory, entry)
+}
+
+// setCrossSafeTimestamp sets the cross-safe history to a single entry with the given timestamp (for initialization)
+func (s *Supervisor) setCrossSafeTimestamp(timestamp uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.crossSafeHistory = []crossSafeMD{{Timestamp: timestamp}}
+}
+
+// pruneLatestCrossSafeEntry removes the latest entry from crossSafeHistory and returns the new latest timestamp
+func (s *Supervisor) pruneLatestCrossSafeEntry() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.crossSafeHistory) == 0 {
+		return 0
+	}
+	if len(s.crossSafeHistory) == 1 {
+		// If only one entry, clear the history
+		s.crossSafeHistory = nil
+		return 0
+	}
+	// Remove the last entry
+	s.crossSafeHistory = s.crossSafeHistory[:len(s.crossSafeHistory)-1]
+	// Return the new latest timestamp
+	return s.crossSafeHistory[len(s.crossSafeHistory)-1].Timestamp
+}
+
+// pruneContainersToTimestamp prunes all containers back to the specified timestamp
+func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, refs []chainRef, targetTimestamp uint64) {
+	for _, r := range refs {
+		chainID := r.id
+		container := r.container
+		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
+			continue
+		}
+
+		// Calculate the target block number for this timestamp
+		rcfg := container.virtualCfg.Rcfg
+		targetBlockNum, err := rcfg.TargetBlockNumber(targetTimestamp)
+		if err != nil {
+			s.log.Warn("xsafe: failed to calculate target block for rollback", "chain", chainID, "ts", targetTimestamp, "err", err)
+			continue
+		}
+
+		// Rollback the chain to the target block
+		if s.rollbackFn != nil {
+			if rerr := s.rollbackFn(ctx, chainID, targetBlockNum); rerr != nil {
+				s.log.Warn("xsafe: rollback failed during L1 consistency recovery", "chain", chainID, "to_block", targetBlockNum, "err", rerr)
+			} else {
+				s.log.Info("xsafe: rollback executed during L1 consistency recovery", "chain", chainID, "to_block", targetBlockNum)
+			}
+		}
+	}
 }
 
 // defaultScopeLabel returns the default L1 scope label
@@ -101,41 +190,14 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	return s
 }
 
-// ProgressCrossSafe advances a global cross-safe timestamp without using the cross DB.
-//
-// Overview
-// - State: s.crossSafeTimestamp (monotonic, never decreases)
-// - Inputs per chain:
-//   - op-node SyncStatus timestamps (Unsafe/Safe/Finalized)
-//   - rollup.Config (TimestampForBlock / TargetBlockNumber mapping)
-//   - logsDB + localDB (for ingestion and per-chain derived mapping)
-//
-// - Output surface:
-//   - /v1/cross_safe computes an L2 block number on-the-fly via TargetBlockNumber(s.crossSafeTimestamp)
-//   - /v1/sync_status reports CrossSafe/Finalized derived from the same timestamp
-//
-// Steps (each tick ~500ms)
-// 0) Early exit if there are no active chains (prevents pre-genesis advancement).
-// 1) Initialization (once): if crossSafeTimestamp == 0, set it to min(genesis L2 time) across active chains.
-// 2) Candidate: ts := crossSafeTimestamp + 1.
-// 3) Gate: require each active chain to have SyncStatus.SafeL2.Time >= ts (scope can be generalized later).
-// 4) For each chain:
-//   - Compute target L2 block number = floor(TargetBlockNumber(ts)). If ts < genesis, wait.
-//   - Ensure L1/L2 clients.
-//   - Seed local DB if empty from the target (best-effort).
-//   - Ingest logs/local up to the target number.
-//
-// 5) Validation: placeholder (log-only for now; message-link checks can be added later).
-// 6) Rollback on validation errors: placeholder (log-only for now; will call rollbackFn per-chain).
-// 7) Commit: if gates passed and ingest completed, set crossSafeTimestamp = ts.
-//
-// Invariants
-// - crossSafeTimestamp only increases when all chains can model ts.
-// - No adapter/cross DB usage; all derived lookups are via logsDB/localDB and rollup.Config.
 func (s *Supervisor) ProgressCrossSafe() {
 	// configure loop tick duration
 	tick := 50 * time.Millisecond
 	for {
+		// 2 things:
+		// 1. roll back if L1 is stale (latest l1 block is incorrect)
+		// 2. progress finality of L1
+
 		s.log.Info("xsafe: loop start")
 		ctx := context.Background()
 
@@ -157,16 +219,51 @@ func (s *Supervisor) ProgressCrossSafe() {
 			}
 		}
 
+		// Step 0.5: Check L1 consistency with latest cross-safe entry
+		if latest := s.getLatestCrossSafe(); latest != nil {
+			// Check if the L1 block from the latest cross-safe entry is still valid
+			if len(refs) > 0 && refs[0].container != nil && refs[0].container.virtualCfg != nil {
+				l1Cli, l1 := s.EnsureL1Client(ctx, nil, nil, refs[0].container.virtualCfg.L1RPC, refs[0].container.virtualCfg.Rcfg)
+				if l1 != nil {
+					// Verify the L1 block from latest entry still exists and matches
+					expectedL1Block := latest.L1Block
+					if currentL1Block, err := l1.BlockRefByNumber(ctx, expectedL1Block.Number); err != nil || currentL1Block.Hash != expectedL1Block.Hash {
+						s.log.Warn("xsafe: L1 consistency check failed - L1 block changed, rolling back",
+							"expected_hash", expectedL1Block.Hash,
+							"expected_num", expectedL1Block.Number,
+							"current_hash", currentL1Block.Hash,
+							"err", err)
+
+						// Rollback procedure:
+						// 1. Prune the latest entry from crossSafeHistory
+						newLatestTimestamp := s.pruneLatestCrossSafeEntry()
+						s.log.Info("xsafe: pruned latest cross-safe entry", "new_latest_ts", newLatestTimestamp)
+
+						// 2. Prune all containers back to the new latest timestamp
+						s.pruneContainersToTimestamp(ctx, refs, newLatestTimestamp)
+
+						// 3. Clean up and skip this iteration
+						if l1Cli != nil {
+							l1Cli.Close()
+						}
+						time.Sleep(tick)
+						continue
+					} else {
+						s.log.Info("xsafe: L1 consistency check passed", "l1_block", expectedL1Block.Number)
+					}
+					if l1Cli != nil {
+						l1Cli.Close()
+					}
+				}
+			}
+		}
+
 		// Step 1: initialization — set to min genesis if unset
-		s.mu.Lock()
-		ts := s.crossSafeTimestamp
-		s.mu.Unlock()
+		ts := s.getCurrentCrossSafeTimestamp()
 		s.log.Info("xsafe: current timestamp", "ts", ts)
 		if ts == 0 {
 			if minGenesis := s.getMinGenesisTimestamp(refs); minGenesis != 0 {
-				s.mu.Lock()
-				s.crossSafeTimestamp = minGenesis
-				s.mu.Unlock()
+				s.setCrossSafeTimestamp(minGenesis)
 				// next tick will try to advance beyond genesis
 				time.Sleep(tick)
 				continue
@@ -174,9 +271,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 
 		// Step 2: compute candidate timestamp
-		s.mu.Lock()
-		ts = s.crossSafeTimestamp + 1
-		s.mu.Unlock()
+		ts = s.getCurrentCrossSafeTimestamp() + 1
 		s.log.Info("xsafe: candidate next timestamp", "ts", ts)
 
 		// Step 3: obtain L1<>L2 block pairs that meet or preceed ts
@@ -200,14 +295,30 @@ func (s *Supervisor) ProgressCrossSafe() {
 		s.log.Info("xsafe: executing messages", "execByChain", execByChain)
 		valid := s.validateExecutingMessages(ctx, refs, ts, execByChain)
 		if !valid {
-			s.log.Info("xsafe: validation detected issues (rollback to be handled in step 6)")
+			s.log.Info("xsafe: validation detected issues (rollback was handled in validateExecutingMessages and it should honestly happen at a higher level idk bro)")
 		}
 
-		// Step 6: commit new timestamp
-		s.mu.Lock()
-		s.crossSafeTimestamp = ts
-		s.log.Info("xsafe: committed new timestamp", "ts", ts)
-		s.mu.Unlock()
+		// Step 6: commit new timestamp with metadata
+		// Find the L1 block with the highest number from all pairs
+		var latestL1Block eth.BlockRef
+		l2Blocks := make(map[uint64]types.DerivedBlockRefPair)
+
+		for chainID, pair := range pairs {
+			// Check if this L1 block has a higher number than our current latest
+			if latestL1Block.Number == 0 || pair.Source.Number > latestL1Block.Number {
+				latestL1Block = pair.Source
+			}
+			l2Blocks[chainID] = pair
+		}
+
+		newEntry := crossSafeMD{
+			Timestamp: ts,
+			L1Block:   latestL1Block,
+			L2Blocks:  l2Blocks,
+		}
+
+		s.addCrossSafeEntry(newEntry)
+		s.log.Info("xsafe: committed new timestamp", "ts", ts, "l1_block", latestL1Block.Number, "l2_chains", len(l2Blocks))
 
 		// Step end: wait for next tick
 		time.Sleep(tick)
@@ -393,9 +504,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			s.log.Info("admin: logsDB rewound", "chain", chainID, "to_block", *req.ToBlockNumber)
 
 			// Step 2: roll back the cross-safe head to the block timestamp
-			s.mu.Lock()
-			s.crossSafeTimestamp = ref.Time
-			s.mu.Unlock()
+			s.setCrossSafeTimestamp(ref.Time)
 			s.log.Info("admin: cross-safe timestamp rewound", "chain", chainID, "ts", ref.Time, "to_block", *req.ToBlockNumber)
 
 			// Existing behavior: roll back EL/op-node for the chain as well
@@ -505,9 +614,7 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 				}
 			}
 			// Cross-safe from global timestamp
-			s.mu.Lock()
-			ts := s.crossSafeTimestamp
-			s.mu.Unlock()
+			ts := s.getCurrentCrossSafeTimestamp()
 			if ts > 0 && container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil {
 				if num, err := container.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
 					crossID.Number = num
@@ -535,10 +642,9 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		if haveMinL1 {
 			out.MinSyncedL1 = minL1
 		}
-		s.mu.Lock()
-		out.SafeTimestamp = s.crossSafeTimestamp
-		out.FinalizedTimestamp = s.crossSafeTimestamp
-		s.mu.Unlock()
+		currentTS := s.getCurrentCrossSafeTimestamp()
+		out.SafeTimestamp = currentTS
+		out.FinalizedTimestamp = currentTS
 		if !ready {
 			http.Error(w, "supervisor status tracker not ready", http.StatusServiceUnavailable)
 			return
