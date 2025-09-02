@@ -44,13 +44,13 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 
 	// GET /v1/finalized?chainId=
 	mux.HandleFunc("/v1/finalized", func(w http.ResponseWriter, r *http.Request) {
-		_, h := s.resolveChainFromQuery(w, r)
-		if h == nil {
+		_, container := s.resolveChainFromQuery(w, r)
+		if container == nil {
 			return
 		}
 		var out eth.BlockID
-		if h.embeddedOpNodeUserRPC != "" {
-			if st, err := s.fetchSyncStatus(r.Context(), h.embeddedOpNodeUserRPC); err == nil && st != nil {
+		if container.virtualOpNodeUserRPC != "" {
+			if st, err := s.fetchSyncStatus(r.Context(), container.virtualOpNodeUserRPC); err == nil && st != nil {
 				out = st.FinalizedL2.ID()
 			}
 		}
@@ -70,10 +70,10 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 		sort.Slice(chains, func(i, j int) bool { return chains[i] < chains[j] })
 		for _, id := range chains {
 			s.mu.Lock()
-			h := s.chains[id]
+			container := s.chains[id]
 			s.mu.Unlock()
-			if h != nil && h.embeddedOpNodeUserRPC != "" {
-				if st, err := s.fetchSyncStatus(r.Context(), h.embeddedOpNodeUserRPC); err == nil && st != nil {
+			if container != nil && container.virtualOpNodeUserRPC != "" {
+				if st, err := s.fetchSyncStatus(r.Context(), container.virtualOpNodeUserRPC); err == nil && st != nil {
 					if out.Number == 0 || st.FinalizedL1.Number < out.Number {
 						out = st.FinalizedL1
 					}

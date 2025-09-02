@@ -23,13 +23,13 @@ import (
 func main() {
 	app := &cli.App{
 		Name:  "op-supervisor-v2",
-		Usage: "Supervisor v2 prototype: runs embedded op-node and exposes health",
+		Usage: "Supervisor v2 prototype: runs virtual op-node and exposes health",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
 			&cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
-			&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose embedded op-node RPC under /opnode/"},
+			&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose virtual op-node RPC under /opnode/"},
 			&cli.StringFlag{Name: "sv2.data-dir", Value: "", Usage: "SV2 data dir (denylist.json and chain DBs). Default is a unique temp dir."},
-			// Embedded op-node mode (always on)
+			// Virtual op-node mode (always on)
 			&cli.StringFlag{Name: "l1.rpc", Usage: "L1 execution RPC endpoint"},
 			&cli.StringFlag{Name: "beacon.addr", Usage: "L1 beacon endpoint for blobs (e.g. http://localhost:5052)"},
 			&cli.StringFlag{Name: "l2.authrpc", Usage: "L2 execution Engine API (auth RPC) endpoint"},
@@ -66,7 +66,7 @@ func main() {
 			pollInt := ctx.Duration("poll.interval")
 			confirmDepth := ctx.Uint("confirm.depth")
 
-			// Embedded op-node only
+			// Virtual op-node only
 			l1RPC := ctx.String("l1.rpc")
 			beacon := ctx.String("beacon.addr")
 			l2Auth := ctx.String("l2.authrpc")

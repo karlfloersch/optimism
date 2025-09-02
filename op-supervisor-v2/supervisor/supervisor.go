@@ -29,7 +29,7 @@ type Supervisor struct {
 	log log.Logger
 	mu  sync.Mutex
 
-	// if true, HTTP handler exposes an /opnode/ reverse proxy to the embedded op-node user RPC
+	// if true, HTTP handler exposes an /opnode/ reverse proxy to the virtual op-node user RPC
 	enableOpNodeProxy bool
 
 	// denylist
@@ -290,16 +290,16 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 				s.mu.Unlock()
 				return
 			}
-			h := s.chains[chainID]
+			container := s.chains[chainID]
 			s.mu.Unlock()
-			if h == nil {
+			if container == nil {
 				http.Error(w, "unknown chainId", http.StatusNotFound)
 				return
 			}
-			h.stateMu.Lock()
-			running := h.stopEmbeddedOpNode != nil
-			started := h.started
-			opNodeUser := h.embeddedOpNodeUserRPC
+			container.stateMu.Lock()
+			running := container.stopVirtualOpNode != nil
+			started := container.started
+			opNodeUser := container.virtualOpNodeUserRPC
 			var localSafe, crossSafe any
 			var unsafeHead, safeHead, finalizedHead any
 			// v2 Note: localDB and crossDB removed - these fields remain nil for API compatibility
@@ -315,7 +315,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 					cli.Close()
 				}
 			}
-			h.stateMu.Unlock()
+			container.stateMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"chain_id":         chainID,
 				"op_node_running":  running,
@@ -427,7 +427,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	// Entries are managed internally by supervisor policies/tests; no POST endpoint
 
 	if s.enableOpNodeProxy {
-		// Expose embedded op-node user RPC via reverse proxy (HTTP) under /opnode/{chainId}/
+		// Expose virtual op-node user RPC via reverse proxy (HTTP) under /opnode/{chainId}/
 		mux.HandleFunc("/opnode/", func(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			var target string
@@ -440,8 +440,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			if seg != "" {
 				var cid uint64
 				_, _ = fmt.Sscanf(seg, "%d", &cid)
-				if h := s.chains[cid]; h != nil {
-					target = h.embeddedOpNodeUserRPC
+				if container := s.chains[cid]; container != nil {
+					target = container.virtualOpNodeUserRPC
 				}
 			}
 			s.mu.Unlock()
@@ -487,8 +487,8 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		ctx := r.Context()
 		for id, container := range chains {
 			var st *eth.SyncStatus
-			if container != nil && container.embeddedOpNodeUserRPC != "" {
-				if ss, err := s.fetchSyncStatus(ctx, container.embeddedOpNodeUserRPC); err == nil && ss != nil {
+			if container != nil && container.virtualOpNodeUserRPC != "" {
+				if ss, err := s.fetchSyncStatus(ctx, container.virtualOpNodeUserRPC); err == nil && ss != nil {
 					st = ss
 				}
 			}
@@ -620,7 +620,7 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 	for _, r := range refs {
 		v := r.id
 		container := r.container
-		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.embeddedOpNodeUserRPC == "" {
+		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.virtualOpNodeUserRPC == "" {
 			return nil, fmt.Errorf("missing container/config/opnode for chain %d", v)
 		}
 		// Compute expected L2 block number at ts (floor)
@@ -630,7 +630,7 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 			return nil, fmt.Errorf("chain %d: compute target num: %w", v, err)
 		}
 		// Gate: SafeL2 must be at or beyond targetNum
-		st, err := s.fetchSyncStatus(ctx, container.embeddedOpNodeUserRPC)
+		st, err := s.fetchSyncStatus(ctx, container.virtualOpNodeUserRPC)
 		if err != nil || st == nil {
 			return nil, fmt.Errorf("chain %d: fetch sync status: %w", v, err)
 		}

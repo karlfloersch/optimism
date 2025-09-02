@@ -12,15 +12,15 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 )
 
-// ChainContainer tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
+// ChainContainer tracks the per-chain state (virtual op-node lifecycle, DBs, and pollers).
 type ChainContainer struct {
 	stateMu sync.Mutex
 
 	// runtime state
-	embeddedOpNodeUserRPC string
-	stopEmbeddedOpNode    func(ctx context.Context) error
-	cancelPoll            context.CancelFunc
-	started               time.Time
+	virtualOpNodeUserRPC string
+	stopVirtualOpNode    func(ctx context.Context) error
+	cancelPoll           context.CancelFunc
+	started              time.Time
 
 	// config for restart/rollback
 	virtualCfg *virtual_node.VirtualNodeConfig
@@ -35,15 +35,15 @@ type ChainContainer struct {
 func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) (uint64, error) {
 	chainID := rcfg.L2ChainID.Uint64()
 
-	// Start embedded op-node
+	// Start virtual op-node
 	userRPC, stopFn, err := virtual_node.StartVirtualNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg, s.log)
 	if err != nil {
 		return 0, err
 	}
 
 	container := &ChainContainer{
-		embeddedOpNodeUserRPC: userRPC,
-		stopEmbeddedOpNode:    stopFn,
+		virtualOpNodeUserRPC: userRPC,
+		stopVirtualOpNode:    stopFn,
 		virtualCfg: &virtual_node.VirtualNodeConfig{
 			L1RPC:        l1RPC,
 			BeaconAddr:   beaconAddr,
@@ -60,7 +60,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	// Open logs DB for chain
 	logsDB, err := s.openLogsDB(s.log, chainID, s.getDataDir())
 	if err != nil {
-		// Stop the embedded op-node before returning the error
+		// Stop the virtual op-node before returning the error
 		_ = stopFn(context.Background())
 		return 0, err
 	}
@@ -95,9 +95,9 @@ func (s *Supervisor) RemoveChain(chainID uint64) {
 		container.cancelPoll()
 		container.cancelPoll = nil
 	}
-	if container.stopEmbeddedOpNode != nil {
-		_ = container.stopEmbeddedOpNode(context.Background())
-		container.stopEmbeddedOpNode = nil
+	if container.stopVirtualOpNode != nil {
+		_ = container.stopVirtualOpNode(context.Background())
+		container.stopVirtualOpNode = nil
 	}
 	container.stateMu.Unlock()
 }
@@ -118,9 +118,9 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		container.cancelPoll()
 		container.cancelPoll = nil
 	}
-	if container.stopEmbeddedOpNode != nil {
+	if container.stopVirtualOpNode != nil {
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = container.stopEmbeddedOpNode(c)
+		_ = container.stopVirtualOpNode(c)
 		cancel()
 	}
 
@@ -145,13 +145,13 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 		return err
 	}
 
-	// Restart embedded op-node and polling
+	// Restart virtual op-node and polling
 	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg.L1RPC, container.virtualCfg.BeaconAddr, container.virtualCfg.L2AuthRPC, container.virtualCfg.JwtSecret, container.virtualCfg.Rcfg, s.log)
 	if err != nil {
 		return err
 	}
-	container.embeddedOpNodeUserRPC = userRPC
-	container.stopEmbeddedOpNode = stopFn2
+	container.virtualOpNodeUserRPC = userRPC
+	container.stopVirtualOpNode = stopFn2
 	//go s.startChainPolling(ctxPoll, h, roll, l2, chainID)
 	return nil
 }

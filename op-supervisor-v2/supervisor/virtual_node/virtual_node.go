@@ -39,8 +39,8 @@ type VirtualNodeConfig struct {
 	ConfirmDepth uint64
 }
 
-// StartVirtualNode starts an embedded op-node in-process with minimal configuration and returns the user-RPC URL
-// and a function to stop the embedded op-node. The node is configured as a sequencer with local RPCs and no external P2P.
+// StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
+// and a function to stop the virtual op-node. The node is configured as a sequencer with local RPCs and no external P2P.
 func StartVirtualNode(
 	l1RPC string,
 	beaconAddr string,
