@@ -51,6 +51,9 @@ type Supervisor struct {
 	// crossSafeHistory is the global cross-safe timestamp history (monotonic, non-decreasing)
 	crossSafeHistory []crossSafeMD
 
+	// crossSafeHistoryFile is the path to the file where crossSafeHistory is persisted
+	crossSafeHistoryFile string
+
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
@@ -104,6 +107,12 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	// initialize denylist under data dir by default
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+	// initialize cross-safe history file path
+	s.crossSafeHistoryFile = filepath.Join(s.dataDir, "crossSafeHistory.json")
+	// load existing cross-safe history if available
+	if err := s.loadCrossSafeHistory(); err != nil {
+		s.log.Warn("failed to load cross-safe history", "err", err)
+	}
 	go s.ProgressCrossSafe()
 	return s
 }
@@ -154,6 +163,9 @@ func (s *Supervisor) addCrossSafeEntry(entry crossSafeMD) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.crossSafeHistory = append(s.crossSafeHistory, entry)
+	if err := s.saveCrossSafeHistory(); err != nil {
+		s.log.Warn("failed to save cross-safe history", "err", err)
+	}
 }
 
 // setCrossSafeTimestamp sets the cross-safe history to a single entry with the given timestamp (for initialization)
@@ -161,6 +173,9 @@ func (s *Supervisor) setCrossSafeTimestamp(timestamp uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.crossSafeHistory = []crossSafeMD{{Timestamp: timestamp}}
+	if err := s.saveCrossSafeHistory(); err != nil {
+		s.log.Warn("failed to save cross-safe history", "err", err)
+	}
 }
 
 // pruneLatestCrossSafeEntry removes the latest entry from crossSafeHistory and returns the new latest timestamp
@@ -173,12 +188,74 @@ func (s *Supervisor) pruneLatestCrossSafeEntry() uint64 {
 	if len(s.crossSafeHistory) == 1 {
 		// If only one entry, clear the history
 		s.crossSafeHistory = nil
+		if err := s.saveCrossSafeHistory(); err != nil {
+			s.log.Warn("failed to save cross-safe history", "err", err)
+		}
 		return 0
 	}
 	// Remove the last entry
 	s.crossSafeHistory = s.crossSafeHistory[:len(s.crossSafeHistory)-1]
+	if err := s.saveCrossSafeHistory(); err != nil {
+		s.log.Warn("failed to save cross-safe history", "err", err)
+	}
 	// Return the new latest timestamp
 	return s.crossSafeHistory[len(s.crossSafeHistory)-1].Timestamp
+}
+
+// loadCrossSafeHistory loads the cross-safe history from the persistent file
+func (s *Supervisor) loadCrossSafeHistory() error {
+	if s.crossSafeHistoryFile == "" {
+		return nil // no file configured
+	}
+
+	data, err := os.ReadFile(s.crossSafeHistoryFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet, start with empty history
+			s.crossSafeHistory = nil
+			return nil
+		}
+		return fmt.Errorf("failed to read cross-safe history file: %w", err)
+	}
+
+	if len(data) == 0 {
+		// Empty file, start with empty history
+		s.crossSafeHistory = nil
+		return nil
+	}
+
+	var history []crossSafeMD
+	if err := json.Unmarshal(data, &history); err != nil {
+		return fmt.Errorf("failed to unmarshal cross-safe history: %w", err)
+	}
+
+	s.crossSafeHistory = history
+	s.log.Info("loaded cross-safe history from file", "entries", len(history), "file", s.crossSafeHistoryFile)
+	return nil
+}
+
+// saveCrossSafeHistory persists the current cross-safe history to file
+func (s *Supervisor) saveCrossSafeHistory() error {
+	if s.crossSafeHistoryFile == "" {
+		return nil // no file configured
+	}
+
+	// Ensure the directory exists
+	dir := filepath.Dir(s.crossSafeHistoryFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory for cross-safe history file: %w", err)
+	}
+
+	data, err := json.Marshal(s.crossSafeHistory)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cross-safe history: %w", err)
+	}
+
+	if err := os.WriteFile(s.crossSafeHistoryFile, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write cross-safe history file: %w", err)
+	}
+
+	return nil
 }
 
 // pruneContainersToTimestamp prunes all containers back to the specified timestamp
@@ -251,6 +328,13 @@ func (s *Supervisor) ProgressCrossSafe() {
 
 		// Step 2: compute candidate timestamp
 		ts := s.computeCandidateTimestamp()
+
+		// Step 2.5: if the candidate timestamp is already recorded, skip this iteration
+		if s.getCurrentCrossSafeTimestamp() == ts {
+			s.log.Info("xsafe: candidate timestamp already recorded, skipping")
+			time.Sleep(tick)
+			continue
+		}
 
 		// Step 3: obtain L1<>L2 block pairs that meet or precede ts
 		pairs, err := s.getBlocksAtTimestamp(ctx, activeChains, ts)
@@ -789,6 +873,11 @@ func (s *Supervisor) SetDataDir(dir string) {
 	}
 	s.dataDir = dir
 	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+	s.crossSafeHistoryFile = filepath.Join(s.dataDir, "crossSafeHistory.json")
+	// load existing cross-safe history from new location if available
+	if err := s.loadCrossSafeHistory(); err != nil {
+		s.log.Warn("failed to load cross-safe history after SetDataDir", "err", err)
+	}
 }
 
 func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
