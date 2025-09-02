@@ -12,8 +12,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 )
 
-// ChainHandle tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
-type ChainHandle struct {
+// ChainContainer tracks the per-chain state (embedded op-node lifecycle, DBs, and pollers).
+type ChainContainer struct {
 	stateMu sync.Mutex
 
 	// runtime state
@@ -31,7 +31,7 @@ type ChainHandle struct {
 }
 
 // AddChain starts a chainHandler with virtual node for the given rollup config and RPCs.
-// Returns the L2 chain ID as the handle key.
+// Returns the L2 chain ID as the container key.
 func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) (uint64, error) {
 	chainID := rcfg.L2ChainID.Uint64()
 
@@ -41,7 +41,7 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		return 0, err
 	}
 
-	h := &ChainHandle{
+	container := &ChainContainer{
 		embeddedOpNodeUserRPC: userRPC,
 		stopEmbeddedOpNode:    stopFn,
 		virtualCfg: &virtual_node.VirtualNodeConfig{
@@ -64,15 +64,15 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		_ = stopFn(context.Background())
 		return 0, err
 	}
-	h.logsDB = logsDB
+	container.logsDB = logsDB
 
-	// Register handle
+	// Register container
 	s.MarkChainActive(eth.ChainIDFromUInt64(chainID))
 	s.mu.Lock()
 	if s.chains == nil {
-		s.chains = make(map[uint64]*ChainHandle)
+		s.chains = make(map[uint64]*ChainContainer)
 	}
-	s.chains[chainID] = h
+	s.chains[chainID] = container
 	s.mu.Unlock()
 
 	return chainID, nil
@@ -84,74 +84,74 @@ func (s *Supervisor) getCrossFinalized() uint64 { return s.crossFinalizedFromDBO
 // RemoveChain stops and unregisters a chain by ID.
 func (s *Supervisor) RemoveChain(chainID uint64) {
 	s.mu.Lock()
-	h := s.chains[chainID]
+	container := s.chains[chainID]
 	delete(s.chains, chainID)
 	s.mu.Unlock()
-	if h == nil {
+	if container == nil {
 		return
 	}
-	h.stateMu.Lock()
-	if h.cancelPoll != nil {
-		h.cancelPoll()
-		h.cancelPoll = nil
+	container.stateMu.Lock()
+	if container.cancelPoll != nil {
+		container.cancelPoll()
+		container.cancelPoll = nil
 	}
-	if h.stopEmbeddedOpNode != nil {
-		_ = h.stopEmbeddedOpNode(context.Background())
-		h.stopEmbeddedOpNode = nil
+	if container.stopEmbeddedOpNode != nil {
+		_ = container.stopEmbeddedOpNode(context.Background())
+		container.stopEmbeddedOpNode = nil
 	}
-	h.stateMu.Unlock()
+	container.stateMu.Unlock()
 }
 
 // RollbackChain rolls a specific chain back to an absolute block number.
 func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock uint64) error {
 	s.mu.Lock()
-	h := s.chains[chainID]
+	container := s.chains[chainID]
 	s.mu.Unlock()
-	if h == nil || h.virtualCfg == nil {
+	if container == nil || container.virtualCfg == nil {
 		return nil
 	}
-	h.stateMu.Lock()
-	defer h.stateMu.Unlock()
+	container.stateMu.Lock()
+	defer container.stateMu.Unlock()
 
 	// Stop polling and op-node
-	if h.cancelPoll != nil {
-		h.cancelPoll()
-		h.cancelPoll = nil
+	if container.cancelPoll != nil {
+		container.cancelPoll()
+		container.cancelPoll = nil
 	}
-	if h.stopEmbeddedOpNode != nil {
+	if container.stopEmbeddedOpNode != nil {
 		c, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = h.stopEmbeddedOpNode(c)
+		_ = container.stopEmbeddedOpNode(c)
 		cancel()
 	}
 
 	// Attempt to record the soon-to-be-invalidated block (toBlock+1) in the denylist
-	if h.logsDB != nil && s.denylist != nil {
+	if container.logsDB != nil && s.denylist != nil {
 		invalidNum := toBlock + 1
-		if ref, _, _, err := h.logsDB.OpenBlock(invalidNum); err == nil {
+		if ref, _, _, err := container.logsDB.OpenBlock(invalidNum); err == nil {
 			_ = s.denylist.Add(chainID, ref.Hash.Hex())
 		}
 	}
 
 	// Roll back logsDB to the target block number
-	if h.logsDB != nil {
-		if ref, _, _, openErr := h.logsDB.OpenBlock(toBlock); openErr == nil {
+	if container.logsDB != nil {
+		if ref, _, _, openErr := container.logsDB.OpenBlock(toBlock); openErr == nil {
 			inv := reads.NewRegistry(s.log)
-			_ = h.logsDB.Rewind(inv, ref.ID())
+			_ = container.logsDB.Rewind(inv, ref.ID())
 		}
 	}
 
 	// Roll back EL head to the absolute target via pluggable implementation
-	if err := rollbackEL(ctx, h.virtualCfg.L2UserRPC, toBlock); err != nil {
+	if err := rollbackEL(ctx, container.virtualCfg.L2UserRPC, toBlock); err != nil {
 		return err
 	}
 
 	// Restart embedded op-node and polling
-	userRPC, stopFn2, err := virtual_node.StartVirtualNode(h.virtualCfg.L1RPC, h.virtualCfg.BeaconAddr, h.virtualCfg.L2AuthRPC, h.virtualCfg.JwtSecret, h.virtualCfg.Rcfg, s.log)
+	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg.L1RPC, container.virtualCfg.BeaconAddr, container.virtualCfg.L2AuthRPC, container.virtualCfg.JwtSecret, container.virtualCfg.Rcfg, s.log)
 	if err != nil {
 		return err
 	}
-	h.embeddedOpNodeUserRPC = userRPC
-	h.stopEmbeddedOpNode = stopFn2
+	container.embeddedOpNodeUserRPC = userRPC
+	container.stopEmbeddedOpNode = stopFn2
 	//go s.startChainPolling(ctxPoll, h, roll, l2, chainID)
 	return nil
 }

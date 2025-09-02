@@ -109,8 +109,8 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 	})
 }
 
-// resolveChainFromQuery parses chainId and returns the chain handle, replying with errors if invalid.
-func (s *Supervisor) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *ChainHandle) {
+// resolveChainFromQuery parses chainId and returns the chain container, replying with errors if invalid.
+func (s *Supervisor) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *ChainContainer) {
 	q := r.URL.Query()
 	var chainID uint64
 	if cidStr := q.Get("chainId"); cidStr != "" {

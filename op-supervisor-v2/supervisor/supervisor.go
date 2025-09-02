@@ -35,7 +35,7 @@ type Supervisor struct {
 	// denylist
 	denylist *DenylistStore
 
-	chains         map[uint64]*ChainHandle
+	chains         map[uint64]*ChainContainer
 	activeChainsMu sync.Mutex
 	activeChains   map[eth.ChainID]struct{}
 
@@ -53,10 +53,10 @@ type Supervisor struct {
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
 }
 
-// chainRef is a lightweight pair of chain ID and handle used to avoid repeated global lookups
+// chainRef is a lightweight pair of chain ID and container used to avoid repeated global lookups
 type chainRef struct {
-	id uint64
-	h  *ChainHandle
+	id        uint64
+	container *ChainContainer
 }
 
 // defaultScopeLabel returns the default L1 scope label
@@ -151,9 +151,9 @@ func (s *Supervisor) ProgressCrossSafe() {
 		for _, id := range activeChains {
 			if v, ok := id.Uint64(); ok {
 				s.mu.Lock()
-				h := s.chains[v]
+				container := s.chains[v]
 				s.mu.Unlock()
-				refs = append(refs, chainRef{id: v, h: h})
+				refs = append(refs, chainRef{id: v, container: container})
 			}
 		}
 
@@ -255,9 +255,9 @@ func (s *Supervisor) getL1ScopeLabel() eth.BlockLabel {
 func (s *Supervisor) Stop() {
 	// Stop all chains
 	s.mu.Lock()
-	chains := make(map[uint64]*ChainHandle)
-	for id, h := range s.chains {
-		chains[id] = h
+	chains := make(map[uint64]*ChainContainer)
+	for id, container := range s.chains {
+		chains[id] = container
 	}
 	s.mu.Unlock()
 
@@ -473,9 +473,9 @@ func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
 func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/sync_status", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
-		chains := make(map[uint64]*ChainHandle, len(s.chains))
-		for id, h := range s.chains {
-			chains[id] = h
+		chains := make(map[uint64]*ChainContainer, len(s.chains))
+		for id, container := range s.chains {
+			chains[id] = container
 		}
 		s.mu.Unlock()
 
@@ -485,10 +485,10 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 		var minL1 eth.L1BlockRef
 
 		ctx := r.Context()
-		for id, h := range chains {
+		for id, container := range chains {
 			var st *eth.SyncStatus
-			if h != nil && h.embeddedOpNodeUserRPC != "" {
-				if ss, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC); err == nil && ss != nil {
+			if container != nil && container.embeddedOpNodeUserRPC != "" {
+				if ss, err := s.fetchSyncStatus(ctx, container.embeddedOpNodeUserRPC); err == nil && ss != nil {
 					st = ss
 				}
 			}
@@ -508,8 +508,8 @@ func (s *Supervisor) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 			s.mu.Lock()
 			ts := s.crossSafeTimestamp
 			s.mu.Unlock()
-			if ts > 0 && h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
-				if num, err := h.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
+			if ts > 0 && container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil {
+				if num, err := container.virtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
 					crossID.Number = num
 					finalizedID = crossID
 				}
@@ -583,9 +583,9 @@ func (s *Supervisor) xsafeSnapshotActiveChains() []eth.ChainID {
 func (s *Supervisor) getMinGenesisTimestamp(refs []chainRef) uint64 {
 	var minGenesis uint64
 	for _, r := range refs {
-		h := r.h
-		if h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil {
-			gts := h.virtualCfg.Rcfg.Genesis.L2Time
+		container := r.container
+		if container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil {
+			gts := container.virtualCfg.Rcfg.Genesis.L2Time
 			if minGenesis == 0 || gts < minGenesis {
 				minGenesis = gts
 			}
@@ -619,18 +619,18 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 	var l1 *sources.L1Client
 	for _, r := range refs {
 		v := r.id
-		h := r.h
-		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.embeddedOpNodeUserRPC == "" {
-			return nil, fmt.Errorf("missing handle/config/opnode for chain %d", v)
+		container := r.container
+		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.embeddedOpNodeUserRPC == "" {
+			return nil, fmt.Errorf("missing container/config/opnode for chain %d", v)
 		}
 		// Compute expected L2 block number at ts (floor)
-		rcfg := h.virtualCfg.Rcfg
+		rcfg := container.virtualCfg.Rcfg
 		targetNum, err := blockAtTimestampFromConfig(rcfg, ts)
 		if err != nil {
 			return nil, fmt.Errorf("chain %d: compute target num: %w", v, err)
 		}
 		// Gate: SafeL2 must be at or beyond targetNum
-		st, err := s.fetchSyncStatus(ctx, h.embeddedOpNodeUserRPC)
+		st, err := s.fetchSyncStatus(ctx, container.embeddedOpNodeUserRPC)
 		if err != nil || st == nil {
 			return nil, fmt.Errorf("chain %d: fetch sync status: %w", v, err)
 		}
@@ -639,8 +639,8 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, refs []chainRef, 
 		}
 		s.log.Info("xsafe: gate ok", "chain", v, "safe_num", st.SafeL2.Number, "need_num", targetNum)
 		// Ensure clients
-		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
-		l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
+		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
+		l2Cli, err := opclient.NewRPC(ctx, s.log, container.virtualCfg.L2UserRPC)
 		if err != nil {
 			return nil, fmt.Errorf("chain %d: dial L2: %w", v, err)
 		}
@@ -679,9 +679,9 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 	var l1 *sources.L1Client
 	for _, r := range refs {
 		v := r.id
-		h := r.h
-		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "h", h)
-		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil {
+		container := r.container
+		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "container", container)
+		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			continue
 		}
 		targetPair, ok := pairs[v]
@@ -690,18 +690,18 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 			continue
 		}
 		targetNum := targetPair.Derived.Number
-		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
 			s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
 			if blk.Number >= targetNum {
 				// Already at or past target; skip
 				continue
 			}
 		}
-		rcfg := h.virtualCfg.Rcfg
+		rcfg := container.virtualCfg.Rcfg
 		s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
 
 		// Ensure L1 client
-		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, h.virtualCfg.L1RPC, rcfg)
+		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
 		if l1 == nil {
 			s.log.Info("xsafe: missing L1 client", "chain", v)
 			ready = false
@@ -709,7 +709,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 		}
 
 		// Build L2 client (EL user RPC)
-		l2Cli, err := opclient.NewRPC(ctx, s.log, h.virtualCfg.L2UserRPC)
+		l2Cli, err := opclient.NewRPC(ctx, s.log, container.virtualCfg.L2UserRPC)
 		if err != nil {
 			ready = false
 			break
@@ -723,20 +723,20 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, refs []chainRef, pai
 
 		// Determine ingest start
 		start := targetNum
-		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
 			start = blk.Number + 1
 			if start > targetNum {
 				start = targetNum
 			}
 		}
 		s.log.Info("xsafe: ingest range", "chain", v, "start", start, "end", targetNum)
-		if err := ingestRange(ctx, l2, h.logsDB, start, targetNum); err != nil {
+		if err := ingestRange(ctx, l2, container.logsDB, start, targetNum); err != nil {
 			s.log.Info("xsafe: ingest failed", "chain", v, "err", err)
 			l2Cli.Close()
 			ready = false
 			break
 		}
-		if blk, ok := h.logsDB.LatestSealedBlock(); ok {
+		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
 			s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
 		}
 		l2Cli.Close()
@@ -750,18 +750,18 @@ func (s *Supervisor) getExecutingMessages(refs []chainRef, ts uint64) map[uint64
 	s.log.Info("xsafe: getExecutingMessages", "refs", refs, "ts", ts)
 	for _, r := range refs {
 		v := r.id
-		h := r.h
-		if h == nil || h.virtualCfg == nil || h.virtualCfg.Rcfg == nil || h.logsDB == nil {
+		container := r.container
+		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			s.log.Info("xsafe: validation skip (missing cfg/db)", "chain", v)
 			continue
 		}
-		rcfg := h.virtualCfg.Rcfg
+		rcfg := container.virtualCfg.Rcfg
 		targetNum, err := rcfg.TargetBlockNumber(ts)
 		if err != nil {
 			s.log.Info("xsafe: validation target before genesis", "chain", v, "ts", ts)
 			continue
 		}
-		_, logcount, execMsgs, err := h.logsDB.OpenBlock(targetNum)
+		_, logcount, execMsgs, err := container.logsDB.OpenBlock(targetNum)
 		s.log.Info("xsafe: getExecutingMessages", "chain", v, "logcount", logcount, "execMsgs", execMsgs)
 		if err != nil {
 			s.log.Info("xsafe: validation open block failed", "chain", v, "block", targetNum, "err", err)
@@ -786,10 +786,10 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 	allValid := true
 	invalidCount := 0
 	totalCount := 0
-	// quick lookup of handles by chain id
-	refByID := make(map[uint64]*ChainHandle, len(refs))
+	// quick lookup of containers by chain id
+	refByID := make(map[uint64]*ChainContainer, len(refs))
 	for _, r := range refs {
-		refByID[r.id] = r.h
+		refByID[r.id] = r.container
 	}
 	// avoid duplicate rollbacks per chain in a single step
 	rolledBack := make(map[uint64]bool)
@@ -803,24 +803,24 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, refs []chain
 			totalCount++
 			if initCID, ok := msg.ChainID.Uint64(); ok {
 				s.mu.Lock()
-				initH := s.chains[initCID]
+				initContainer := s.chains[initCID]
 				s.mu.Unlock()
-				if initH == nil || initH.logsDB == nil {
+				if initContainer == nil || initContainer.logsDB == nil {
 					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
 					allValid = false
 					invalidCount++
 					continue
 				}
 				query := types.ContainsQuery{BlockNum: msg.BlockNum, LogIdx: msg.LogIdx, Timestamp: msg.Timestamp, Checksum: msg.Checksum}
-				if _, err := initH.logsDB.Contains(query); err != nil {
+				if _, err := initContainer.logsDB.Contains(query); err != nil {
 					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
 					allValid = false
 					invalidCount++
 					// Side-effects: mark denylist and rollback the executing chain before the block at this ts
 					if !rolledBack[v] {
-						if h := refByID[v]; h != nil && h.virtualCfg != nil && h.virtualCfg.Rcfg != nil && h.logsDB != nil {
-							if targetNum, terr := h.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
-								if ref, _, _, oerr := h.logsDB.OpenBlock(targetNum); oerr == nil {
+						if container := refByID[v]; container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil && container.logsDB != nil {
+							if targetNum, terr := container.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
+								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
 										_ = s.denylist.Add(v, ref.Hash.Hex())
 										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
