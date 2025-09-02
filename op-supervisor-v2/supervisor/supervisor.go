@@ -211,8 +211,9 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 		// Step 0.5: Check L1 consistency with latest cross-safe entry
 		if latest := s.getLatestCrossSafe(); latest != nil {
-			// Check if the L1 block from the latest cross-safe entry is still valid
-			if len(activeChains) > 0 {
+			// Only perform L1 consistency check if the L1Block is initialized (not zero value)
+			// Skip check for entries created during initialization that don't have L1Block data yet
+			if latest.L1Block.Number > 0 && len(activeChains) > 0 {
 				// Get first active chain for L1 client setup
 				var firstChainID uint64
 				for _, id := range activeChains {
@@ -260,6 +261,8 @@ func (s *Supervisor) ProgressCrossSafe() {
 						}
 					}
 				}
+			} else if latest.L1Block.Number == 0 {
+				s.log.Info("xsafe: skipping L1 consistency check for uninitialized L1Block")
 			}
 		}
 
