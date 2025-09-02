@@ -11,7 +11,20 @@
 - Extend virtual_node.StartVirtualNode to accept user RPC listen address/port.
 - Extend ChainContainer to store the chosen userRPCPort and expose it via /status.
 - Keep reverse proxy available (behind a flag); default off in Kurtosis.
-- Refactor CLI to op-node style lifecycle: a minimal main delegates to `SupervisorMain(ctx, closeApp)` returning `cliapp.Lifecycle`, enabling in-process sysgo tests to invoke startup/shutdown cleanly.
+- Adopt the op-node style, cycle-safe CLI structure: keep `SupervisorMain(ctx, closeApp) (cliapp.Lifecycle, error)` in `cmd/main.go` (like `op-node`). The library exposes `NewConfig(...)` and a `New(...)` constructor that returns a `cliapp.Lifecycle`. Sysgo imports the library and calls the constructor directly, avoiding any dependency on `cmd` and thus avoiding circular dependencies.
+
+## Package layout (op-node style, cycle-safe)
+- `op-supervisor-v2/` (library)
+  - `service.go`: exports `NewConfig(ctx, log)` and `New(ctx context.Context, cfg, log, version, metrics) (cliapp.Lifecycle, error)` similar to `op-node/service.go` + `op-node/node.New` pattern.
+  - `flags/`: CLI flag definitions (mirrors `op-node/flags`).
+  - `supervisor/...`: runtime logic (virtual node, chain orchestrator, status, etc.).
+- `op-supervisor-v2/cmd/main.go` (binary)
+  - Minimal wrapper: sets up logging/version, `app.Flags = cliapp.ProtectFlags(flags.Flags)`, `app.Action = cliapp.LifecycleCmd(SupervisorMain)` and defines `SupervisorMain(ctx, closeApp)` which uses the library `NewConfig(...)` and `New(...)` to build the lifecycle, mirroring `op-node/cmd/main.go:RollupNodeMain`.
+
+Dependency flow (no cycles):
+`sysgo tests -> op-supervisor-v2 (service, flags, supervisor)`
+`cmd/main.go -> op-supervisor-v2`
+There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
 
 ## Config shape (example)
 {
@@ -46,22 +59,39 @@
 }
 
 ## Code changes
-1) op-supervisor-v2/cmd/main.go
-- Refactor to op-node lifecycle pattern: define `SupervisorMain(ctx *cli.Context, closeApp context.CancelCauseFunc) (cliapp.Lifecycle, error)`. Keep `main()` minimal: set up logging defaults, wire flags, and `cliapp.LifecycleCmd(SupervisorMain)`.
-- Parse user_rpc_port and interop_mempool_filtering per chain; pass into AddChain/VirtualNodeConfig.
+1) op-supervisor-v2/service.go (new)
+- Implement `NewConfig(ctx, log)` in the library (like `op-node/service.go:NewConfig`).
+- Implement `New(ctx context.Context, cfg, log, version, metrics) (cliapp.Lifecycle, error)` that constructs and returns the lifecycle instance.
+- Parse `user_rpc_port` and `interop_mempool_filtering` per chain; pass into AddChain/VirtualNodeConfig.
 
-2) supervisor/virtual_node/virtual_node.go
+2) op-supervisor-v2/cmd/main.go
+- Minimal main: logging defaults, version, `app.Flags = cliapp.ProtectFlags(flags.Flags)`, `app.Action = cliapp.LifecycleCmd(SupervisorMain)`; define `SupervisorMain(ctx, closeApp)` that wires logging/metrics, calls `service.NewConfig(...)`, sets `cfg.Cancel = closeApp`, and returns `service.New(...)`.
+
+3) supervisor/virtual_node/virtual_node.go
 - Add `StartVirtualNode(..., userRPCListenAddr, userRPCPort, interopMempoolFiltering)`.
 - Set nodeCfg.RPC.ListenAddr/ListenPort to requested values (default 127.0.0.1:0 today).
 - If interopMempoolFiltering is true, set the op-node config accordingly (mirror ethCfg.InteropMempoolFiltering wiring in tests or add a temporary flag until upstream exposes it).
 
-3) supervisor/chain_orchestrator.go
+4) supervisor/chain_orchestrator.go
 - Extend VirtualNodeConfig to include UserRPCListenAddr, UserRPCPort, InteropMempoolFiltering.
 - Capture selected port in ChainContainer.virtualOpNodeUserRPC as http://<addr>:<port>.
 - Include chosen port in /status.
 
-4) Reverse proxy
+5) Reverse proxy
 - Keep proxy; default proxy.opnode=false for Kurtosis.
+
+## Sysgo integration (in-process, no cycles)
+- Sysgo imports the library package, not the `cmd` package.
+- Example harness sketch (no `urfave/cli` dependency in tests):
+```go
+// in op-devstack/sysgo/sv2_kurtosis_features_test.go
+cfg, err := service.NewConfigFromStruct(testCfg) // or build via helper that doesn't use cli.Context
+require.NoError(t, err)
+lc, err := service.New(ctx, cfg, log, version, metrics)
+require.NoError(t, err)
+require.NoError(t, lc.Start(ctx))
+t.Cleanup(func() { _ = lc.Close(ctx) })
+```
 
 ## Kurtosis wiring
 - One SV2 service; per chain only EL (no standalone op-node).
@@ -73,9 +103,9 @@
 - Port conflicts: fail fast with clear logs.
 
 ## Milestones
-- Milestone 1: Lifecycle refactor + sysgo testing setup
-  - [ ] Refactor CLI to lifecycle pattern (SupervisorMain + cliapp.LifecycleCmd)
-  - [ ] Add in-process sysgo harness to invoke SupervisorMain with two chains
+- Milestone 1: Library constructor + minimal main + sysgo harness
+  - [ ] Keep `SupervisorMain` in `cmd/main.go`; implement `NewConfig` and `New(...)` in library
+  - [ ] Add in-process sysgo harness that imports the library (no `cmd` import)
   - Testing:
     - [ ] Sysgo: /healthz and /status healthy with two chains (no config changes yet)
 - Milestone 2: Config plumbing (user_rpc_port, interop_mempool_filtering)
