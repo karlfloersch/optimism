@@ -73,42 +73,38 @@
 - Port conflicts: fail fast with clear logs.
 
 ## Milestones
-- Milestone 1: Lifecycle refactor + config plumbing
+- Milestone 1: Lifecycle refactor + sysgo testing setup
   - [ ] Refactor CLI to lifecycle pattern (SupervisorMain + cliapp.LifecycleCmd)
-  - [ ] Extend JSON schema: user_rpc_port, interop_mempool_filtering
-  - [ ] Parse and validate in CLI; wire into AddChain/VirtualNodeConfig
+  - [ ] Add in-process sysgo harness to invoke SupervisorMain with two chains
   - Testing:
-    - [ ] Sysgo (in-process): invoke SupervisorMain with two chains; wait for /healthz, validate /status
-- Milestone 2: Virtual node port binding
-  - [ ] Update StartVirtualNode to bind fixed addr/port
-  - [ ] Return effective user RPC URL; store in ChainContainer
-  - [ ] Expose per-chain RPC in /status
+    - [ ] Sysgo: /healthz and /status healthy with two chains (no config changes yet)
+- Milestone 2: Config plumbing (user_rpc_port, interop_mempool_filtering)
+  - [ ] Extend JSON schema and flags as needed (no dummies)
+  - [ ] Wire fields end-to-end (CLI → AddChain/VirtualNodeConfig → StartVirtualNode)
   - Testing:
-    - [ ] Sysgo: two chains bind two distinct ports; TCP connect succeeds on both; /status shows exact URLs
-    - [ ] Sysgo: simple JSON-RPC (e.g., eth_blockNumber) succeeds on each port
+    - [ ] Sysgo: two distinct ports bound; /status + JSON-RPC checks
 - Milestone 3: Interop mempool filtering
-  - [ ] Add flag to VirtualNodeConfig
-  - [ ] Apply to op-node config; add tests
+  - [ ] Apply to embedded op-node config where applicable
   - Testing:
-    - [ ] Sysgo: enable flag; exercise path by sending interop-relevant txs and verifying expected behavior (no mocks)
-- Milestone 4: Proxy behavior
-  - [ ] Keep reverse proxy behind flag; default off in Kurtosis
-  - [ ] Test both direct and proxied paths
+    - [ ] Sysgo: enable flag; exercise path with relevant txs
+- Milestone 4: Cross-safe persistence
+  - [ ] Add cross_db config/flag and default under sv2_data_dir
+  - [ ] Implement atomic load/save of cross-safe timestamp and metadata
   - Testing:
-    - [ ] Sysgo: proxy disabled → proxy endpoints 503; enabled → parity with direct endpoints for basic methods
+    - [ ] Sysgo: advance, restart restore; rollback persists; corrupt DB recovers
 - Milestone 5: Kurtosis integration
   - [ ] Add SV2 service with multi-chain config template
   - [ ] Only EL per chain; remove standalone op-node
   - [ ] Point batchers/proposers to per-chain SV2 ports
   - Testing:
-    - [ ] Sysgo/Kurtosis: bring up devnet; SV2 health OK; /status shows both chains
-    - [ ] Sysgo/Kurtosis: batchers post via direct ports; safe advances on both chains
-    - [ ] Sysgo/Kurtosis: rollback admin endpoint works with fixed ports
+    - [ ] Sysgo/Kurtosis: health, safe advancement, rollback behavior
 - Milestone 6: Docs and examples
   - [ ] Document config fields and endpoints
   - [ ] Example Kurtosis YAML snippet and env vars
   - Testing:
-    - [ ] Sysgo smoke: minimal script validates example config runs to healthy state
+    - [ ] Sysgo smoke: example config reaches healthy state
+
+Note: We will not land milestones with placeholder or dummy values routed through functions; each milestone completes its wiring fully before moving on.
 
 ## Test implementation location
 - Prefer sysgo-based tests alongside existing SV2 tests.
