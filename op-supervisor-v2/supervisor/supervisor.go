@@ -302,16 +302,7 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			opNodeUser := h.embeddedOpNodeUserRPC
 			var localSafe, crossSafe any
 			var unsafeHead, safeHead, finalizedHead any
-			if h.localDB != nil {
-				if ls, err := h.localDB.Last(); err == nil {
-					localSafe = ls.Derived
-				}
-			}
-			if h.crossDB != nil {
-				if cs, err := h.crossDB.Last(); err == nil {
-					crossSafe = cs.Derived
-				}
-			}
+			// v2 Note: localDB and crossDB removed - these fields remain nil for API compatibility
 			// Also include current op-node heads (best-effort) for observability
 			if opNodeUser != "" {
 				if cli, err := opclient.NewRPC(r.Context(), s.log, opNodeUser, opclient.WithLazyDial()); err == nil {
@@ -472,38 +463,10 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	return mux
 }
 
-// crossFinalizedFromDBOrFallback returns the minimum cross-safe height across chains,
-// derived from the per-chain cross DB heads if available. Falls back to the in-memory
-// computed value when DBs are not open yet.
+// crossFinalizedFromDBOrFallback returns 0 since cross DBs were removed in v2.
+// Kept for API compatibility.
 func (s *Supervisor) crossFinalizedFromDBOrFallback() uint64 {
-	s.mu.Lock()
-	chains := make(map[uint64]*ChainHandle, len(s.chains))
-	for id, h := range s.chains {
-		chains[id] = h
-	}
-	s.mu.Unlock()
-	var min uint64
-	for _, h := range chains {
-		if h == nil {
-			continue
-		}
-		h.stateMu.Lock()
-		cross := h.crossDB
-		h.stateMu.Unlock()
-		if cross == nil {
-			continue
-		}
-		if pair, err := cross.Last(); err == nil {
-			num := pair.Derived.Number
-			if num != 0 && (min == 0 || num < min) {
-				min = num
-			}
-		}
-	}
-	if min != 0 {
-		return min
-	}
-	return 0 // Return 0 as crossFinalized is removed.
+	return 0
 }
 
 // addV1SyncStatusEndpoint registers GET /v1/sync_status returning eth.SupervisorSyncStatus and 503 until ready.

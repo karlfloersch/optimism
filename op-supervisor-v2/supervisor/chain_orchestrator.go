@@ -8,7 +8,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
-	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 )
@@ -27,9 +26,8 @@ type ChainHandle struct {
 	virtualCfg *virtual_node.VirtualNodeConfig
 
 	// v1 DBs per chain
-	logsDB  *logsdb.DB
-	localDB *fromda.DB
-	crossDB *fromda.DB
+	logsDB *logsdb.DB
+	// Note: localDB and crossDB removed in v2 - they were never written to and always returned empty data
 }
 
 // AddChain starts a chainHandler with virtual node for the given rollup config and RPCs.
@@ -59,17 +57,14 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 		started: time.Now(),
 	}
 
-	// Open per-chain DBs (logs/local/cross).
-	// Note: local/cross DBs are opened for v1 API compatibility but are not actively written to in v2.
-	logsDB, localDB, crossDB, err := s.openChainDBs(s.log, chainID, s.getDataDir())
+	// Open logs DB for chain
+	logsDB, err := s.openLogsDB(s.log, chainID, s.getDataDir())
 	if err != nil {
 		// Stop the embedded op-node before returning the error
 		_ = stopFn(context.Background())
 		return 0, err
 	}
 	h.logsDB = logsDB
-	h.localDB = localDB
-	h.crossDB = crossDB
 
 	// Register handle
 	s.MarkChainActive(eth.ChainIDFromUInt64(chainID))

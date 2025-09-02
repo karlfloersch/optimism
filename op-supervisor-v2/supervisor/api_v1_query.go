@@ -7,7 +7,6 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
-	"github.com/ethereum/go-ethereum/common"
 )
 
 // addV1QueryEndpoints registers lightweight HTTP endpoints that mirror a subset of v1 supervisor query APIs.
@@ -19,14 +18,8 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 		if h == nil {
 			return
 		}
+		// v2 Note: localDB was removed - always return empty result for API compatibility
 		var out types.DerivedIDPair
-		h.stateMu.Lock()
-		if h.localDB != nil {
-			if pair, err := h.localDB.Last(); err == nil {
-				out = pair.IDs()
-			}
-		}
-		h.stateMu.Unlock()
 		_ = json.NewEncoder(w).Encode(out)
 	})
 
@@ -102,14 +95,8 @@ func (s *Supervisor) addV1QueryEndpoints(mux *http.ServeMux) {
 			http.Error(w, "bad derived", http.StatusBadRequest)
 			return
 		}
+		// v2 Note: crossDB was removed - always return empty result for API compatibility
 		var out eth.BlockRef
-		h.stateMu.Lock()
-		if h.crossDB != nil {
-			if seal, err := h.crossDB.DerivedToFirstSource(eth.BlockID{Number: derivedNum, Hash: common.Hash{}}, types.RevisionAny); err == nil {
-				out = seal.WithZeroParent()
-			}
-		}
-		h.stateMu.Unlock()
 		_ = json.NewEncoder(w).Encode(out)
 	})
 

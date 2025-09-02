@@ -11,35 +11,24 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
-	fromda "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/fromda"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/processors"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// openChainDBs initializes the v1 DBs for a chain.
-func (s *Supervisor) openChainDBs(logger log.Logger, chainID uint64, dataDir string) (*logsdb.DB, *fromda.DB, *fromda.DB, error) {
+// openLogsDB initializes the logs DB for a chain.
+func (s *Supervisor) openLogsDB(logger log.Logger, chainID uint64, dataDir string) (*logsdb.DB, error) {
 	// Ensure base directory exists
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	logsPath := fmt.Sprintf("%s/logs-%d", dataDir, chainID)
-	localPath := fmt.Sprintf("%s/local-%d", dataDir, chainID)
-	crossPath := fmt.Sprintf("%s/cross-%d", dataDir, chainID)
 	// Use no-op metrics for now; can be replaced with real metrics later.
 	logDB, err := logsdb.NewFromFile(logger, logsMetricsNoop{}, eth.ChainIDFromUInt64(chainID), logsPath, true)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	localDB, err := fromda.NewFromFile(logger.New("db", "local"), fromda.AdaptMetrics(chainMetricsNoop{}, "local_derived"), localPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	crossDB, err := fromda.NewFromFile(logger.New("db", "cross"), fromda.AdaptMetrics(chainMetricsNoop{}, "cross_derived"), crossPath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return logDB, localDB, crossDB, nil
+	return logDB, nil
 }
 
 // ingestRange fetches payload, receipts and appends logs for [start,end] (inclusive).
