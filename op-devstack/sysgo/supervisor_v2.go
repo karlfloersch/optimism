@@ -3,9 +3,13 @@ package sysgo
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -108,27 +112,20 @@ func (s *SupervisorV2) HTTP() string { return s.httpURL }
 func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lc == nil {
-		_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
-		port := 0
-		if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
-			if n, err := strconv.Atoi(p); err == nil {
-				port = n
-			}
-		}
-		cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR")}
-		lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
-		s.p.Require().NoError(err)
-		s.p.Require().NoError(lc.Start(s.p.Ctx()))
-		if addr, ok := service.HTTPAddr(lc); ok {
-			s.httpURL = "http://" + addr
-		}
-		s.lc = lc
-		fmt.Printf("[sv2] http: %s\n", s.HTTP())
+	if s.lc != nil {
+		return
 	}
-	// Export SV2 URL for op-node denylist integration in tests
-	_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
-
+	_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
+	port := 0
+	if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			port = n
+		}
+	}
+	// Build multi-chain config file with a single chain
+	dir, err := os.MkdirTemp("", "sv2cfg-")
+	s.p.Require().NoError(err)
+	s.p.Cleanup(func() { _ = os.RemoveAll(dir) })
 	// Read JWT secret from geth jwt file written earlier
 	jwtHex, err := os.ReadFile(l2EL.jwtPath)
 	s.p.Require().NoError(err)
@@ -136,8 +133,6 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	b, err := hex.DecodeString(string(jwtHex)[2:])
 	s.p.Require().NoError(err)
 	copy(jwtSecret[:], b)
-
-	// Register the chain in multi-chain mode; this starts the embedded op-node and the finalized runner
 	beaconAddr := ""
 	if l1CL.beacon != nil {
 		beaconAddr = l1CL.beacon.BeaconAddr()
@@ -150,6 +145,42 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 			depth = n
 		}
 	}
+	// Write rollup config to temp file
+	rollupPath := filepath.Join(dir, "rollup.json")
+	{
+		data, err := json.MarshalIndent(l2EL.l2Net.rollupCfg, "", "  ")
+		s.p.Require().NoError(err)
+		s.p.Require().NoError(os.WriteFile(rollupPath, data, 0o644))
+	}
+	// Write sv2 config file
+	sv2cfgPath := filepath.Join(dir, "sv2.json")
+	{
+		cfgObj := map[string]any{
+			"chains": []map[string]any{
+				{
+					"l1_rpc":        l1EL.userRPC,
+					"beacon_addr":   beaconAddr,
+					"l2_authrpc":    l2EL.authRPC,
+					"l2_userrpc":    l2EL.userRPC,
+					"jwt_secret":    l2EL.jwtPath,
+					"rollup_config": rollupPath,
+				},
+			},
+		}
+		data, err := json.MarshalIndent(cfgObj, "", "  ")
+		s.p.Require().NoError(err)
+		s.p.Require().NoError(os.WriteFile(sv2cfgPath, data, 0o644))
+	}
+	cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR"), ConfigPath: sv2cfgPath, ConfirmDepth: depth, PollInterval: 1 * time.Second}
+	lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
+	s.p.Require().NoError(err)
+	s.p.Require().NoError(lc.Start(s.p.Ctx()))
+	if addr, ok := service.HTTPAddr(lc); ok {
+		s.httpURL = "http://" + addr
+	}
+	s.lc = lc
+	fmt.Printf("[sv2] http: %s\n", s.HTTP())
+	_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
 	// Log rollup cfg timing for debugging fork activation
 	if l2EL.l2Net.rollupCfg != nil {
 		g := l2EL.l2Net.rollupCfg.Genesis
@@ -157,35 +188,28 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		if l2EL.l2Net.rollupCfg.Interop2Time != nil {
 			i2 = *l2EL.l2Net.rollupCfg.Interop2Time
 		}
-		s.logger.Info("SV2 AddChain rollup timings", "chain", l2EL.id.ChainID(), "genesis_l2_time", g.L2Time, "interop2_time", i2)
+		s.logger.Info("SV2 startup rollup timings", "chain", l2EL.id.ChainID(), "genesis_l2_time", g.L2Time, "interop2_time", i2)
 	}
-	_, err = service.AddChain(s.lc, l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
-	s.p.Require().NoError(err)
 }
 
 // StartEmbeddedFromSysNoEnv is like StartEmbeddedFromSys but does not mutate SV2_DENYLIST_URL.
 func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lc == nil {
-		_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
-		port := 0
-		if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
-			if n, err := strconv.Atoi(p); err == nil {
-				port = n
-			}
-		}
-		cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR")}
-		lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
-		s.p.Require().NoError(err)
-		s.p.Require().NoError(lc.Start(s.p.Ctx()))
-		if addr, ok := service.HTTPAddr(lc); ok {
-			s.httpURL = "http://" + addr
-		}
-		s.lc = lc
-		fmt.Printf("[sv2] http: %s\n", s.HTTP())
+	if s.lc != nil {
+		return
 	}
-
+	_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
+	port := 0
+	if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			port = n
+		}
+	}
+	// Build multi-chain config file with a single chain
+	dir, err := os.MkdirTemp("", "sv2cfg-")
+	s.p.Require().NoError(err)
+	s.p.Cleanup(func() { _ = os.RemoveAll(dir) })
 	// Read JWT secret
 	jwtHex, err := os.ReadFile(l2EL.jwtPath)
 	s.p.Require().NoError(err)
@@ -193,7 +217,6 @@ func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode,
 	b, err := hex.DecodeString(string(jwtHex)[2:])
 	s.p.Require().NoError(err)
 	copy(jwtSecret[:], b)
-
 	beaconAddr := ""
 	if l1CL.beacon != nil {
 		beaconAddr = l1CL.beacon.BeaconAddr()
@@ -206,8 +229,41 @@ func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode,
 			depth = n
 		}
 	}
-	_, err = service.AddChain(s.lc, l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
+	// Write rollup config to temp file
+	rollupPath := filepath.Join(dir, "rollup.json")
+	{
+		data, err := json.MarshalIndent(l2EL.l2Net.rollupCfg, "", "  ")
+		s.p.Require().NoError(err)
+		s.p.Require().NoError(os.WriteFile(rollupPath, data, 0o644))
+	}
+	// Write sv2 config file
+	sv2cfgPath := filepath.Join(dir, "sv2.json")
+	{
+		cfgObj := map[string]any{
+			"chains": []map[string]any{
+				{
+					"l1_rpc":        l1EL.userRPC,
+					"beacon_addr":   beaconAddr,
+					"l2_authrpc":    l2EL.authRPC,
+					"l2_userrpc":    l2EL.userRPC,
+					"jwt_secret":    l2EL.jwtPath,
+					"rollup_config": rollupPath,
+				},
+			},
+		}
+		data, err := json.MarshalIndent(cfgObj, "", "  ")
+		s.p.Require().NoError(err)
+		s.p.Require().NoError(os.WriteFile(sv2cfgPath, data, 0o644))
+	}
+	cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR"), ConfigPath: sv2cfgPath, ConfirmDepth: depth, PollInterval: 1 * time.Second}
+	lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
 	s.p.Require().NoError(err)
+	s.p.Require().NoError(lc.Start(s.p.Ctx()))
+	if addr, ok := service.HTTPAddr(lc); ok {
+		s.httpURL = "http://" + addr
+	}
+	s.lc = lc
+	fmt.Printf("[sv2] http: %s\n", s.HTTP())
 }
 
 // proxyAddr: reuse variant from l2_el.go signature
@@ -311,147 +367,13 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 
 // WithSupervisorV2OnAllChains starts a single Supervisor v2 and registers all L2 ELs as chains.
 func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
-	return stack.AfterDeploy(func(orch *Orchestrator) {
-		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
-		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
-		// pick first L1 EL and L1 CL (shared across chains)
-		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
-		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
-		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
-		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
-
-		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
-		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
-
-		// Create SV2 with HTTP server once
-		id := stack.SupervisorID("sv2-all")
-		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
-		orch.p.Cleanup(s.Stop)
-		s.Start("", "")
-		fmt.Printf("[sv2] http: %s\n", s.HTTP())
-		_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
-
-		for _, l2id := range l2elIDs {
-			l2el, _ := orch.l2ELs.Get(l2id)
-			// Read JWT secret for this EL
-			jwtHex, err := os.ReadFile(l2el.jwtPath)
-			orch.p.Require().NoError(err)
-			var jwtSecret [32]byte
-			b, err := hex.DecodeString(string(jwtHex)[2:])
-			orch.p.Require().NoError(err)
-			copy(jwtSecret[:], b)
-
-			// Add chain to supervisor
-			beaconAddr := ""
-			if l1cl.beacon != nil {
-				beaconAddr = l1cl.beacon.BeaconAddr()
-			} else {
-				beaconAddr = l1cl.beaconHTTPAddr
-			}
-			_, err = service.AddChain(s.lc, l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
-			orch.p.Require().NoError(err)
-			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
-			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
-			if cid, ok := l2el.id.ChainID().Uint64(); ok {
-				clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
-				if _, ok2 := orch.l2CLs.Get(clID); !ok2 {
-					orch.l2CLs.Set(clID, &L2CLNode{
-						id:      clID,
-						userRPC: fmt.Sprintf("%s/opnode/%d/", s.HTTP(), cid),
-						p:       orch.P(),
-						logger:  orch.P().Logger(),
-						el:      l2el.id,
-					})
-				}
-			}
-		}
-
-		// Wait for HTTP
-		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
-			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
-		})
-		orch.P().Require().NoError(err)
-
-		// Note: L2CL shims are registered during system hydration (see SupervisorV2.hydrate).
-	})
-}
-
-// WithSupervisorV2OnAllChainsConfirmDepth starts a single Supervisor v2 and registers all L2 ELs as chains,
-// using a custom L1 confirmation depth for cross-safety gating.
-func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchestrator] {
-	return stack.AfterDeploy(func(orch *Orchestrator) {
-		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
-		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
-		// pick first L1 EL and L1 CL (shared across chains)
-		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
-		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
-		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
-		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
-
-		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
-		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
-
-		// Create SV2 with HTTP server once
-		id := stack.SupervisorID("sv2-all")
-		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
-		orch.p.Cleanup(s.Stop)
-		s.Start("", "")
-		fmt.Printf("[sv2] http: %s\n", s.HTTP())
-		_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
-
-		for _, l2id := range l2elIDs {
-			l2el, _ := orch.l2ELs.Get(l2id)
-			// Read JWT secret for this EL
-			jwtHex, err := os.ReadFile(l2el.jwtPath)
-			orch.p.Require().NoError(err)
-			var jwtSecret [32]byte
-			b, err := hex.DecodeString(string(jwtHex)[2:])
-			orch.p.Require().NoError(err)
-			copy(jwtSecret[:], b)
-
-			// Add chain to supervisor with custom confirm depth
-			beaconAddr := ""
-			if l1cl.beacon != nil {
-				beaconAddr = l1cl.beacon.BeaconAddr()
-			} else {
-				beaconAddr = l1cl.beaconHTTPAddr
-			}
-			_, err = service.AddChain(s.lc, l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
-			orch.p.Require().NoError(err)
-
-			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
-			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
-			if cid, ok := l2el.id.ChainID().Uint64(); ok {
-				clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
-				if _, ok2 := orch.l2CLs.Get(clID); !ok2 {
-					orch.l2CLs.Set(clID, &L2CLNode{
-						id:      clID,
-						userRPC: fmt.Sprintf("%s/opnode/%d/", s.HTTP(), cid),
-						p:       orch.P(),
-						logger:  orch.P().Logger(),
-						el:      l2el.id,
-					})
-				}
-			}
-		}
-
-		// Wait for HTTP
-		err := retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
-			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
-		})
-		orch.P().Require().NoError(err)
-
-		// Note: L2CL shims are registered during hydration; batchers will be started post-hydrate.
-
-		// Batchers are started in WithSV2TwoChainMinimalDepth PostHydrate hook
-	})
+	return WithSupervisorV2OnAllChainsConfirmDepth(40)
 }
 
 // WithSV2TwoChainMinimalDepth composes a minimal two-chain setup without CLs and starts a single SV2 across both chains,
 // using a custom L1 confirmation depth for cross-safety gating.
 func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orchestrator] {
-	// no captured orchestrator needed in AfterDeploy variant
-	// Gate to assert the L2 network count after hydration
+	// gate to assert the L2 network count after hydration
 	gateTwo := stack.PostHydrate[*Orchestrator](func(sys stack.System) {
 		sys.T().Gate().Lenf(sys.L2Networks(), 2, "Must have exactly %v chains", 2)
 	})
@@ -512,6 +434,120 @@ func WithSV2TwoChainReady(offset uint64, depth uint64, fundCount int) stack.Opti
 			}
 		}),
 	)
+}
+
+// WithSupervisorV2OnAllChainsConfirmDepth starts a single Supervisor v2 and registers all L2 ELs as chains,
+// using a custom L1 confirmation depth for cross-safety gating.
+func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchestrator] {
+	return stack.AfterDeploy(func(orch *Orchestrator) {
+		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l2elIDs), 1, "need at least one L2 EL node")
+		// pick first L1 EL and L1 CL (shared across chains)
+		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())
+		l1clIDs := stack.SortL1CLNodeIDs(orch.l1CLs.Keys())
+		orch.p.Require().GreaterOrEqual(len(l1elIDs), 1, "need at least one L1 EL node")
+		orch.p.Require().GreaterOrEqual(len(l1clIDs), 1, "need at least one L1 CL node")
+
+		l1el, _ := orch.l1ELs.Get(l1elIDs[0])
+		l1cl, _ := orch.l1CLs.Get(l1clIDs[0])
+
+		// Create a multi-chain sv2.config with custom depth
+		dir, err := os.MkdirTemp("", "sv2cfg-")
+		orch.p.Require().NoError(err)
+		orch.p.Cleanup(func() { _ = os.RemoveAll(dir) })
+		var chains []map[string]any
+		// Sort by ChainID ascending for deterministic order (A, then B)
+		sort.Slice(l2elIDs, func(i, j int) bool {
+			vi, _ := l2elIDs[i].ChainID().Uint64()
+			vj, _ := l2elIDs[j].ChainID().Uint64()
+			return vi < vj
+		})
+		for _, l2id := range l2elIDs {
+			l2el, _ := orch.l2ELs.Get(l2id)
+			rollupPath := func() string {
+				if cid, ok := l2id.ChainID().Uint64(); ok {
+					return filepath.Join(dir, fmt.Sprintf("rollup-%d.json", cid))
+				}
+				return filepath.Join(dir, fmt.Sprintf("rollup-%s.json", l2id.Key()))
+			}()
+			rcfg := *l2el.l2Net.rollupCfg
+			if cid, ok := l2id.ChainID().Uint64(); ok {
+				rcfg.L2ChainID = new(big.Int).SetUint64(cid)
+			}
+			data, err := json.MarshalIndent(&rcfg, "", "  ")
+			orch.p.Require().NoError(err)
+			orch.p.Require().NoError(os.WriteFile(rollupPath, data, 0o644))
+			beaconAddr := ""
+			if l1cl.beacon != nil {
+				beaconAddr = l1cl.beacon.BeaconAddr()
+			} else {
+				beaconAddr = l1cl.beaconHTTPAddr
+			}
+			chains = append(chains, map[string]any{
+				"l1_rpc":        l1el.userRPC,
+				"beacon_addr":   beaconAddr,
+				"l2_authrpc":    l2el.authRPC,
+				"l2_userrpc":    l2el.userRPC,
+				"jwt_secret":    l2el.jwtPath,
+				"rollup_config": rollupPath,
+			})
+		}
+		sv2cfgPath := filepath.Join(dir, "sv2.json")
+		{
+			cfgObj := map[string]any{"chains": chains}
+			data, err := json.MarshalIndent(cfgObj, "", "  ")
+			orch.p.Require().NoError(err)
+			orch.p.Require().NoError(os.WriteFile(sv2cfgPath, data, 0o644))
+		}
+
+		// Create SV2 with HTTP server once
+		id := stack.SupervisorID("sv2-all")
+		s := &SupervisorV2{id: id, logger: orch.P().Logger(), p: orch.P()}
+		orch.p.Cleanup(s.Stop)
+		port := 0
+		if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
+		}
+		cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR"), ConfigPath: sv2cfgPath, ConfirmDepth: depth, PollInterval: 1 * time.Second}
+		lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
+		orch.p.Require().NoError(err)
+		orch.p.Require().NoError(lc.Start(orch.p.Ctx()))
+		if addr, ok := service.HTTPAddr(lc); ok {
+			s.httpURL = "http://" + addr
+		}
+		s.lc = lc
+		fmt.Printf("[sv2] http: %s\n", s.HTTP())
+		_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
+
+		// Chains will be loaded from sv2.config by the service
+
+		// Wait for HTTP
+		err = retry.Do0(orch.P().Ctx(), 10, &retry.FixedStrategy{Dur: 300 * time.Millisecond}, func() error {
+			return waitHTTP(orch.P(), s.HTTP()+"/healthz")
+		})
+		orch.P().Require().NoError(err)
+
+		// Also register minimal CL handles in the orchestrator map
+		for _, l2id := range l2elIDs {
+			l2el, _ := orch.l2ELs.Get(l2id)
+			if cid, ok := l2el.id.ChainID().Uint64(); ok {
+				clID := stack.NewL2CLNodeID("embedded", l2el.id.ChainID())
+				if _, ok2 := orch.l2CLs.Get(clID); !ok2 {
+					orch.l2CLs.Set(clID, &L2CLNode{
+						id:      clID,
+						userRPC: fmt.Sprintf("%s/opnode/%d/", s.HTTP(), cid),
+						p:       orch.P(),
+						logger:  orch.P().Logger(),
+						el:      l2el.id,
+					})
+				}
+			}
+		}
+
+		// L2CL shims registered during hydration; batchers will be started post-hydrate.
+	})
 }
 
 // WithSV2TwoChainMinimal composes a minimal two-chain setup without CLs and starts a single SV2 across both chains.
