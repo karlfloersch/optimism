@@ -85,6 +85,10 @@ devnet-test DEVNET *TEST: _prerequisites
 # Simple devnet
 simple-devnet: (devnet "simple.yaml")
 
+# SV2 simple devnet (Phase A)
+sv2-simple-devnet: (devnet "sv2-simple.yaml")
+sv2-simple-devnet-test: (devnet-test "sv2-simple-devnet" "sv2-simple-smoke-test.sh")
+
 # Interop devnet
 interop-devnet: (devnet "interop.yaml")
 interop-devnet-test: (devnet-test "interop-devnet" "interop-smoke-test.sh")
@@ -105,3 +109,48 @@ flash-devnet: (devnet "flash.yaml")
 # subshells
 enter-devnet DEVNET CHAIN='Ethereum' NODE_INDEX='0': _prerequisites
     go run ../devnet-sdk/shell/cmd/enter/main.go --devnet kt://{{DEVNET}} --chain {{CHAIN}} --node-index {{NODE_INDEX}}
+
+# -----------------------------
+# Smoke-only targets (no deploy)
+# -----------------------------
+
+# Run msgcheck (tx mode) against an already running sv2-simple-devnet
+smoke-sv2-simple-devnet-msgcheck: _prerequisites
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="tests/sv2-simple-devnet.json"
+    if [ ! -f "$ENV" ]; then
+        echo "Environment JSON not found: $ENV. Run 'just sv2-simple-devnet' first." >&2
+        exit 1
+    fi
+    EL=$(jq -r '.l2[0].nodes[0].services.el.endpoints.rpc | "http://\(.host):\(.port)"' "$ENV")
+    PK=$(jq -r '.l2[0].wallets["dev-account-0"].private_key' "$ENV")
+    if [ -z "$PK" ] || [ "$PK" = "null" ]; then
+        echo "Funded private key not found in $ENV" >&2
+        exit 1
+    fi
+    if [[ "$PK" != 0x* ]]; then PK="0x$PK"; fi
+    go run ../op-up/cmd/msgcheck --mode=tx --rpc-901 "$EL" --rpc-902 "" --priv-key "$PK" --timeout 2m
+
+# Quick cast-based health check (chain id and block progression) against simple-devnet
+smoke-simple-devnet-cast: _prerequisites
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cast >/dev/null 2>&1; then
+        echo "cast is required" >&2
+        exit 1
+    fi
+    ENV="tests/simple-devnet.json"
+    if [ ! -f "$ENV" ]; then
+        echo "Environment JSON not found: $ENV. Run 'just simple-devnet' first." >&2
+        exit 1
+    fi
+    EL=$(jq -r '.l2[0].nodes[0].services.el.endpoints.rpc | "http://\(.host):\(.port)"' "$ENV")
+    echo "RPC: $EL"
+    cast chain-id --rpc-url "$EL"
+    b1=$(cast block-number --rpc-url "$EL"); echo "block: $b1"; sleep 6; b2=$(cast block-number --rpc-url "$EL"); echo "block: $b2"
+    if [ "$b2" -le "$b1" ]; then
+        echo "Block did not progress" >&2
+        exit 1
+    fi
+    echo "Cast health OK"

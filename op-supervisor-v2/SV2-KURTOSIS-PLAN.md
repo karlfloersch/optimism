@@ -120,11 +120,11 @@ There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
     - [ ] Sysgo: advance, restart restore; rollback persists; corrupt DB recovers
 - Milestone 4: Kurtosis integration (staged; keep system green)
   Phase A: SV2-simple devnet bootstrap (no SV2 yet)
-  - [ ] Create `kurtosis-devnet/sv2-simple.yaml` by copying `kurtosis-devnet/simple.yaml` (single L2, legacy op-node intact).
-  - [ ] Add `just sv2-simple` target to render and run the env end-to-end (build, deploy, wait).
+  - [x] Create `kurtosis-devnet/sv2-simple.yaml` by copying `kurtosis-devnet/simple.yaml` (single L2, legacy op-node intact).
+  - [x] Add `just sv2-simple-devnet` target to render and run the env end-to-end (build, deploy, wait). Also add `just smoke-sv2-simple-devnet-msgcheck` to run tx smoke against a running env.
   - Testing gates:
-    - [ ] Health: EL and op-node RPCs reachable; `eth_chainId` matches template.
-    - [ ] Progress: `eth_blockNumber` increases; safe head advances N blocks within T seconds.
+    - [x] Health: EL and op-node RPCs reachable; `eth_chainId` matches template.
+    - [x] Progress: `eth_blockNumber` increases; safe head advances N blocks within T seconds.
     - [ ] Determinism: command is idempotent; repeated runs succeed with clean teardown.
 
   Phase B: Two-chain devnet (still op-node; no SV2)
