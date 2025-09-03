@@ -27,6 +27,9 @@ type Config struct {
 	ProxyOpNode bool
 	DataDir     string
 
+	// Multi-chain config file path. When set, overrides single-chain flags.
+	ConfigPath string
+
 	// Single-chain bootstrap (Milestone 1): retained for backward compatibility
 	L1RPC        string
 	BeaconAddr   string
@@ -49,6 +52,7 @@ func NewConfig(ctx *cli.Context, logger log.Logger) (*Config, error) {
 		HTTPPort:     ctx.Int("http.port"),
 		ProxyOpNode:  ctx.Bool("proxy.opnode"),
 		DataDir:      ctx.String("sv2.data-dir"),
+		ConfigPath:   ctx.String("sv2.config"),
 		L1RPC:        ctx.String("l1.rpc"),
 		BeaconAddr:   ctx.String("beacon.addr"),
 		L2AuthRPC:    ctx.String("l2.authrpc"),
@@ -80,8 +84,86 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 	httpSrv := &http.Server{Handler: sup.HTTPHandler()}
 
-	// If single-chain bootstrap fields are set, add one chain
-	if cfg.L1RPC != "" || cfg.BeaconAddr != "" || cfg.L2AuthRPC != "" || cfg.L2UserRPC != "" || cfg.JWTPath != "" || cfg.RollupPath != "" {
+	// Multi-chain config takes precedence over single-chain bootstrap
+	if strings.TrimSpace(cfg.ConfigPath) != "" {
+		type chainCfg struct {
+			L1RPC      string `json:"l1_rpc"`
+			BeaconAddr string `json:"beacon_addr"`
+			L2AuthRPC  string `json:"l2_authrpc"`
+			L2UserRPC  string `json:"l2_userrpc"`
+			JWTPath    string `json:"jwt_secret"`
+			RollupPath string `json:"rollup_config"`
+		}
+		type fileCfg struct {
+			HTTPAddr     string     `json:"http_addr"`
+			HTTPPort     int        `json:"http_port"`
+			ProxyOpNode  *bool      `json:"proxy_opnode"`
+			SV2DataDir   string     `json:"sv2_data_dir"`
+			ConfirmDepth *uint64    `json:"confirm_depth"`
+			PollInterval string     `json:"poll_interval"`
+			Chains       []chainCfg `json:"chains"`
+		}
+		raw, err := os.ReadFile(cfg.ConfigPath)
+		if err != nil {
+			return nil, fmt.Errorf("read sv2.config: %w", err)
+		}
+		var fc fileCfg
+		if err := json.Unmarshal(raw, &fc); err != nil {
+			return nil, fmt.Errorf("parse sv2.config: %w", err)
+		}
+		// Override server settings if present in file
+		if fc.HTTPAddr != "" {
+			cfg.HTTPAddr = fc.HTTPAddr
+		}
+		if fc.HTTPPort != 0 {
+			cfg.HTTPPort = fc.HTTPPort
+		}
+		if fc.ProxyOpNode != nil {
+			cfg.ProxyOpNode = *fc.ProxyOpNode
+		}
+		if fc.SV2DataDir != "" {
+			cfg.DataDir = fc.SV2DataDir
+		}
+		if fc.ConfirmDepth != nil {
+			cfg.ConfirmDepth = *fc.ConfirmDepth
+		}
+		if strings.TrimSpace(fc.PollInterval) != "" {
+			if d, err := time.ParseDuration(fc.PollInterval); err == nil {
+				cfg.PollInterval = d
+			}
+		}
+		// Add each chain
+		for i, c := range fc.Chains {
+			if c.L1RPC == "" || c.BeaconAddr == "" || c.L2AuthRPC == "" || c.L2UserRPC == "" || c.JWTPath == "" || c.RollupPath == "" {
+				return nil, fmt.Errorf("sv2.config chains[%d]: missing required fields", i)
+			}
+			// Read JWT
+			data, err := os.ReadFile(c.JWTPath)
+			if err != nil {
+				return nil, fmt.Errorf("chains[%d]: read jwt_secret: %w", i, err)
+			}
+			s := strings.TrimPrefix(strings.TrimSpace(string(data)), "0x")
+			b, err := hex.DecodeString(s)
+			if err != nil || len(b) != 32 {
+				return nil, fmt.Errorf("chains[%d]: invalid jwt_secret", i)
+			}
+			var jwt [32]byte
+			copy(jwt[:], b)
+			// Read rollup config
+			cfgBytes, err := os.ReadFile(c.RollupPath)
+			if err != nil {
+				return nil, fmt.Errorf("chains[%d]: read rollup_config: %w", i, err)
+			}
+			var rcfg rollup.Config
+			if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
+				return nil, fmt.Errorf("chains[%d]: parse rollup_config: %w", i, err)
+			}
+			if _, err := sup.AddChain(c.L1RPC, c.BeaconAddr, c.L2AuthRPC, c.L2UserRPC, jwt, &rcfg, cfg.PollInterval, cfg.ConfirmDepth); err != nil {
+				return nil, fmt.Errorf("chains[%d]: add chain: %w", i, err)
+			}
+		}
+	} else if cfg.L1RPC != "" || cfg.BeaconAddr != "" || cfg.L2AuthRPC != "" || cfg.L2UserRPC != "" || cfg.JWTPath != "" || cfg.RollupPath != "" {
+		// If single-chain bootstrap fields are set, add one chain
 		// verify all are set
 		if cfg.L1RPC == "" || cfg.BeaconAddr == "" || cfg.L2AuthRPC == "" || cfg.L2UserRPC == "" || cfg.JWTPath == "" || cfg.RollupPath == "" {
 			return nil, fmt.Errorf("requires --l1.rpc, --beacon.addr, --l2.authrpc, --l2.userrpc, --jwt.secret, --rollup.config for single-chain bootstrap")

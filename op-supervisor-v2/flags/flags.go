@@ -12,6 +12,7 @@ const EnvVarPrefix = "SV2_"
 // Flags defines the CLI flags for op-supervisor-v2.
 // Keep names stable to avoid breaking existing invocations.
 var Flags = []cli.Flag{
+	&cli.StringFlag{Name: "sv2.config", Value: "", Usage: "Path to multi-chain JSON config (overrides per-chain flags)"},
 	&cli.StringFlag{Name: "http.addr", Value: "127.0.0.1", Usage: "HTTP listen address"},
 	&cli.IntFlag{Name: "http.port", Value: 9750, Usage: "HTTP listen port"},
 	&cli.BoolFlag{Name: "proxy.opnode", Value: true, Usage: "Expose virtual op-node RPC under /opnode/"},
