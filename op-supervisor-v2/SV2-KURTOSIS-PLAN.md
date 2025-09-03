@@ -118,12 +118,39 @@ There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
   - [ ] Implement atomic load/save of cross-safe timestamp and metadata
   - Testing:
     - [ ] Sysgo: advance, restart restore; rollback persists; corrupt DB recovers
-- Milestone 4: Kurtosis integration
-  - [ ] Add SV2 service with multi-chain config template
-  - [ ] Only EL per chain; remove standalone op-node
-  - [ ] Point batchers/proposers to per-chain SV2 ports
-  - Testing:
-    - [ ] Sysgo/Kurtosis: health, safe advancement, rollback behavior
+- Milestone 4: Kurtosis integration (staged; keep system green)
+  Phase A: SV2-simple devnet bootstrap (no SV2 yet)
+  - [ ] Create `kurtosis-devnet/sv2-simple.yaml` by copying `kurtosis-devnet/simple.yaml` (single L2, legacy op-node intact).
+  - [ ] Add `just sv2-simple` target to render and run the env end-to-end (build, deploy, wait).
+  - Testing gates:
+    - [ ] Health: EL and op-node RPCs reachable; `eth_chainId` matches template.
+    - [ ] Progress: `eth_blockNumber` increases; safe head advances N blocks within T seconds.
+    - [ ] Determinism: command is idempotent; repeated runs succeed with clean teardown.
+
+  Phase B: Two-chain devnet (still op-node; no SV2)
+  - [ ] Create `kurtosis-devnet/sv2-simple-2chains.yaml` (two parallel L2 chains, each with EL+op-node participants).
+  - [ ] Add `just sv2-simple-2chains` target to stand up both chains simultaneously.
+  - Testing gates:
+    - [ ] Both chains healthy: per-chain RPCs reachable and report distinct `eth_chainId`s.
+    - [ ] Both chains progress: heads advance on both chains concurrently.
+    - [ ] No port collisions; endpoints discoverable via existing `ServiceFinder`.
+
+  Phase C: Swap op-nodes for SV2 (two-chain under supervisor)
+  - [ ] Introduce an `op-supervisor-v2` service and generate `sv2.json` for both chains (rollup paths, EL endpoints, `user_rpc_port` per chain; proxy disabled by default).
+  - [ ] Remove standalone op-node participants from the two-chain template; keep EL-only per chain.
+  - [ ] Point batchers/proposers at `http://sv2:<user_rpc_port>` for each chain (via template extra_params or package wiring).
+  - [ ] Add `just sv2-2chains-sv2` target to build/deploy the SV2-backed two-chain devnet.
+  - Testing gates:
+    - [ ] SV2 health: `supervisor_syncStatus` OK on the SV2 HTTP port.
+    - [ ] Per-chain RPC health via SV2 direct ports: `eth_chainId`, `eth_blockNumber`.
+    - [ ] Progress on both chains; batches/outputs flow (logs or RPC counters).
+    - [ ] Clean shutdown/startup repeatability.
+
+  Acceptance criteria
+  - [ ] Phase A/B/C scripts are reproducible via `just` targets, with clear pass/fail output.
+  - [ ] Two-chain with SV2 fully replaces op-node while preserving progress and health.
+  - [ ] Templates remain minimal-diff and composable (feature flag to keep legacy op-node path if needed).
+
 - Milestone 5: Docs and examples
   - [ ] Document config fields and endpoints
   - [ ] Example Kurtosis YAML snippet and env vars
