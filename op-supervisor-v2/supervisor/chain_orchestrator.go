@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
 	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
@@ -29,22 +28,10 @@ type ChainContainer struct {
 	// Note: localDB and crossDB removed in v2 - they were never written to and always returned empty data
 }
 
-// AddChain starts a chainHandler with virtual node for the given rollup config and RPCs.
+// AddChain starts a chainHandler with virtual node for the given config.
 // Returns the L2 chain ID as the container key.
-func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) (uint64, error) {
-	chainID := rcfg.L2ChainID.Uint64()
-
-	// Build virtual node config
-	vCfg := &virtual_node.VirtualNodeConfig{
-		L1RPC:        l1RPC,
-		BeaconAddr:   beaconAddr,
-		L2AuthRPC:    l2AuthRPC,
-		L2UserRPC:    l2UserRPC,
-		JwtSecret:    jwtSecret,
-		Rcfg:         rcfg,
-		Interval:     interval,
-		ConfirmDepth: confirmDepth,
-	}
+func (s *Supervisor) AddChain(vCfg *virtual_node.VirtualNodeConfig) (uint64, error) {
+	chainID := vCfg.Rcfg.L2ChainID.Uint64()
 
 	// Start virtual op-node
 	userRPC, stopFn, err := virtual_node.StartVirtualNode(vCfg, s.log)

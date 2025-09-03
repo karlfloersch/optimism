@@ -29,14 +29,16 @@ import (
 )
 
 type VirtualNodeConfig struct {
-	L1RPC        string
-	BeaconAddr   string
-	L2AuthRPC    string
-	L2UserRPC    string
-	JwtSecret    [32]byte
-	Rcfg         *rollup.Config
-	Interval     time.Duration
-	ConfirmDepth uint64
+	L1RPC             string
+	BeaconAddr        string
+	L2AuthRPC         string
+	L2UserRPC         string
+	JwtSecret         [32]byte
+	Rcfg              *rollup.Config
+	Interval          time.Duration
+	ConfirmDepth      uint64
+	UserRPCListenAddr string
+	UserRPCPort       int
 }
 
 // StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
@@ -70,6 +72,14 @@ func StartVirtualNode(
 			enabled = false
 		}
 	}
+	listenAddr := cfg.UserRPCListenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1"
+	}
+	listenPort := cfg.UserRPCPort
+	if listenPort < 0 {
+		listenPort = 0
+	}
 	nodeCfg := &opNodeConfig.Config{
 		L1: &opNodeConfig.L1EndpointConfig{
 			L1NodeAddr: cfg.L1RPC,
@@ -89,7 +99,7 @@ func StartVirtualNode(
 		Beacon:        &opNodeConfig.L1BeaconEndpointConfig{BeaconAddr: cfg.BeaconAddr},
 		Driver:        driver.Config{SequencerEnabled: enabled, SequencerConfDepth: cfg.ConfirmDepth},
 		Rollup:        *cfg.Rcfg,
-		RPC:           oprpc.CLIConfig{ListenAddr: "127.0.0.1", ListenPort: 0, EnableAdmin: true},
+		RPC:           oprpc.CLIConfig{ListenAddr: listenAddr, ListenPort: listenPort, EnableAdmin: true},
 		InteropConfig: &interop.Config{},
 		P2P:           p2pConfig,
 		Sync: nodeSync.Config{

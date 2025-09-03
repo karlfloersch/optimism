@@ -18,6 +18,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+	vnode "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor/virtual_node"
 )
 
 // Config captures CLI-derived configuration for the SV2 service lifecycle.
@@ -87,12 +88,14 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 	// Multi-chain config takes precedence over single-chain bootstrap
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
 		type chainCfg struct {
-			L1RPC      string `json:"l1_rpc"`
-			BeaconAddr string `json:"beacon_addr"`
-			L2AuthRPC  string `json:"l2_authrpc"`
-			L2UserRPC  string `json:"l2_userrpc"`
-			JWTPath    string `json:"jwt_secret"`
-			RollupPath string `json:"rollup_config"`
+			L1RPC             string `json:"l1_rpc"`
+			BeaconAddr        string `json:"beacon_addr"`
+			L2AuthRPC         string `json:"l2_authrpc"`
+			L2UserRPC         string `json:"l2_userrpc"`
+			JWTPath           string `json:"jwt_secret"`
+			RollupPath        string `json:"rollup_config"`
+			UserRPCPort       int    `json:"user_rpc_port"`
+			UserRPCListenAddr string `json:"user_rpc_listen_addr"`
 		}
 		type fileCfg struct {
 			HTTPAddr     string     `json:"http_addr"`
@@ -158,13 +161,24 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 			if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
 				return nil, fmt.Errorf("chains[%d]: parse rollup_config: %w", i, err)
 			}
-			if _, err := sup.AddChain(c.L1RPC, c.BeaconAddr, c.L2AuthRPC, c.L2UserRPC, jwt, &rcfg, cfg.PollInterval, cfg.ConfirmDepth); err != nil {
+			vCfg := &vnode.VirtualNodeConfig{
+				L1RPC:             c.L1RPC,
+				BeaconAddr:        c.BeaconAddr,
+				L2AuthRPC:         c.L2AuthRPC,
+				L2UserRPC:         c.L2UserRPC,
+				JwtSecret:         jwt,
+				Rcfg:              &rcfg,
+				Interval:          cfg.PollInterval,
+				ConfirmDepth:      cfg.ConfirmDepth,
+				UserRPCListenAddr: c.UserRPCListenAddr,
+				UserRPCPort:       c.UserRPCPort,
+			}
+			if _, err := sup.AddChain(vCfg); err != nil {
 				return nil, fmt.Errorf("chains[%d]: add chain: %w", i, err)
 			}
 		}
 	} else if cfg.L1RPC != "" || cfg.BeaconAddr != "" || cfg.L2AuthRPC != "" || cfg.L2UserRPC != "" || cfg.JWTPath != "" || cfg.RollupPath != "" {
 		// If single-chain bootstrap fields are set, add one chain
-		// verify all are set
 		if cfg.L1RPC == "" || cfg.BeaconAddr == "" || cfg.L2AuthRPC == "" || cfg.L2UserRPC == "" || cfg.JWTPath == "" || cfg.RollupPath == "" {
 			return nil, fmt.Errorf("requires --l1.rpc, --beacon.addr, --l2.authrpc, --l2.userrpc, --jwt.secret, --rollup.config for single-chain bootstrap")
 		}
@@ -194,7 +208,17 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 		if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
 			return nil, fmt.Errorf("parse rollup.config: %w", err)
 		}
-		if _, err := sup.AddChain(cfg.L1RPC, cfg.BeaconAddr, cfg.L2AuthRPC, cfg.L2UserRPC, jwt, &rcfg, cfg.PollInterval, cfg.ConfirmDepth); err != nil {
+		vCfg := &vnode.VirtualNodeConfig{
+			L1RPC:        cfg.L1RPC,
+			BeaconAddr:   cfg.BeaconAddr,
+			L2AuthRPC:    cfg.L2AuthRPC,
+			L2UserRPC:    cfg.L2UserRPC,
+			JwtSecret:    jwt,
+			Rcfg:         &rcfg,
+			Interval:     cfg.PollInterval,
+			ConfirmDepth: cfg.ConfirmDepth,
+		}
+		if _, err := sup.AddChain(vCfg); err != nil {
 			return nil, fmt.Errorf("add chain: %w", err)
 		}
 	}
@@ -252,12 +276,12 @@ func (l *sv2Lifecycle) Stopped() bool { return l.stopped }
 
 // AddChain registers a chain on a running SV2 lifecycle instance. Intended for tests/harnesses.
 // It avoids importing internal cmd or supervisor wiring from callers.
-func AddChain(lc cliapp.Lifecycle, l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwt [32]byte, rcfg *rollup.Config, pollInterval time.Duration, confirmDepth uint64) (uint64, error) {
+func AddChain(lc cliapp.Lifecycle, vCfg *vnode.VirtualNodeConfig) (uint64, error) {
 	s, ok := lc.(*sv2Lifecycle)
 	if !ok || s == nil || s.sup == nil {
 		return 0, fmt.Errorf("unsupported lifecycle instance")
 	}
-	return s.sup.AddChain(l1RPC, beaconAddr, l2AuthRPC, l2UserRPC, jwt, rcfg, pollInterval, confirmDepth)
+	return s.sup.AddChain(vCfg)
 }
 
 // HTTPAddr returns the bound HTTP address (host:port) for a running lifecycle.
