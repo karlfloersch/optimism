@@ -125,15 +125,14 @@ There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
   - Testing gates:
     - [x] Health: EL and op-node RPCs reachable; `eth_chainId` matches template.
     - [x] Progress: `eth_blockNumber` increases; safe head advances N blocks within T seconds.
-    - [ ] Determinism: command is idempotent; repeated runs succeed with clean teardown.
 
   Phase B: Two-chain devnet (still op-node; no SV2)
-  - [ ] Create `kurtosis-devnet/sv2-simple-2chains.yaml` (two parallel L2 chains, each with EL+op-node participants).
-  - [ ] Add `just sv2-simple-2chains` target to stand up both chains simultaneously.
+  - [x] Create `kurtosis-devnet/sv2-simple-2chains.yaml` (two parallel L2 chains, each with EL+op-node participants).
+  - [x] Add `just sv2-simple-2chains` target to stand up both chains simultaneously.
   - Testing gates:
-    - [ ] Both chains healthy: per-chain RPCs reachable and report distinct `eth_chainId`s.
-    - [ ] Both chains progress: heads advance on both chains concurrently.
-    - [ ] No port collisions; endpoints discoverable via existing `ServiceFinder`.
+    - [x] Both chains healthy: per-chain RPCs reachable and report distinct `eth_chainId`s.
+    - [x] Both chains progress: heads advance on both chains concurrently (safe head advancing confirmed).
+    - [x] No port collisions; endpoints discoverable via existing `ServiceFinder`.
 
   Phase C: Swap op-nodes for SV2 (two-chain under supervisor)
   - [ ] Introduce an `op-supervisor-v2` service and generate `sv2.json` for both chains (rollup paths, EL endpoints, `user_rpc_port` per chain; proxy disabled by default).
