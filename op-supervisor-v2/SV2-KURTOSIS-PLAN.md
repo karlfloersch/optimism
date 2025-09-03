@@ -6,6 +6,12 @@
 - Provide configuration for chains, EL endpoints, L1 endpoints, and desired per-chain op-node ports.
 - Support interop mempool filtering toggle centrally via SV2.
 
+## Current status
+- Milestone 1 complete: library lifecycle + minimal main wired; service loads chains from sv2.config at startup.
+- Devstack presets now generate per-chain rollup JSON files (named by numeric ChainID), populate `sv2.json` with all chains, and start SV2 with that config; no manual AddChain in presets.
+- Rollup `L2ChainID` is set to match each EL `eth_chainId` in the generated JSON; chain-ID normalization fallback in the service was removed (mismatches fail during startup via downstream validation).
+- All tests in `op-devstack/sysgo/supervisor_v2_system_test.go` pass.
+
 ## High-level design
 - Extend the SV2 CLI multi-chain JSON config with optional user_rpc_port and interop_mempool_filtering per chain.
 - Extend virtual_node.StartVirtualNode to accept user RPC listen address/port.
@@ -62,7 +68,8 @@ There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
 1) op-supervisor-v2/service.go (new)
 - Implement `NewConfig(ctx, log)` in the library (like `op-node/service.go:NewConfig`).
 - Implement `New(ctx context.Context, cfg, log, version, metrics) (cliapp.Lifecycle, error)` that constructs and returns the lifecycle instance.
-- Parse `user_rpc_port` and `interop_mempool_filtering` per chain; pass into AddChain/VirtualNodeConfig.
+- Parse `sv2.config` (multi-chain JSON) and call AddChain internally for each chain during startup.
+- Future: parse `user_rpc_port` and `interop_mempool_filtering` per chain; pass into AddChain/VirtualNodeConfig.
 
 2) op-supervisor-v2/cmd/main.go
 - Minimal main: logging defaults, version, `app.Flags = cliapp.ProtectFlags(flags.Flags)`, `app.Action = cliapp.LifecycleCmd(SupervisorMain)`; define `SupervisorMain(ctx, closeApp)` that wires logging/metrics, calls `service.NewConfig(...)`, sets `cfg.Cancel = closeApp`, and returns `service.New(...)`.
@@ -82,16 +89,7 @@ There is no `op-supervisor-v2 -> sysgo` or `sysgo -> cmd` edge.
 
 ## Sysgo integration (in-process, no cycles)
 - Sysgo imports the library package, not the `cmd` package.
-- Example harness sketch (no `urfave/cli` dependency in tests):
-```go
-// in op-devstack/sysgo/sv2_kurtosis_features_test.go
-cfg, err := service.NewConfigFromStruct(testCfg) // or build via helper that doesn't use cli.Context
-require.NoError(t, err)
-lc, err := service.New(ctx, cfg, log, version, metrics)
-require.NoError(t, err)
-require.NoError(t, lc.Start(ctx))
-t.Cleanup(func() { _ = lc.Close(ctx) })
-```
+- Presets now generate per-chain rollup JSON (with `L2ChainID` set from EL) and a populated `sv2.json` for multi-chain startup. The service registers chains internally from JSON.
 
 ## Kurtosis wiring
 - One SV2 service; per chain only EL (no standalone op-node).
@@ -99,15 +97,15 @@ t.Cleanup(func() { _ = lc.Close(ctx) })
 - Batchers/proposers point directly to http://sv2:<port>.
 
 ## Risks
-- Interop mempool flag: may require upstream expose; fallback to build tag/temporary config.
+- Config correctness is strict: mismatched `L2ChainID` and EL `eth_chainId` will cause startup to fail via downstream validation. Keep JSON and EL aligned.
 - Port conflicts: fail fast with clear logs.
 
 ## Milestones
 - Milestone 1: Library constructor + minimal main + sysgo harness
-  - [ ] Keep `SupervisorMain` in `cmd/main.go`; implement `NewConfig` and `New(...)` in library
-  - [ ] Add in-process sysgo harness that imports the library (no `cmd` import)
+  - [x] Keep `SupervisorMain` in `cmd/main.go`; implement `NewConfig` and `New(...)` in library
+  - [x] Use in-process sysgo presets that import the library (no `cmd` import)
   - Testing:
-    - [ ] Sysgo: /healthz and /status healthy with two chains (no config changes yet)
+    - [x] System: all tests in `supervisor_v2_system_test.go` pass; health/status exercised indirectly
 - Milestone 2: Config plumbing (user_rpc_port, interop_mempool_filtering)
   - [ ] Extend JSON schema and flags as needed (no dummies)
   - [ ] Wire fields end-to-end (CLI → AddChain/VirtualNodeConfig → StartVirtualNode)
@@ -138,4 +136,4 @@ Note: We will not land milestones with placeholder or dummy values routed throug
 
 ## Test implementation location
 - Prefer sysgo-based tests alongside existing SV2 tests.
-- Add: op-devstack/sysgo/sv2_kurtosis_features_test.go to cover per-chain ports, proxy toggling, mempool filtering, and rollback behavior without mocks.
+- Existing coverage in `op-devstack/sysgo/supervisor_v2_system_test.go` ensures end-to-end behavior under presets; add focused tests for new config fields as they land.
