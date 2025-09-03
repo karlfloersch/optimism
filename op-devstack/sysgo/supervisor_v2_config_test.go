@@ -191,4 +191,99 @@ func TestSV2Config_UserRPCPort_Binds(gt *testing.T) {
 	require.NoError(gt, err)
 	defer resp.Body.Close()
 	require.NotEqual(gt, http.StatusServiceUnavailable, resp.StatusCode)
+
+	// also assert direct access without reverse proxy works on user_rpc_port
+	resp2, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", userPort))
+	require.NoError(gt, err)
+	defer resp2.Body.Close()
+	// Any reachable response is sufficient; just ensure not 503 from an upstream proxy
+	require.NotEqual(gt, http.StatusServiceUnavailable, resp2.StatusCode)
+}
+
+// This test validates that specifying an explicit top-level HTTP port is honored.
+func TestSV2Config_ExplicitHTTPPort_Binds(gt *testing.T) {
+	// test setup
+	t := devtest.SerialT(gt)
+	logger := testlog.Logger(gt, log.LevelInfo)
+	onFail, onSkipNow := exiters(gt)
+	p := devtest.NewP(context.Background(), logger, onFail, onSkipNow)
+	gt.Cleanup(p.Close)
+	ctx, cancel := context.WithTimeout(t.Ctx(), 120*time.Second)
+	defer cancel()
+
+	// stack setup (single EL, no CL)
+	var ids DefaultMinimalSystemIDs
+	opt := stack.Combine[*Orchestrator](
+		DefaultMinimalSystemNoCL(&ids),
+	)
+	orch := NewOrchestrator(p, stack.Combine[*Orchestrator]())
+	stack.ApplyOptionLifecycle(opt, orch)
+
+	l1el, ok := orch.l1ELs.Get(ids.L1EL)
+	require.True(gt, ok)
+	l1cl, ok := orch.l1CLs.Get(ids.L1CL)
+	require.True(gt, ok)
+	l2el, ok := orch.l2ELs.Get(ids.L2EL)
+	require.True(gt, ok)
+
+	dir, err := os.MkdirTemp("", "sv2cfg-")
+	require.NoError(gt, err)
+	gt.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	rollupPath := filepath.Join(dir, "rollup.json")
+	{
+		data, err := json.MarshalIndent(l2el.l2Net.rollupCfg, "", "  ")
+		require.NoError(gt, err)
+		require.NoError(gt, os.WriteFile(rollupPath, data, 0o644))
+	}
+
+	beaconAddr := l1cl.beaconHTTPAddr
+	if l1cl.beacon != nil {
+		beaconAddr = l1cl.beacon.BeaconAddr()
+	}
+
+	// pick a free HTTP port
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(gt, err)
+	addr := ln.Addr().(*net.TCPAddr)
+	httpPort := addr.Port
+	_ = ln.Close()
+
+	sv2cfgPath := filepath.Join(dir, "sv2.json")
+	cfgObj := map[string]any{
+		"http_addr":     "127.0.0.1",
+		"http_port":     httpPort,
+		"proxy_opnode":  true,
+		"confirm_depth": 2,
+		"poll_interval": "1s",
+		"chains": []map[string]any{
+			{
+				"l1_rpc":        l1el.userRPC,
+				"beacon_addr":   beaconAddr,
+				"l2_authrpc":    l2el.authRPC,
+				"l2_userrpc":    l2el.userRPC,
+				"jwt_secret":    l2el.jwtPath,
+				"rollup_config": rollupPath,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(cfgObj, "", "  ")
+	require.NoError(gt, err)
+	require.NoError(gt, os.WriteFile(sv2cfgPath, data, 0o644))
+
+	lc, err := service.New(ctx, &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: 0, ProxyOpNode: true, ConfigPath: sv2cfgPath}, logger, "test", nil)
+	require.NoError(gt, err)
+	require.NoError(gt, lc.Start(ctx))
+	gt.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = lc.Stop(c)
+		cancel()
+	})
+
+	bound, ok := service.HTTPAddr(lc)
+	require.True(gt, ok)
+	// Assert that the bound address uses the explicit port
+	_, boundPortStr, err := net.SplitHostPort(bound)
+	require.NoError(gt, err)
+	require.Equal(gt, fmt.Sprintf("%d", httpPort), boundPortStr)
 }

@@ -135,6 +135,8 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 				cfg.PollInterval = d
 			}
 		}
+		// Recompute HTTP bind address after applying file overrides
+		httpAddr = fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
 		// Add each chain
 		for i, c := range fc.Chains {
 			if c.L1RPC == "" || c.BeaconAddr == "" || c.L2AuthRPC == "" || c.L2UserRPC == "" || c.JWTPath == "" || c.RollupPath == "" {
