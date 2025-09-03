@@ -42,11 +42,7 @@ type VirtualNodeConfig struct {
 // StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
 // and a function to stop the virtual op-node. The node is configured as a sequencer with local RPCs and no external P2P.
 func StartVirtualNode(
-	l1RPC string,
-	beaconAddr string,
-	l2AuthRPC string,
-	jwtSecret [32]byte,
-	rcfg *rollup.Config,
+	cfg *VirtualNodeConfig,
 	logger log.Logger,
 ) (string, func(context.Context) error, error) {
 	// Minimal P2P config (memory-only, local addresses)
@@ -65,7 +61,7 @@ func StartVirtualNode(
 	// Do not set bootnodes; remain isolated
 	_ = fs.Set(opNodeFlags.BootnodesName, "")
 	cliCtx := cli.NewContext(&cli.App{}, fs, nil)
-	p2pConfig, _ := p2pcli.NewConfig(cliCtx, rcfg.BlockTime)
+	p2pConfig, _ := p2pcli.NewConfig(cliCtx, cfg.Rcfg.BlockTime)
 
 	// Build op-node config
 	enabled := true
@@ -76,7 +72,7 @@ func StartVirtualNode(
 	}
 	nodeCfg := &opNodeConfig.Config{
 		L1: &opNodeConfig.L1EndpointConfig{
-			L1NodeAddr: l1RPC,
+			L1NodeAddr: cfg.L1RPC,
 			L1TrustRPC: false,
 			// Use debug geth RPC kind to expose extra endpoints in tests
 			L1RPCKind:        sources.RPCKindDebugGeth,
@@ -87,12 +83,12 @@ func StartVirtualNode(
 			CacheSize:        0,
 		},
 		L2: &opNodeConfig.L2EndpointConfig{
-			L2EngineAddr:      l2AuthRPC,
-			L2EngineJWTSecret: jwtSecret,
+			L2EngineAddr:      cfg.L2AuthRPC,
+			L2EngineJWTSecret: cfg.JwtSecret,
 		},
-		Beacon:        &opNodeConfig.L1BeaconEndpointConfig{BeaconAddr: beaconAddr},
-		Driver:        driver.Config{SequencerEnabled: enabled, SequencerConfDepth: 2},
-		Rollup:        *rcfg,
+		Beacon:        &opNodeConfig.L1BeaconEndpointConfig{BeaconAddr: cfg.BeaconAddr},
+		Driver:        driver.Config{SequencerEnabled: enabled, SequencerConfDepth: cfg.ConfirmDepth},
+		Rollup:        *cfg.Rcfg,
 		RPC:           oprpc.CLIConfig{ListenAddr: "127.0.0.1", ListenPort: 0, EnableAdmin: true},
 		InteropConfig: &interop.Config{},
 		P2P:           p2pConfig,

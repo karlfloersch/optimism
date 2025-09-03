@@ -34,8 +34,20 @@ type ChainContainer struct {
 func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwtSecret [32]byte, rcfg *rollup.Config, interval time.Duration, confirmDepth uint64) (uint64, error) {
 	chainID := rcfg.L2ChainID.Uint64()
 
+	// Build virtual node config
+	vCfg := &virtual_node.VirtualNodeConfig{
+		L1RPC:        l1RPC,
+		BeaconAddr:   beaconAddr,
+		L2AuthRPC:    l2AuthRPC,
+		L2UserRPC:    l2UserRPC,
+		JwtSecret:    jwtSecret,
+		Rcfg:         rcfg,
+		Interval:     interval,
+		ConfirmDepth: confirmDepth,
+	}
+
 	// Start virtual op-node
-	userRPC, stopFn, err := virtual_node.StartVirtualNode(l1RPC, beaconAddr, l2AuthRPC, jwtSecret, rcfg, s.log)
+	userRPC, stopFn, err := virtual_node.StartVirtualNode(vCfg, s.log)
 	if err != nil {
 		return 0, err
 	}
@@ -43,17 +55,8 @@ func (s *Supervisor) AddChain(l1RPC string, beaconAddr string, l2AuthRPC string,
 	container := &ChainContainer{
 		virtualOpNodeUserRPC: userRPC,
 		stopVirtualOpNode:    stopFn,
-		virtualCfg: &virtual_node.VirtualNodeConfig{
-			L1RPC:        l1RPC,
-			BeaconAddr:   beaconAddr,
-			L2AuthRPC:    l2AuthRPC,
-			L2UserRPC:    l2UserRPC,
-			JwtSecret:    jwtSecret,
-			Rcfg:         rcfg,
-			Interval:     interval,
-			ConfirmDepth: confirmDepth,
-		},
-		started: time.Now(),
+		virtualCfg:           vCfg,
+		started:              time.Now(),
 	}
 
 	// Open logs DB for chain
@@ -143,7 +146,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	}
 
 	// Restart virtual op-node and polling
-	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg.L1RPC, container.virtualCfg.BeaconAddr, container.virtualCfg.L2AuthRPC, container.virtualCfg.JwtSecret, container.virtualCfg.Rcfg, s.log)
+	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg, s.log)
 	if err != nil {
 		return err
 	}

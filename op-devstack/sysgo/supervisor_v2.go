@@ -28,6 +28,12 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
+// Default confirmation depth used by supervisor-v2 cross-safety gating in devstack presets.
+const sv2SupervisorConfirmDepth uint64 = 40
+
+// Default L1 confirmation depth used by embedded op-node (sequencer)
+const opNodeConfDepth uint64 = 2
+
 // SupervisorV2 runs the Supervisor v2 prototype in-process with an HTTP server
 // and a polling loop against an existing L2CL (op-node) and L2EL (op-geth).
 type SupervisorV2 struct {
@@ -139,7 +145,7 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	} else {
 		beaconAddr = l1CL.beaconHTTPAddr
 	}
-	depth := uint64(40)
+	depth := uint64(sv2SupervisorConfirmDepth)
 	if v := os.Getenv("OP_SV2_CONFIRM_DEPTH"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
 			depth = n
@@ -156,6 +162,9 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	sv2cfgPath := filepath.Join(dir, "sv2.json")
 	{
 		cfgObj := map[string]any{
+			"proxy_opnode":  true,
+			"confirm_depth": opNodeConfDepth,
+			"poll_interval": "1s",
 			"chains": []map[string]any{
 				{
 					"l1_rpc":        l1EL.userRPC,
@@ -223,7 +232,7 @@ func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode,
 	} else {
 		beaconAddr = l1CL.beaconHTTPAddr
 	}
-	depth := uint64(40)
+	depth := uint64(sv2SupervisorConfirmDepth)
 	if v := os.Getenv("OP_SV2_CONFIRM_DEPTH"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
 			depth = n
@@ -240,6 +249,9 @@ func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode,
 	sv2cfgPath := filepath.Join(dir, "sv2.json")
 	{
 		cfgObj := map[string]any{
+			"proxy_opnode":  true,
+			"confirm_depth": opNodeConfDepth,
+			"poll_interval": "1s",
 			"chains": []map[string]any{
 				{
 					"l1_rpc":        l1EL.userRPC,
@@ -367,7 +379,7 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 
 // WithSupervisorV2OnAllChains starts a single Supervisor v2 and registers all L2 ELs as chains.
 func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
-	return WithSupervisorV2OnAllChainsConfirmDepth(40)
+	return WithSupervisorV2OnAllChainsConfirmDepth(sv2SupervisorConfirmDepth)
 }
 
 // WithSV2TwoChainMinimalDepth composes a minimal two-chain setup without CLs and starts a single SV2 across both chains,
