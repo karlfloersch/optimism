@@ -4,14 +4,11 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"sync"
 	"time"
-
-	"strings"
 
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
@@ -19,10 +16,11 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
+	"github.com/ethereum-optimism/optimism/op-service/cliapp"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
-	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+	service "github.com/ethereum-optimism/optimism/op-supervisor-v2"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -35,18 +33,15 @@ type SupervisorV2 struct {
 	logger log.Logger
 	p      devtest.P
 
-	srv     *http.Server
-	ln      net.Listener
 	httpURL string
-
-	sup *sv2.Supervisor
+	lc      cliapp.Lifecycle
 
 	// no extra fields needed; op-node is managed by the supervisor-v2 package
 }
 
 func (s *SupervisorV2) hydrate(sys stack.ExtensibleSystem) {
 	// Register typed L2CL frontends against the per-chain embedded op-node RPC via SV2 HTTP reverse proxy.
-	if s.sup == nil {
+	if s.lc == nil || s.HTTP() == "" {
 		return
 	}
 	l2Nets := sys.L2Networks()
@@ -75,64 +70,34 @@ func (s *SupervisorV2) hydrate(sys stack.ExtensibleSystem) {
 func (s *SupervisorV2) Start(opNodeAddr, l2Addr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.srv != nil {
+	if s.lc != nil {
 		s.logger.Warn("Supervisor v2 already started")
 		return
 	}
-
-	// Create Supervisor instance
-	s.sup = sv2.NewSupervisor(s.logger)
-	// For persistence tests, allow overriding data dir via env
-	if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
-		s.sup.SetDataDir(dd)
+	port := 0
+	if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			port = n
+		}
 	}
-	// Scope: allow override via SV2_L1_SCOPE (finalized|safe|unsafe), default unsafe
-	scope := strings.ToLower(os.Getenv("SV2_L1_SCOPE"))
-	switch scope {
-	case "finalized", "finalise", "finalized_scope":
-		s.sup.SetL1ScopeLabel(eth.Finalized)
-	case "safe":
-		s.sup.SetL1ScopeLabel(eth.Safe)
-	default:
-		s.sup.SetL1ScopeLabel(eth.Unsafe)
-	}
-	// Expose embedded op-node user RPC via HTTP reverse proxy for tests
-	s.sup.EnableOpNodeProxy(true)
-
-	// Start HTTP server; allow fixed port via OP_SV2_HTTP_PORT
-	addr := "127.0.0.1:0"
-	if p := os.Getenv("OP_SV2_HTTP_PORT"); strings.TrimSpace(p) != "" {
-		addr = "127.0.0.1:" + p
-	}
-	ln, err := net.Listen("tcp", addr)
+	cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR")}
+	lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
 	s.p.Require().NoError(err)
-	s.ln = ln
-	s.httpURL = "http://" + ln.Addr().String()
-	s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
-	go func() {
-		// Best-effort shutdown; errors are logged in test output if any
-		_ = s.srv.Serve(ln)
-	}()
-
-	// Legacy path removed: embedded mode supersedes explicit op-node RPC plumbing here.
+	s.p.Require().NoError(lc.Start(s.p.Ctx()))
+	if addr, ok := service.HTTPAddr(lc); ok {
+		s.httpURL = "http://" + addr
+	}
+	s.lc = lc
 }
 
 func (s *SupervisorV2) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sup != nil {
-		s.sup.Stop()
-		s.sup = nil
-	}
-	if s.srv != nil {
+	if s.lc != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = s.srv.Shutdown(ctx)
+		_ = s.lc.Stop(ctx)
 		cancel()
-		s.srv = nil
-	}
-	if s.ln != nil {
-		_ = s.ln.Close()
-		s.ln = nil
+		s.lc = nil
 	}
 }
 
@@ -143,28 +108,22 @@ func (s *SupervisorV2) HTTP() string { return s.httpURL }
 func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.srv == nil {
-		// Ensure HTTP is up to expose health/status; allow fixed port via OP_SV2_HTTP_PORT
-		addr := "127.0.0.1:0"
-		if p := os.Getenv("OP_SV2_HTTP_PORT"); strings.TrimSpace(p) != "" {
-			addr = "127.0.0.1:" + p
+	if s.lc == nil {
+		_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
+		port := 0
+		if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
 		}
-		ln, err := net.Listen("tcp", addr)
+		cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR")}
+		lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
 		s.p.Require().NoError(err)
-		s.ln = ln
-		s.httpURL = "http://" + ln.Addr().String()
-		s.sup = sv2.NewSupervisor(s.logger)
-		// For persistence tests, allow overriding data dir via env
-		if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
-			s.sup.SetDataDir(dd)
+		s.p.Require().NoError(lc.Start(s.p.Ctx()))
+		if addr, ok := service.HTTPAddr(lc); ok {
+			s.httpURL = "http://" + addr
 		}
-		// In tests, gate cross-safe against L1 Unsafe to progress quickly
-		s.sup.SetL1ScopeLabel(eth.Unsafe)
-		// Expose embedded op-node user RPC via HTTP reverse proxy for tests
-		s.sup.EnableOpNodeProxy(true)
-		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
-		go func() { _ = s.srv.Serve(ln) }()
-		// Expose the HTTP URL in logs for external consumers (e.g. smoke tests)
+		s.lc = lc
 		fmt.Printf("[sv2] http: %s\n", s.HTTP())
 	}
 	// Export SV2 URL for op-node denylist integration in tests
@@ -200,7 +159,7 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 		}
 		s.logger.Info("SV2 AddChain rollup timings", "chain", l2EL.id.ChainID(), "genesis_l2_time", g.L2Time, "interop2_time", i2)
 	}
-	_, err = s.sup.AddChain(l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
+	_, err = service.AddChain(s.lc, l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
 	s.p.Require().NoError(err)
 }
 
@@ -208,19 +167,22 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.srv == nil {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		s.p.Require().NoError(err)
-		s.ln = ln
-		s.httpURL = "http://" + ln.Addr().String()
-		s.sup = sv2.NewSupervisor(s.logger)
-		if dd := os.Getenv("SV2_DATA_DIR"); dd != "" {
-			s.sup.SetDataDir(dd)
+	if s.lc == nil {
+		_ = os.Setenv("SV2_L1_SCOPE", "unsafe")
+		port := 0
+		if p := os.Getenv("OP_SV2_HTTP_PORT"); p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
 		}
-		s.sup.SetL1ScopeLabel(eth.Unsafe)
-		s.sup.EnableOpNodeProxy(true)
-		s.srv = &http.Server{Handler: s.sup.HTTPHandler()}
-		go func() { _ = s.srv.Serve(ln) }()
+		cfg := &service.Config{HTTPAddr: "127.0.0.1", HTTPPort: port, ProxyOpNode: true, DataDir: os.Getenv("SV2_DATA_DIR")}
+		lc, err := service.New(context.Background(), cfg, s.logger, "devstack", nil)
+		s.p.Require().NoError(err)
+		s.p.Require().NoError(lc.Start(s.p.Ctx()))
+		if addr, ok := service.HTTPAddr(lc); ok {
+			s.httpURL = "http://" + addr
+		}
+		s.lc = lc
 		fmt.Printf("[sv2] http: %s\n", s.HTTP())
 	}
 
@@ -244,7 +206,7 @@ func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode,
 			depth = n
 		}
 	}
-	_, err = s.sup.AddChain(l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
+	_, err = service.AddChain(s.lc, l1EL.userRPC, beaconAddr, l2EL.authRPC, l2EL.userRPC, jwtSecret, l2EL.l2Net.rollupCfg, 1*time.Second, depth)
 	s.p.Require().NoError(err)
 }
 
@@ -386,7 +348,7 @@ func WithSupervisorV2OnAllChains() stack.Option[*Orchestrator] {
 			} else {
 				beaconAddr = l1cl.beaconHTTPAddr
 			}
-			_, err = s.sup.AddChain(l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
+			_, err = service.AddChain(s.lc, l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, 40)
 			orch.p.Require().NoError(err)
 			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)
 			// can resolve it by ID and use the SV2 proxy URL as Rollup RPC.
@@ -454,7 +416,7 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 			} else {
 				beaconAddr = l1cl.beaconHTTPAddr
 			}
-			_, err = s.sup.AddChain(l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
+			_, err = service.AddChain(s.lc, l1el.userRPC, beaconAddr, l2el.authRPC, l2el.userRPC, jwtSecret, l2el.l2Net.rollupCfg, 1*time.Second, depth)
 			orch.p.Require().NoError(err)
 
 			// Also register a minimal CL handle in the orchestrator map so components (e.g., batcher)

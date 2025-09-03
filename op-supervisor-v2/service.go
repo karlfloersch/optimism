@@ -1,0 +1,188 @@
+package supervisorv2
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/urfave/cli/v2"
+
+	"github.com/ethereum-optimism/optimism/op-service/cliapp"
+	"github.com/ethereum/go-ethereum/log"
+
+	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	sv2 "github.com/ethereum-optimism/optimism/op-supervisor-v2/supervisor"
+)
+
+// Config captures CLI-derived configuration for the SV2 service lifecycle.
+type Config struct {
+	HTTPAddr    string
+	HTTPPort    int
+	ProxyOpNode bool
+	DataDir     string
+
+	// Single-chain bootstrap (Milestone 1): retained for backward compatibility
+	L1RPC        string
+	BeaconAddr   string
+	L2AuthRPC    string
+	L2UserRPC    string
+	JWTPath      string
+	RollupPath   string
+	PollInterval time.Duration
+	ConfirmDepth uint64
+
+	// Cancel enables the service to request the app to stop
+	Cancel context.CancelCauseFunc
+}
+
+// NewConfig builds a Config from CLI flags.
+func NewConfig(ctx *cli.Context, logger log.Logger) (*Config, error) {
+	// Read basic server flags
+	cfg := &Config{
+		HTTPAddr:     ctx.String("http.addr"),
+		HTTPPort:     ctx.Int("http.port"),
+		ProxyOpNode:  ctx.Bool("proxy.opnode"),
+		DataDir:      ctx.String("sv2.data-dir"),
+		L1RPC:        ctx.String("l1.rpc"),
+		BeaconAddr:   ctx.String("beacon.addr"),
+		L2AuthRPC:    ctx.String("l2.authrpc"),
+		L2UserRPC:    ctx.String("l2.userrpc"),
+		JWTPath:      ctx.String("jwt.secret"),
+		RollupPath:   ctx.String("rollup.config"),
+		PollInterval: ctx.Duration("poll.interval"),
+		ConfirmDepth: ctx.Uint64("confirm.depth"),
+	}
+	// No additional validation here; the constructor enforces required fields for single-chain mode
+	_ = logger
+	return cfg, nil
+}
+
+// New constructs the lifecycle for SV2 using the provided config and logger.
+// It mirrors the op-node pattern: the returned lifecycle starts HTTP and the supervisor, and stops them gracefully.
+func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ any) (cliapp.Lifecycle, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("nil config")
+	}
+	// Build a supervisor instance
+	sup := sv2.NewSupervisor(logger)
+	if cfg.DataDir != "" {
+		sup.SetDataDir(cfg.DataDir)
+	}
+	sup.EnableOpNodeProxy(cfg.ProxyOpNode)
+
+	// Build HTTP server (listener created in Start to capture bound address when using port 0)
+	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
+	httpSrv := &http.Server{Handler: sup.HTTPHandler()}
+
+	// If single-chain bootstrap fields are set, add one chain
+	if cfg.L1RPC != "" || cfg.BeaconAddr != "" || cfg.L2AuthRPC != "" || cfg.L2UserRPC != "" || cfg.JWTPath != "" || cfg.RollupPath != "" {
+		// verify all are set
+		if cfg.L1RPC == "" || cfg.BeaconAddr == "" || cfg.L2AuthRPC == "" || cfg.L2UserRPC == "" || cfg.JWTPath == "" || cfg.RollupPath == "" {
+			return nil, fmt.Errorf("requires --l1.rpc, --beacon.addr, --l2.authrpc, --l2.userrpc, --jwt.secret, --rollup.config for single-chain bootstrap")
+		}
+		// Read JWT
+		data, err := os.ReadFile(cfg.JWTPath)
+		if err != nil {
+			return nil, fmt.Errorf("read jwt.secret: %w", err)
+		}
+		s := string(data)
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "0x")
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("decode jwt.secret: %w", err)
+		}
+		if len(b) != 32 {
+			return nil, fmt.Errorf("jwt.secret must be 32 bytes, got %d", len(b))
+		}
+		var jwt [32]byte
+		copy(jwt[:], b)
+		// Read rollup config JSON
+		cfgBytes, err := os.ReadFile(cfg.RollupPath)
+		if err != nil {
+			return nil, fmt.Errorf("read rollup.config: %w", err)
+		}
+		var rcfg rollup.Config
+		if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
+			return nil, fmt.Errorf("parse rollup.config: %w", err)
+		}
+		if _, err := sup.AddChain(cfg.L1RPC, cfg.BeaconAddr, cfg.L2AuthRPC, cfg.L2UserRPC, jwt, &rcfg, cfg.PollInterval, cfg.ConfirmDepth); err != nil {
+			return nil, fmt.Errorf("add chain: %w", err)
+		}
+	}
+
+	// Return a lifecycle that manages HTTP and underlying supervisor shutdown
+	return &sv2Lifecycle{srv: httpSrv, sup: sup, logger: logger, version: version, addr: httpAddr}, nil
+}
+
+type sv2Lifecycle struct {
+	srv     *http.Server
+	sup     *sv2.Supervisor
+	logger  log.Logger
+	version string
+	stopped bool
+	addr    string
+	ln      net.Listener
+}
+
+func (l *sv2Lifecycle) Start(ctx context.Context) error {
+	// Create listener (allow port 0)
+	ln, err := net.Listen("tcp", l.addr)
+	if err != nil {
+		return err
+	}
+	l.ln = ln
+	// Start HTTP server in background
+	go func() {
+		l.logger.Info("starting sv2 http server", "addr", ln.Addr().String(), "version", l.version)
+		if err := l.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			l.logger.Error("http server error", "err", err)
+		}
+	}()
+	return nil
+}
+
+func (l *sv2Lifecycle) Stop(ctx context.Context) error {
+	if l.stopped {
+		return nil
+	}
+	l.stopped = true
+	// Gracefully stop HTTP
+	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_ = l.srv.Shutdown(stopCtx)
+	if l.ln != nil {
+		_ = l.ln.Close()
+		l.ln = nil
+	}
+	// Stop supervisor chains
+	l.sup.Stop()
+	return nil
+}
+
+func (l *sv2Lifecycle) Stopped() bool { return l.stopped }
+
+// AddChain registers a chain on a running SV2 lifecycle instance. Intended for tests/harnesses.
+// It avoids importing internal cmd or supervisor wiring from callers.
+func AddChain(lc cliapp.Lifecycle, l1RPC string, beaconAddr string, l2AuthRPC string, l2UserRPC string, jwt [32]byte, rcfg *rollup.Config, pollInterval time.Duration, confirmDepth uint64) (uint64, error) {
+	s, ok := lc.(*sv2Lifecycle)
+	if !ok || s == nil || s.sup == nil {
+		return 0, fmt.Errorf("unsupported lifecycle instance")
+	}
+	return s.sup.AddChain(l1RPC, beaconAddr, l2AuthRPC, l2UserRPC, jwt, rcfg, pollInterval, confirmDepth)
+}
+
+// HTTPAddr returns the bound HTTP address (host:port) for a running lifecycle.
+func HTTPAddr(lc cliapp.Lifecycle) (string, bool) {
+	s, ok := lc.(*sv2Lifecycle)
+	if !ok || s == nil || s.ln == nil {
+		return "", false
+	}
+	return s.ln.Addr().String(), true
+}
