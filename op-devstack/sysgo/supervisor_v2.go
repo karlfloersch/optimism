@@ -189,7 +189,7 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	}
 	s.lc = lc
 	fmt.Printf("[sv2] http: %s\n", s.HTTP())
-	_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
+	_ = os.Setenv("SV2_AUTHORIZATION_URL", s.HTTP())
 	// Log rollup cfg timing for debugging fork activation
 	if l2EL.l2Net.rollupCfg != nil {
 		g := l2EL.l2Net.rollupCfg.Genesis
@@ -201,7 +201,7 @@ func (s *SupervisorV2) StartEmbeddedFromSys(l1EL *L1ELNode, l1CL *L1CLNode, l2EL
 	}
 }
 
-// StartEmbeddedFromSysNoEnv is like StartEmbeddedFromSys but does not mutate SV2_DENYLIST_URL.
+// StartEmbeddedFromSysNoEnv is like StartEmbeddedFromSys but does not mutate SV2_AUTHORIZATION_URL.
 func (s *SupervisorV2) StartEmbeddedFromSysNoEnv(l1EL *L1ELNode, l1CL *L1CLNode, l2EL *L2ELNode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,7 +334,7 @@ func WithSupervisorV2OnFirstChain() stack.Option[*Orchestrator] {
 			return
 		}
 		net := nets[0]
-		url := os.Getenv("SV2_DENYLIST_URL")
+		url := os.Getenv("SV2_AUTHORIZATION_URL")
 		if url == "" {
 			return
 		}
@@ -397,7 +397,7 @@ func WithSV2TwoChainMinimalDepth(offset uint64, depth uint64) stack.Option[*Orch
 		// Configure batchers to use SV2 /opnode/{chainId}/ proxy (set RollupRpc override)
 		WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
 			if v, ok := id.ChainID().Uint64(); ok {
-				sv2URL := os.Getenv("SV2_DENYLIST_URL")
+				sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 				cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2URL, v)}
 			}
 		}),
@@ -531,7 +531,7 @@ func WithSupervisorV2OnAllChainsConfirmDepth(depth uint64) stack.Option[*Orchest
 		}
 		s.lc = lc
 		fmt.Printf("[sv2] http: %s\n", s.HTTP())
-		_ = os.Setenv("SV2_DENYLIST_URL", s.HTTP())
+		_ = os.Setenv("SV2_AUTHORIZATION_URL", s.HTTP())
 
 		// Chains will be loaded from sv2.config by the service
 
@@ -611,7 +611,7 @@ func waitHTTP(p devtest.P, url string) error {
 
 // WithSecondSupervisorV2OnFirstChain starts a SECOND SV2 instance for the same first-chain EL,
 // intended to be used as a verifier by disabling the sequencer in the embedded op-node via env.
-// It does not override SV2_DENYLIST_URL and instead notifies the caller via callback with its base URL.
+// It does not override SV2_AUTHORIZATION_URL and instead notifies the caller via callback with its base URL.
 func WithSecondSupervisorV2OnFirstChain(onReady func(url string)) stack.Option[*Orchestrator] {
 	return stack.AfterDeploy(func(orch *Orchestrator) {
 		l2elIDs := stack.SortL2ELNodeIDs(orch.l2ELs.Keys())
@@ -652,7 +652,7 @@ func WithSecondSupervisorV2OnFirstChain(onReady func(url string)) stack.Option[*
 }
 
 // WithSecondSupervisorV2ForEL starts a second SV2 instance for the given L2 EL ID in verifier mode (sequencer disabled).
-// It does not modify SV2_DENYLIST_URL; the onReady callback receives the base URL of the verifier SV2.
+// It does not modify SV2_AUTHORIZATION_URL; the onReady callback receives the base URL of the verifier SV2.
 func WithSecondSupervisorV2ForEL(elID stack.L2ELNodeID, onReady func(url string)) stack.Option[*Orchestrator] {
 	return stack.AfterDeploy(func(orch *Orchestrator) {
 		l1elIDs := stack.SortL1ELNodeIDs(orch.l1ELs.Keys())

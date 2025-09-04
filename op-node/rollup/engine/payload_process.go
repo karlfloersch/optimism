@@ -32,7 +32,7 @@ func (eq *EngDeriver) onPayloadProcess(ctx context.Context, ev PayloadProcessEve
 	defer cancel()
 
 	// Optional SV2 denylist pre-insert check
-	if baseURL := os.Getenv("SV2_DENYLIST_URL"); baseURL != "" && ev.Envelope != nil && ev.Envelope.ExecutionPayload != nil {
+	if baseURL := os.Getenv("SV2_AUTHORIZATION_URL"); baseURL != "" && ev.Envelope != nil && ev.Envelope.ExecutionPayload != nil {
 		if payloadID, ok := ev.Envelope.CheckBlockHash(); ok {
 			chainID := eq.cfg.L2ChainID.Uint64()
 			url := fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", baseURL, chainID, payloadID.Hex())

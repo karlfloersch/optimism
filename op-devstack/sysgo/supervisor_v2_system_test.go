@@ -83,7 +83,7 @@ func TestJustSitThere(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -171,7 +171,7 @@ func TestManualRollback(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -336,7 +336,7 @@ func TestValidExecutingMessage(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -524,6 +524,8 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &rec, "eth_getTransactionReceipt", execTxHash))
 	t.Require().Empty(rec.BlockHash, "invalid executing tx should not be included yet")
 
+	time.Sleep(120 * time.Second)
+
 	gt.Logf("%s: Test completed - invalid executing message handled, cross-safe advanced, and reorg observed", testName)
 	//////////////////////////////////////////////////////////////////////
 }
@@ -558,7 +560,7 @@ func TestTwoChainValidExecutingMessage(gt *testing.T) {
 	gt.Logf("%s: Two-chain system setup complete", testName)
 
 	// wait for SV2 to be ready
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -639,7 +641,7 @@ func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.C
 	gt.Logf("%s: System setup complete", testName)
 
 	// Wait for SV2 to be ready
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)

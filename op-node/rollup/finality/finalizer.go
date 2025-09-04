@@ -2,7 +2,10 @@ package finality
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -255,6 +258,14 @@ func (fi *Finalizer) tryFinalize() {
 			})
 			return
 		}
+		// Check supervisor authorization for finality update if configured
+		fmt.Println("should finality authorization check?", os.Getenv("SV2_AUTHORIZATION_URL"))
+		if os.Getenv("SV2_AUTHORIZATION_URL") != "" {
+			if !fi.checkFinalityAuthorization(finalizedL2) {
+				fi.log.Debug("finality authorization denied by supervisor", "l2_block", finalizedL2)
+				return
+			}
+		}
 		fi.emitter.Emit(fi.ctx, engine.PromoteFinalizedEvent{Ref: finalizedL2})
 	}
 }
@@ -293,6 +304,46 @@ func (fi *Finalizer) onDerivedSafeBlock(l2Safe eth.L2BlockRef, derivedFrom eth.L
 			fi.log.Debug("updated finality-data", "last_l1", last.L1Block, "last_l2", last.L2Block)
 		}
 	}
+}
+
+// checkFinalityAuthorization checks with the supervisor if a finality update is authorized.
+// This is called when SV2_AUTHORIZATION_URL is set.
+func (fi *Finalizer) checkFinalityAuthorization(l2Block eth.L2BlockRef) bool {
+	baseURL := os.Getenv("SV2_AUTHORIZATION_URL")
+	if baseURL == "" {
+		// If no supervisor URL is configured, allow finality (fallback behavior)
+		return true
+	}
+
+	url := fmt.Sprintf("%s/authorize_finality/v1/check?timestamp=%d", baseURL, l2Block.Time)
+
+	reqCtx, reqCancel := context.WithTimeout(fi.ctx, 500*time.Millisecond)
+	defer reqCancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		fi.log.Warn("failed to create finality authorization request", "err", err)
+		return false // Deny finality on request creation failure
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fi.log.Warn("finality authorization request failed", "err", err)
+		return false // Deny finality on HTTP failure
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Authorized bool `json:"authorized"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fi.log.Warn("failed to decode finality authorization response", "err", err)
+		return false // Deny finality on decode failure
+	}
+
+	fi.log.Debug("finality authorization check", "l2_block", l2Block, "authorized", result.Authorized)
+	return result.Authorized
 }
 
 // onReset clears the recent history of safe-L2 blocks used for finalization,

@@ -144,7 +144,7 @@ func TestSV2RollbackSingleChain(gt *testing.T) {
 	}
 
 	// Trigger rollback via Supervisor admin API (stops op-node, rolls back EL, restarts op-node)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 	toNum := preRef.Number - 1
@@ -290,7 +290,7 @@ func TestSV2TwoChainSingleRollbackAfterSafe(gt *testing.T) {
 	}
 
 	// Ensure H is SAFE on A before rollback
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// Gate on SV2 readiness
 	{
@@ -474,7 +474,7 @@ func TestSV2TwoChainRollbackBOnlyAfterSafe(gt *testing.T) {
 	}
 
 	// Ensure H is SAFE on B before rollback
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// Gate on SV2 readiness
 	{
@@ -674,7 +674,7 @@ func TestSV2SingleChainSafeAdvancesQuick(gt *testing.T) {
 	orch.Hydrate(system)
 
 	// Quick-fail checks: ensure SV2 URL is exposed and op-node proxy is ready
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// readiness gate
 	{
@@ -718,7 +718,7 @@ func TestSV2TwoChainSafeProgressionWithBatchers(gt *testing.T) {
 	l2B := l2Nets[1]
 
 	// Environment and URLs
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// Gate on SV2 readiness
 	{
@@ -829,7 +829,7 @@ func TestSV2TwoChainSafeProgressionSerialized(gt *testing.T) {
 		// Ensure batchers use SV2 /opnode/{chainId}/ when we start them manually below
 		WithBatcherOption(func(id stack.L2BatcherID, cfg *bss.CLIConfig) {
 			if v, ok := id.ChainID().Uint64(); ok {
-				if sv2URL := os.Getenv("SV2_DENYLIST_URL"); sv2URL != "" {
+				if sv2URL := os.Getenv("SV2_AUTHORIZATION_URL"); sv2URL != "" {
 					cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2URL, v)}
 				}
 			}
@@ -854,7 +854,7 @@ func TestSV2TwoChainSafeProgressionSerialized(gt *testing.T) {
 	l2B := l2Nets[1]
 
 	// Environment and URLs
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// Gate on SV2 readiness
 	{
@@ -975,7 +975,7 @@ func TestSV2CrossSafeProgressSingleChain(gt *testing.T) {
 
 	l2Net := system.L2Networks()[0]
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	// Gate on SV2 readiness
 	{
@@ -1112,7 +1112,7 @@ func TestSV2SequencerAndVerifierSyncSingleChain(gt *testing.T) {
 	_ = elVer2 // referenced to avoid unused in case of future checks
 
 	// Read environment URL for sequencer-side SV2
-	sv2SequencerURL := os.Getenv("SV2_DENYLIST_URL")
+	sv2SequencerURL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2SequencerURL)
 
 	// Wait for all op-node proxies
@@ -1299,7 +1299,7 @@ func TestSV2SeqVerifiersDivergenceDiagnostics(gt *testing.T) {
 	elVer := l2Net.L2ELNode(verifierELID)
 	elVer2 := l2Net.L2ELNode(verifierELID2)
 
-	sv2SequencerURL := os.Getenv("SV2_DENYLIST_URL")
+	sv2SequencerURL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2SequencerURL)
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
 	ctx, cancel := context.WithTimeout(t.Ctx(), 3*time.Minute)
