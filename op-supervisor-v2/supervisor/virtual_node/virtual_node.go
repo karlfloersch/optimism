@@ -25,6 +25,7 @@ import (
 
 	// derive sequencer mode from env to avoid struct coupling
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -39,6 +40,10 @@ type VirtualNodeConfig struct {
 	ConfirmDepth      uint64
 	UserRPCListenAddr string
 	UserRPCPort       int
+	DataDir           string
+	// Optional: P2P configuration passthroughs
+	StaticPeers []string
+	Bootnodes   []string
 }
 
 // StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
@@ -52,6 +57,16 @@ func StartVirtualNode(
 	for _, f := range opNodeFlags.P2PFlags(opNodeFlags.EnvVarPrefix) {
 		_ = f.Apply(fs)
 	}
+	// Prefer a stable P2P identity per chain when a data-dir is provided; otherwise, use a unique temp key.
+	if cfg.DataDir != "" && cfg.Rcfg != nil && cfg.Rcfg.L2ChainID != nil {
+		base := filepath.Join(cfg.DataDir, "p2p", fmt.Sprintf("%d", cfg.Rcfg.L2ChainID.Uint64()))
+		_ = os.MkdirAll(base, 0o755)
+		_ = fs.Set(opNodeFlags.P2PPrivPathName, filepath.Join(base, "priv.txt"))
+	} else {
+		// ensure distinct peer IDs across virtual nodes by using a unique p2p privkey path per instance
+		tmpDir, _ := os.MkdirTemp("", "sv2-p2p-")
+		_ = fs.Set(opNodeFlags.P2PPrivPathName, filepath.Join(tmpDir, "p2p_priv.txt"))
+	}
 	_ = fs.Set(opNodeFlags.AdvertiseIPName, "127.0.0.1")
 	_ = fs.Set(opNodeFlags.AdvertiseTCPPortName, "0")
 	_ = fs.Set(opNodeFlags.AdvertiseUDPPortName, "0")
@@ -60,8 +75,15 @@ func StartVirtualNode(
 	_ = fs.Set(opNodeFlags.ListenUDPPortName, "0")
 	_ = fs.Set(opNodeFlags.DiscoveryPathName, "memory")
 	_ = fs.Set(opNodeFlags.PeerstorePathName, "memory")
-	// Do not set bootnodes; remain isolated
-	_ = fs.Set(opNodeFlags.BootnodesName, "")
+	// Bootnodes / static peers: remain isolated unless configured
+	if len(cfg.Bootnodes) > 0 {
+		_ = fs.Set(opNodeFlags.BootnodesName, strings.Join(cfg.Bootnodes, ","))
+	} else {
+		_ = fs.Set(opNodeFlags.BootnodesName, "")
+	}
+	if len(cfg.StaticPeers) > 0 {
+		_ = fs.Set(opNodeFlags.StaticPeersName, strings.Join(cfg.StaticPeers, ","))
+	}
 	cliCtx := cli.NewContext(&cli.App{}, fs, nil)
 	p2pConfig, _ := p2pcli.NewConfig(cliCtx, cfg.Rcfg.BlockTime)
 

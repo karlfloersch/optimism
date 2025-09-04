@@ -88,14 +88,16 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 	// Multi-chain config takes precedence over single-chain bootstrap
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
 		type chainCfg struct {
-			L1RPC             string `json:"l1_rpc"`
-			BeaconAddr        string `json:"beacon_addr"`
-			L2AuthRPC         string `json:"l2_authrpc"`
-			L2UserRPC         string `json:"l2_userrpc"`
-			JWTPath           string `json:"jwt_secret"`
-			RollupPath        string `json:"rollup_config"`
-			UserRPCPort       int    `json:"user_rpc_port"`
-			UserRPCListenAddr string `json:"user_rpc_listen_addr"`
+			L1RPC             string   `json:"l1_rpc"`
+			BeaconAddr        string   `json:"beacon_addr"`
+			L2AuthRPC         string   `json:"l2_authrpc"`
+			L2UserRPC         string   `json:"l2_userrpc"`
+			JWTPath           string   `json:"jwt_secret"`
+			RollupPath        string   `json:"rollup_config"`
+			UserRPCPort       int      `json:"user_rpc_port"`
+			UserRPCListenAddr string   `json:"user_rpc_listen_addr"`
+			StaticPeers       []string `json:"p2p_static"`
+			Bootnodes         []string `json:"p2p_bootnodes"`
 		}
 		type fileCfg struct {
 			HTTPAddr     string     `json:"http_addr"`
@@ -174,6 +176,9 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 				ConfirmDepth:      cfg.ConfirmDepth,
 				UserRPCListenAddr: c.UserRPCListenAddr,
 				UserRPCPort:       c.UserRPCPort,
+				DataDir:           cfg.DataDir,
+				StaticPeers:       c.StaticPeers,
+				Bootnodes:         c.Bootnodes,
 			}
 			if _, err := sup.AddChain(vCfg); err != nil {
 				return nil, fmt.Errorf("chains[%d]: add chain: %w", i, err)
@@ -219,6 +224,8 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 			Rcfg:         &rcfg,
 			Interval:     cfg.PollInterval,
 			ConfirmDepth: cfg.ConfirmDepth,
+			DataDir:      cfg.DataDir,
+			// No static/bootnodes in single-chain flags mode unless we later add flags
 		}
 		if _, err := sup.AddChain(vCfg); err != nil {
 			return nil, fmt.Errorf("add chain: %w", err)
@@ -293,4 +300,15 @@ func HTTPAddr(lc cliapp.Lifecycle) (string, bool) {
 		return "", false
 	}
 	return s.ln.Addr().String(), true
+}
+
+// RollbackChain requests a rollback of a chain managed by the lifecycle's supervisor.
+func RollbackChain(lc cliapp.Lifecycle, chainID uint64, toBlock uint64) error {
+	s, ok := lc.(*sv2Lifecycle)
+	if !ok || s == nil || s.sup == nil {
+		return fmt.Errorf("unsupported lifecycle instance")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.sup.RollbackChain(ctx, chainID, toBlock)
 }
