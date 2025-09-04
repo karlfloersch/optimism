@@ -42,8 +42,10 @@ type VirtualNodeConfig struct {
 	UserRPCPort       int
 	DataDir           string
 	// Optional: P2P configuration passthroughs
-	StaticPeers []string
-	Bootnodes   []string
+	StaticPeers   []string
+	Bootnodes     []string
+	PeerstorePath string
+	DiscoveryPath string
 }
 
 // StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
@@ -58,14 +60,17 @@ func StartVirtualNode(
 		_ = f.Apply(fs)
 	}
 	// Prefer a stable P2P identity per chain when a data-dir is provided; otherwise, use a unique temp key.
+	keyPath := ""
 	if cfg.DataDir != "" && cfg.Rcfg != nil && cfg.Rcfg.L2ChainID != nil {
 		base := filepath.Join(cfg.DataDir, "p2p", fmt.Sprintf("%d", cfg.Rcfg.L2ChainID.Uint64()))
 		_ = os.MkdirAll(base, 0o755)
-		_ = fs.Set(opNodeFlags.P2PPrivPathName, filepath.Join(base, "priv.txt"))
+		keyPath = filepath.Join(base, "priv.txt")
+		_ = fs.Set(opNodeFlags.P2PPrivPathName, keyPath)
 	} else {
 		// ensure distinct peer IDs across virtual nodes by using a unique p2p privkey path per instance
 		tmpDir, _ := os.MkdirTemp("", "sv2-p2p-")
-		_ = fs.Set(opNodeFlags.P2PPrivPathName, filepath.Join(tmpDir, "p2p_priv.txt"))
+		keyPath = filepath.Join(tmpDir, "p2p_priv.txt")
+		_ = fs.Set(opNodeFlags.P2PPrivPathName, keyPath)
 	}
 	_ = fs.Set(opNodeFlags.AdvertiseIPName, "127.0.0.1")
 	_ = fs.Set(opNodeFlags.AdvertiseTCPPortName, "0")
@@ -73,8 +78,28 @@ func StartVirtualNode(
 	_ = fs.Set(opNodeFlags.ListenIPName, "127.0.0.1")
 	_ = fs.Set(opNodeFlags.ListenTCPPortName, "0")
 	_ = fs.Set(opNodeFlags.ListenUDPPortName, "0")
-	_ = fs.Set(opNodeFlags.DiscoveryPathName, "memory")
-	_ = fs.Set(opNodeFlags.PeerstorePathName, "memory")
+	// Configure discovery/peerstore paths: prefer explicit paths, then DataDir defaults, else memory
+	peerstorePath := "memory"
+	if cfg.PeerstorePath != "" {
+		peerstorePath = cfg.PeerstorePath
+	} else if cfg.DataDir != "" && cfg.Rcfg != nil && cfg.Rcfg.L2ChainID != nil {
+		peerstorePath = filepath.Join(cfg.DataDir, "p2p", fmt.Sprintf("%d", cfg.Rcfg.L2ChainID.Uint64()), "peerstore")
+	}
+	_ = fs.Set(opNodeFlags.PeerstorePathName, peerstorePath)
+	discoveryPath := "memory"
+	if cfg.DiscoveryPath != "" {
+		discoveryPath = cfg.DiscoveryPath
+	} else if cfg.DataDir != "" && cfg.Rcfg != nil && cfg.Rcfg.L2ChainID != nil {
+		discoveryPath = filepath.Join(cfg.DataDir, "p2p", fmt.Sprintf("%d", cfg.Rcfg.L2ChainID.Uint64()), "discovery")
+	}
+	_ = fs.Set(opNodeFlags.DiscoveryPathName, discoveryPath)
+	if peerstorePath == "memory" {
+		logger.Warn("op-node peerstore is in-memory; use unique sv2_data_dir to persist per-node state")
+	}
+	if discoveryPath == "memory" {
+		logger.Warn("op-node discovery DB is in-memory; use unique sv2_data_dir to persist per-node state")
+	}
+	logger.Info("configured op-node p2p storage", "key", keyPath, "peerstore", peerstorePath, "discovery", discoveryPath)
 	// Bootnodes / static peers: remain isolated unless configured
 	if len(cfg.Bootnodes) > 0 {
 		_ = fs.Set(opNodeFlags.BootnodesName, strings.Join(cfg.Bootnodes, ","))

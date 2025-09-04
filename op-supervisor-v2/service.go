@@ -98,6 +98,8 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 			UserRPCListenAddr string   `json:"user_rpc_listen_addr"`
 			StaticPeers       []string `json:"p2p_static"`
 			Bootnodes         []string `json:"p2p_bootnodes"`
+			PeerstorePath     string   `json:"p2p_peerstore_path"`
+			DiscoveryPath     string   `json:"p2p_discovery_path"`
 		}
 		type fileCfg struct {
 			HTTPAddr     string     `json:"http_addr"`
@@ -179,6 +181,8 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 				DataDir:           cfg.DataDir,
 				StaticPeers:       c.StaticPeers,
 				Bootnodes:         c.Bootnodes,
+				PeerstorePath:     c.PeerstorePath,
+				DiscoveryPath:     c.DiscoveryPath,
 			}
 			if _, err := sup.AddChain(vCfg); err != nil {
 				return nil, fmt.Errorf("chains[%d]: add chain: %w", i, err)
