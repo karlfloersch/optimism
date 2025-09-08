@@ -12,6 +12,7 @@ import (
 	e2eopnode "github.com/ethereum-optimism/optimism/op-e2e/e2eutils/opnode"
 	opNodeConfig "github.com/ethereum-optimism/optimism/op-node/config"
 	opNodeFlags "github.com/ethereum-optimism/optimism/op-node/flags"
+	opnodep2p "github.com/ethereum-optimism/optimism/op-node/p2p"
 	p2pcli "github.com/ethereum-optimism/optimism/op-node/p2p/cli"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/driver"
@@ -120,7 +121,11 @@ func StartVirtualNode(
 		logger.Info("P2P networking disabled for virtual op-node")
 	}
 	cliCtx := cli.NewContext(&cli.App{}, fs, nil)
-	p2pConfig, _ := p2pcli.NewConfig(cliCtx, cfg.Rcfg.BlockTime)
+	p2pConfig, err := p2pcli.NewConfig(cliCtx, cfg.Rcfg.BlockTime)
+	if err != nil {
+		logger.Warn("failed to create P2P config, disabling P2P", "err", err)
+		p2pConfig = &opnodep2p.Config{DisableP2P: true}
+	}
 
 	// Build op-node config
 	enabled := true
