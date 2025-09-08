@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	bindings "github.com/ethereum-optimism/optimism/devnet-sdk/contracts/bindings"
 	inboxbinding "github.com/ethereum-optimism/optimism/op-e2e/e2eutils/contracts/bindings/inbox"
@@ -48,13 +49,14 @@ type blockID struct {
 func main() {
 	var (
 		envFile      = flag.String("env-file", "op-up/external-l1.env", "Path to Sepolia external L1 env file")
-		mode         = flag.String("mode", "tx", "Run mode: tx|valid-msg|invalid-msg (aliases: valid->tx, invalid->invalid-msg, both->tx+invalid-msg)")
+		mode         = flag.String("mode", "tx", "Run mode: tx|valid-msg|invalid-msg|heads (aliases: valid->tx, invalid->invalid-msg, both->tx+invalid-msg)")
 		timeout      = flag.Duration("timeout", 10*time.Minute, "Overall timeout")
 		pollInterval = flag.Duration("poll-interval", 250*time.Millisecond, "Polling interval")
 		logFile      = flag.String("log-file", "", "Optional log output file (append)")
 		rpc901       = flag.String("rpc-901", "http://127.0.0.1:9545", "Execution RPC URL for chain 901")
 		rpc902       = flag.String("rpc-902", "http://127.0.0.1:9546", "Execution RPC URL for chain 902")
 		sv2Flag      = flag.String("sv2-url", "", "Optional SV2 base URL (skip discovery if set)")
+		sv2Wait      = flag.Bool("sv2-wait", false, "If set, wait for SV2 to be advancing before proceeding")
 		privKeyFlag  = flag.String("priv-key", "", "Private key for sending txs (0x...) - optional if present in env file as FAUCET_PK")
 		fromChain    = flag.String("from", "901", "Source chain for L2->L2 message (901 or 902); destination is the other chain")
 		targetFlag   = flag.String("target", "", "Optional target address for L2->L2 message (default: EOA self for valid-msg; CrossL2Inbox for invalid-msg)")
@@ -76,16 +78,15 @@ func main() {
 
 	sv2URL := strings.TrimSpace(*sv2Flag)
 	if sv2URL == "" {
-		var err error
-		sv2URL, err = discoverSV2URL()
-		if err != nil {
-			fmt.Printf("WARN: SV2 URL discover failed: %v\n", err)
+		if u, err := discoverSV2URL(); err == nil {
+			sv2URL = u
 		}
 	}
-	if sv2URL != "" {
+	if sv2URL != "" && *sv2Wait {
 		fmt.Printf("SV2 URL: %s\n", sv2URL)
 		ctxDeadline := time.Now().Add(*timeout)
-		if err := waitSV2Advancing(sv2URL, []string{"901", "902"}, ctxDeadline, *pollInterval); err != nil {
+		chainRPCs := map[string]string{"901": *rpc901, "902": *rpc902}
+		if err := waitSV2Advancing(sv2URL, chainRPCs, ctxDeadline, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 readiness: %v\n", err)
 			os.Exit(1)
 		}
@@ -120,6 +121,12 @@ func main() {
 	}
 
 	switch modeLower {
+	case "heads":
+		if err := showHeads(sv2URL, *rpc901, *rpc902); err != nil {
+			fmt.Printf("ERROR: heads: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	case "tx":
 		if err := sendSimpleTxBoth([]string{*rpc901, *rpc902}, privKey, *timeout); err != nil {
 			fmt.Printf("ERROR: send txs: %v\n", err)
@@ -172,14 +179,22 @@ func main() {
 			receipt.BlockNumber.Uint64(), srcChain, receipt.BlockHash.Hex())
 		dl := time.Now().Add(*timeout)
 		if sv2URL != "" {
-			if err := waitSV2LocalSafeAtLeast(sv2URL, srcChain, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
+			var srcRPC string
+			if srcChain == "901" {
+				srcRPC = *rpc901
+			} else {
+				srcRPC = *rpc902
+			}
+			if err := waitSV2LocalSafeAtLeast(sv2URL, srcChain, srcRPC, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
 				fmt.Printf("ERROR: SV2 local-safe progression: %v\n", err)
 				os.Exit(1)
 			}
 			fmt.Println("SV2 LocalSafe reached tx block; now waiting for CrossSafe > tx+5...")
 		}
 		targetPlus := receipt.BlockNumber.Uint64() + 5
-		if err := waitSV2CrossPast(sv2URL, srcChain, targetPlus, dl, *pollInterval); err != nil {
+		var srcRPC2 string
+		if srcChain == "901" { srcRPC2 = *rpc901 } else { srcRPC2 = *rpc902 }
+		if err := waitSV2CrossPast(sv2URL, srcChain, srcRPC2, targetPlus, dl, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 cross-safe progression: %v\n", err)
 			os.Exit(1)
 		}
@@ -239,7 +254,9 @@ func main() {
 		// Wait for CrossSafe on the destination chain to surpass the executing block + 5
 		dl := time.Now().Add(*timeout)
 		targetPlus := recRelay.BlockNumber.Uint64() + 5
-		if err := waitSV2CrossPast(sv2URL, dstChain, targetPlus, dl, *pollInterval); err != nil {
+		var dstRPCWait string
+		if dstChain == "901" { dstRPCWait = *rpc901 } else { dstRPCWait = *rpc902 }
+		if err := waitSV2CrossPast(sv2URL, dstChain, dstRPCWait, targetPlus, dl, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 cross-safe progression (dst): %v\n", err)
 			os.Exit(1)
 		}
@@ -371,37 +388,52 @@ func discoverSV2URL() (string, error) {
 	return sv2, nil
 }
 
-func waitSV2Advancing(sv2URL string, chainIDs []string, deadline time.Time, interval time.Duration) error {
-	type chainHead struct{ num uint64 }
-	last := map[string]chainHead{}
+type crossSafeResp struct {
+	Derived blockID `json:"derived"`
+}
+
+func waitSV2Advancing(sv2URL string, chainRPCs map[string]string, deadline time.Time, interval time.Duration) error {
+	last := map[string]uint64{}
 	client := &http.Client{Timeout: 3 * time.Second}
 	for time.Now().Before(deadline) {
-		req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/sync_status", nil)
-		resp, err := client.Do(req)
-		if err == nil && resp != nil && resp.Body != nil {
-			var st syncStatus
-			_ = json.NewDecoder(resp.Body).Decode(&st)
+		allOK := true
+		for id, rpcURL := range chainRPCs {
+			req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/cross_safe?chainId="+id, nil)
+			resp, err := client.Do(req)
+			if err != nil || resp == nil || resp.Body == nil {
+				allOK = false
+				break
+			}
+			var cs crossSafeResp
+			_ = json.NewDecoder(resp.Body).Decode(&cs)
 			resp.Body.Close()
-			ok := true
-			for _, id := range chainIDs {
-				ch, exists := st.Chains[id]
-				if !exists || ch.LocalUnsafe.Number == 0 {
-					ok = false
-					break
+			num := cs.Derived.Number
+			if num == 0 || num <= last[id] {
+				allOK = false
+			} else {
+				// Verify EL has the block at this number
+				ctx, cancel := contextWithTimeout(5 * time.Second)
+				cli, err := ethclient.DialContext(ctx, rpcURL)
+				if err != nil {
+					cancel()
+					allOK = false
+				} else {
+					_, herr := cli.HeaderByNumber(ctx, new(big.Int).SetUint64(num))
+					cli.Close()
+					cancel()
+					if herr != nil {
+						allOK = false
+					}
 				}
-				prev := last[id]
-				if ch.LocalUnsafe.Number <= prev.num {
-					ok = false
-				}
-				last[id] = chainHead{num: ch.LocalUnsafe.Number}
 			}
-			if ok {
-				return nil
-			}
+			last[id] = num
+		}
+		if allOK {
+			return nil
 		}
 		time.Sleep(interval)
 	}
-	return fmt.Errorf("timeout waiting for SV2 to advance chains: %v", chainIDs)
+	return fmt.Errorf("timeout waiting for SV2 to advance chains: %v", chainRPCs)
 }
 
 // buildRelayFromReceipt locates the SentMessage log in the initiating tx receipt and constructs
@@ -573,30 +605,34 @@ func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage [
 }
 
 // waitSV2CrossPast waits until the CrossSafe head for a chain surpasses the given block number.
-func waitSV2CrossPast(sv2URL string, chainID string, minBlock uint64, deadline time.Time, interval time.Duration) error {
+func waitSV2CrossPast(sv2URL string, chainID string, rpcURL string, minBlock uint64, deadline time.Time, interval time.Duration) error {
 	client := &http.Client{Timeout: 3 * time.Second}
-	var lastLU, lastLS, lastCS uint64
+	var lastCS uint64
 	for time.Now().Before(deadline) {
-		req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/sync_status", nil)
+		req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/cross_safe?chainId="+chainID, nil)
 		resp, err := client.Do(req)
 		if err == nil && resp != nil && resp.Body != nil {
-			var st syncStatus
-			_ = json.NewDecoder(resp.Body).Decode(&st)
+			var cs crossSafeResp
+			_ = json.NewDecoder(resp.Body).Decode(&cs)
 			resp.Body.Close()
-			ch, ok := st.Chains[chainID]
-			if ok {
-				lu, ls, cs := ch.LocalUnsafe.Number, ch.LocalSafe.Number, ch.CrossSafe.Number
-				if lastLU == 0 && lastLS == 0 && lastCS == 0 {
-					fmt.Printf("SV2 heads[%s] start: LocalUnsafe=%d LocalSafe=%d CrossSafe=%d (target>%d)\n", chainID, lu, ls, cs, minBlock)
-					lastLU, lastLS, lastCS = lu, ls, cs
-				} else if lu != lastLU || ls != lastLS || cs != lastCS {
-					fmt.Printf("SV2 heads[%s] update: LU %d->%d LS %d->%d CS %d->%d (target>%d)\n", chainID, lastLU, lu, lastLS, ls, lastCS, cs, minBlock)
-					lastLU, lastLS, lastCS = lu, ls, cs
+			cur := cs.Derived.Number
+			if lastCS != cur {
+				fmt.Printf("SV2 CS[%s] %d->%d (target>%d)\n", chainID, lastCS, cur, minBlock)
+				lastCS = cur
+			}
+			if cur > minBlock {
+				// verify EL has the block
+				ctx, cancel := contextWithTimeout(5 * time.Second)
+				cli, err := ethclient.DialContext(ctx, rpcURL)
+				if err == nil {
+					_, herr := cli.HeaderByNumber(ctx, new(big.Int).SetUint64(cur))
+					cli.Close()
+					cancel()
+					if herr == nil {
+						return nil
+					}
 				} else {
-					fmt.Printf("SV2 heads[%s] steady: LU=%d LS=%d CS=%d (target>%d)\n", chainID, lu, ls, cs, minBlock)
-				}
-				if cs > minBlock {
-					return nil
+					cancel()
 				}
 			}
 		}
@@ -606,34 +642,40 @@ func waitSV2CrossPast(sv2URL string, chainID string, minBlock uint64, deadline t
 }
 
 // waitSV2LocalSafeAtLeast waits until the LocalSafe head for a chain reaches at least the given block number.
-func waitSV2LocalSafeAtLeast(sv2URL string, chainID string, minBlock uint64, deadline time.Time, interval time.Duration) error {
+func waitSV2LocalSafeAtLeast(sv2URL string, chainID string, rpcURL string, minBlock uint64, deadline time.Time, interval time.Duration) error {
 	client := &http.Client{Timeout: 3 * time.Second}
-	var lastLU, lastLS uint64
+	var last uint64
 	for time.Now().Before(deadline) {
-		req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/sync_status", nil)
+		req, _ := http.NewRequest(http.MethodGet, sv2URL+"/v1/cross_safe?chainId="+chainID, nil)
 		resp, err := client.Do(req)
 		if err == nil && resp != nil && resp.Body != nil {
-			var st syncStatus
-			_ = json.NewDecoder(resp.Body).Decode(&st)
+			var cs crossSafeResp
+			_ = json.NewDecoder(resp.Body).Decode(&cs)
 			resp.Body.Close()
-			ch, ok := st.Chains[chainID]
-			if ok {
-				lu, ls := ch.LocalUnsafe.Number, ch.LocalSafe.Number
-				if lastLU == 0 && lastLS == 0 {
-					fmt.Printf("SV2 LS[%s] start: LU=%d LS=%d (target>=%d)\n", chainID, lu, ls, minBlock)
-					lastLU, lastLS = lu, ls
-				} else if lu != lastLU || ls != lastLS {
-					fmt.Printf("SV2 LS[%s] update: LU %d->%d LS %d->%d (target>=%d)\n", chainID, lastLU, lu, lastLS, ls, minBlock)
-					lastLU, lastLS = lu, ls
-				}
-				if ls >= minBlock {
-					return nil
+			cur := cs.Derived.Number
+			if last != cur {
+				fmt.Printf("SV2 cross_safe[%s] %d->%d (target>=%d)\n", chainID, last, cur, minBlock)
+				last = cur
+			}
+			if cur >= minBlock {
+				// verify EL has the block
+				ctx, cancel := contextWithTimeout(5 * time.Second)
+				cli, err := ethclient.DialContext(ctx, rpcURL)
+				if err == nil {
+					_, herr := cli.HeaderByNumber(ctx, new(big.Int).SetUint64(cur))
+					cli.Close()
+					cancel()
+					if herr == nil {
+						return nil
+					}
+				} else {
+					cancel()
 				}
 			}
 		}
 		time.Sleep(interval)
 	}
-	return fmt.Errorf("timeout waiting LocalSafe[%s] >= %d (last=%d)", chainID, minBlock, lastLS)
+	return fmt.Errorf("timeout waiting cross_safe[%s] >= %d (last=%d)", chainID, minBlock, last)
 }
 
 // verifyCanonicalBlock checks that the block at a given number still has the expected hash on the source chain.
@@ -882,4 +924,66 @@ func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 		d = 30 * time.Second
 	}
 	return context.WithTimeout(context.Background(), d)
+}
+
+// showHeads prints EL latest/safe/finalized block numbers for both chains and the cross-safe derived heads from SV2.
+func showHeads(sv2URL, rpc901, rpc902 string) error {
+	if strings.TrimSpace(rpc901) == "" || strings.TrimSpace(rpc902) == "" {
+		return fmt.Errorf("rpc-901 and rpc-902 required")
+	}
+	// discover SV2 if not provided
+	sv2 := strings.TrimSpace(sv2URL)
+	if sv2 == "" {
+		if u, err := discoverSV2URL(); err == nil {
+			sv2 = u
+		} else {
+			// fallback to common default from Kurtosis
+			sv2 = "http://127.0.0.1:33321"
+		}
+	}
+	// per chain helper
+	query := func(label string, rpcURL string) error {
+		ctx, cancel := contextWithTimeout(5 * time.Second)
+		defer cancel()
+		cli, err := ethclient.DialContext(ctx, rpcURL)
+		if err != nil {
+			return err
+		}
+		defer cli.Close()
+		// latest (unsafe tip)
+		latest, err := cli.HeaderByNumber(ctx, nil)
+		if err != nil {
+			return err
+		}
+		// safe and finalized via tags (rpc constants)
+		safe, err := cli.HeaderByNumber(ctx, big.NewInt(int64(rpc.SafeBlockNumber)))
+		if err != nil {
+			return err
+		}
+		finalized, err := cli.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
+		if err != nil {
+			return err
+		}
+		// cross-safe via SV2, resolve the actual chain ID from EL
+		chainID, err := cli.ChainID(ctx)
+		if err != nil {
+			return err
+		}
+		var cross uint64
+		if sv2 != "" {
+			req, _ := http.NewRequest(http.MethodGet, sv2+"/v1/cross_safe?chainId="+chainID.String(), nil)
+			resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+			if err == nil && resp != nil && resp.Body != nil {
+				var x struct{ Derived blockID `json:"derived"` }
+				_ = json.NewDecoder(resp.Body).Decode(&x)
+				resp.Body.Close()
+				cross = x.Derived.Number
+			}
+		}
+		fmt.Printf("chain %s(id=%s): latest=%d safe=%d finalized=%d cross_safe=%d\n", label, chainID.String(), latest.Number.Uint64(), safe.Number.Uint64(), finalized.Number.Uint64(), cross)
+		return nil
+	}
+	if err := query("901", rpc901); err != nil { return fmt.Errorf("901: %w", err) }
+	if err := query("902", rpc902); err != nil { return fmt.Errorf("902: %w", err) }
+	return nil
 }
