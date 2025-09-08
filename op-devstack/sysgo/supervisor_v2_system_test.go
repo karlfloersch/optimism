@@ -83,7 +83,7 @@ func TestJustSitThere(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -171,7 +171,7 @@ func TestManualRollback(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -336,7 +336,7 @@ func TestValidExecutingMessage(gt *testing.T) {
 
 	// wait for the system to be ready
 	gt.Logf("%s: Waiting for SV2 to be ready", testName)
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -491,7 +491,7 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	// set up a minimal system with SV2 embedding an op-node
 
 	// test setup and minimal system bring-up
-	t, ctx, cancel, _, l2Net, chainID, sv2URL := setupMinimalSystemSV2(gt, testName)
+	t, ctx, cancel, _, l2Net, chainID, sv2URL, _ := setupMinimalSystemSV2(gt, testName)
 	defer cancel()
 
 	// test preparation complete
@@ -558,7 +558,7 @@ func TestTwoChainValidExecutingMessage(gt *testing.T) {
 	gt.Logf("%s: Two-chain system setup complete", testName)
 
 	// wait for SV2 to be ready
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -603,8 +603,8 @@ func TestTwoChainValidExecutingMessage(gt *testing.T) {
 
 // setupMinimalSystemSV2 performs the common test setup used by these system tests and brings up
 // a minimal system with Supervisor V2 on the first chain and an embedded op-node. It returns
-// the test context, package scope, context with timeout, cancel func, and hydrated system.
-func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.Context, context.CancelFunc, stack.ExtensibleSystem, stack.L2Network, uint64, string) {
+// the test context, package scope, context with timeout, cancel func, hydrated system, and l1Net.
+func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.Context, context.CancelFunc, stack.ExtensibleSystem, stack.L2Network, uint64, string, stack.L1Network) {
 	// test setup
 	t := devtest.SerialT(gt)
 	gt.Logf("%s: Starting system setup", testName)
@@ -639,7 +639,7 @@ func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.C
 	gt.Logf("%s: System setup complete", testName)
 
 	// Wait for SV2 to be ready
-	sv2URL := os.Getenv("SV2_DENYLIST_URL")
+	sv2URL := os.Getenv("SV2_AUTHORIZATION_URL")
 	t.Require().NotEmpty(sv2URL)
 	{
 		ctx2, cancel2 := context.WithTimeout(t.Ctx(), 60*time.Second)
@@ -650,8 +650,9 @@ func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.C
 
 	// Provide common handles useful to tests
 	l2Net := system.L2Networks()[0]
+	l1Net := system.L1Network(match.FirstL1Network)
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-	return t, ctx, cancel, system, l2Net, chainID, sv2URL
+	return t, ctx, cancel, system, l2Net, chainID, sv2URL, l1Net
 }
 
 // mustSendValidInitiatingMessage deploys the EventLogger contract and submits a valid initiating message.

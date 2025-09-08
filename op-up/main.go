@@ -133,7 +133,7 @@ func run() error {
 						key = perChain
 					}
 					// Prefer SV2 proxy for RollupRpc if available
-					sv2 := os.Getenv("SV2_DENYLIST_URL")
+					sv2 := os.Getenv("SV2_AUTHORIZATION_URL")
 					if sv2 != "" {
 						cfg.RollupRpc = []string{fmt.Sprintf("%s/opnode/%d/", sv2, v)}
 					}

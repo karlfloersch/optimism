@@ -352,10 +352,14 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 
 		// Step 5: get executing messages, validate them, and rollback if needed
-		s.validateExecutingMessagesAtTimestamp(ctx, activeChains, ts)
+		valid := s.validateExecutingMessagesAtTimestamp(ctx, activeChains, ts)
 
-		// Step 6: commit new timestamp with metadata
-		s.commitNewTimestamp(ts, pairs)
+		// Step 6: commit new timestamp with metadata only if validation passed
+		if valid {
+			s.commitNewTimestamp(ts, pairs)
+		} else {
+			s.log.Info("xsafe: skipping timestamp commit due to validation failure", "ts", ts)
+		}
 
 		// Step end: wait for next tick
 		time.Sleep(tick)
@@ -856,6 +860,33 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 	return allValid
 }
 
+// authorizeFinalityUpdate checks if a finality update is authorized based on the cross-safe history.
+// It returns true if the attempted finality timestamp is at or before the latest cross-safe timestamp.
+func (s *Supervisor) authorizeFinalityUpdate(timestamp uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If no cross-safe history exists, deny finality updates
+	if len(s.crossSafeHistory) == 0 {
+		s.log.Debug("finality authorization denied: no cross-safe history", "timestamp", timestamp)
+		return false
+	}
+
+	// Get the latest cross-safe entry
+	latest := s.getLatestCrossSafe()
+
+	// Check if the timestamp is at or before the latest cross-safe timestamp
+	if timestamp > latest.Timestamp {
+		s.log.Debug("finality authorization denied: timestamp too recent",
+			"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
+		return false
+	}
+
+	s.log.Debug("finality authorization granted",
+		"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
+	return true
+}
+
 // ============================================================================
 // Configuration & Lifecycle Management
 // ============================================================================
@@ -1090,9 +1121,27 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 			_, _ = fmt.Sscanf(chainIDStr, "%d", &cid)
 		}
 		deny := s.denylist != nil && id != "" && s.denylist.Has(cid, id)
+		s.log.Info("denylist check", "chainId", cid, "id", id, "denylisted", deny)
 		_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": deny})
 	})
 	// Entries are managed internally by supervisor policies/tests; no POST endpoint
+
+	// Finality authorization endpoint
+	mux.HandleFunc("/authorize_finality/v1/check", func(w http.ResponseWriter, r *http.Request) {
+		// GET /authorize_finality/v1/check?timestamp=
+		q := r.URL.Query()
+		timestampStr := q.Get("timestamp")
+
+		var timestamp uint64
+		if timestampStr != "" {
+			_, _ = fmt.Sscanf(timestampStr, "%d", &timestamp)
+		}
+
+		authorized := s.authorizeFinalityUpdate(timestamp)
+		s.log.Debug("finality authorization check", "timestamp", timestamp, "authorized", authorized)
+		fmt.Println("finality authorization check", "timestamp", timestamp, "authorized", authorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{"authorized": authorized})
+	})
 
 	if s.enableOpNodeProxy {
 		// Expose virtual op-node user RPC via reverse proxy (HTTP) under /opnode/{chainId}/

@@ -10,7 +10,7 @@ This document describes a proof-of-concept (PoC). It is not production-ready and
   - Ingest up to LocalSafe each tick and persist: payloads/receipts to `logs`, and `(L1 → L2)` links to `local` (and seed `cross` when empty).
   - Compute cross-safe across chains under an L1 confirmation depth/scope; when valid, update `cross` to advance cross-safe.
   - If a block is found cross-invalid (e.g., contains invalid executing messages), add its deterministic payload/block ID to a per-chain denylist, stop the embedded op-node, and roll back the op-node and EL to height H-1 (the last known-good).
-  - On restart, as the op-node re-derives, it consults the Supervisor denylist (via `SV2_DENYLIST_URL`) and replaces the invalid block at height H with a deposit-only block per steady derivation rules, then proceeds.
+  - On restart, as the op-node re-derives, it consults the Supervisor denylist (via `SV2_AUTHORIZATION_URL`) and replaces the invalid block at height H with a deposit-only block per steady derivation rules, then proceeds.
 
   (see diagram and code walkthrough below for more detail)
 
@@ -22,7 +22,7 @@ This document describes a proof-of-concept (PoC). It is not production-ready and
   - Result: the op-node requires only a minimal integration (denylist consult); otherwise it remains unchanged.
 
 - **Minimal op-node changes**:
-  - The op-node remains pre-interop and unmodified with the exception of an optional denylist consult (enabled by `SV2_DENYLIST_URL`) before inserting a payload. If denylisted, the payload is treated as invalid and skipped.
+  - The op-node remains pre-interop and unmodified with the exception of an optional denylist consult (enabled by `SV2_AUTHORIZATION_URL`) before inserting a payload. If denylisted, the payload is treated as invalid and skipped.
   - There are no interop-specific storage changes or cross-safety logic added to the op-node.
 
 - **No support for P2P sync/replication of the Supervisor databases**:
@@ -108,7 +108,7 @@ sequenceDiagram
   - Single-chain legacy path is handled for back-compat; multi-chain uses per-chain handles.
 
 - **Denylist** (`supervisor/denylist.go` + HTTP):
-  - Lightweight persisted map keyed by `(chainID, payloadID)`. Exposed via `GET /denylist/v1/check` and populated by Supervisor policy (e.g., during invalidation). The op-node consults this endpoint once before inserting a payload when `SV2_DENYLIST_URL` is set.
+  - Lightweight persisted map keyed by `(chainID, payloadID)`. Exposed via `GET /denylist/v1/check` and populated by Supervisor policy (e.g., during invalidation). The op-node consults this endpoint once before inserting a payload when `SV2_AUTHORIZATION_URL` is set.
 
 ### Core op-node interop loop (per tick)
 
@@ -242,7 +242,7 @@ func (a *crosssafeAdapter) InvalidateLocalSafe(chainID eth.ChainID, candidate ty
 
 ```34:53:op-node/rollup/engine/payload_process.go
     // Optional SV2 denylist pre-insert check
-    if baseURL := os.Getenv("SV2_DENYLIST_URL"); baseURL != "" && ev.Envelope != nil && ev.Envelope.ExecutionPayload != nil {
+    if baseURL := os.Getenv("SV2_AUTHORIZATION_URL"); baseURL != "" && ev.Envelope != nil && ev.Envelope.ExecutionPayload != nil {
         if payloadID, ok := ev.Envelope.CheckBlockHash(); ok {
             url := fmt.Sprintf("%s/denylist/v1/check?chainId=%d&id=%s", baseURL, chainID, payloadID.Hex())
             // ... HTTP GET and decode { denylisted: bool }
@@ -258,7 +258,7 @@ On restart, the embedded op-node queries the Supervisor’s denylist before inse
 
 ### Minimal op-node integration
 
-- The op-node has an optional pre-insert denylist check guarded by `SV2_DENYLIST_URL`. If the Supervisor reports a payload ID as denylisted, the op-node treats the payload as invalid and derives a replacement at the same height.
+- The op-node has an optional pre-insert denylist check guarded by `SV2_AUTHORIZATION_URL`. If the Supervisor reports a payload ID as denylisted, the op-node treats the payload as invalid and derives a replacement at the same height.
 - No interop-specific storage or cross-safety logic is added to the op-node; it stays pre-interop.
 
 ### Operational notes
