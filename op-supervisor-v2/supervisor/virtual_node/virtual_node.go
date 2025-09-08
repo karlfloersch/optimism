@@ -57,11 +57,12 @@ func StartVirtualNode(
 ) (string, func(context.Context) error, error) {
 	// Minimal P2P config (memory-only, local addresses)
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
-
-	if !cfg.DisableP2P {
-		for _, f := range opNodeFlags.P2PFlags(opNodeFlags.EnvVarPrefix) {
-			_ = f.Apply(fs)
-		}
+	// Always register P2P flags so we can explicitly disable P2P when requested
+	for _, f := range opNodeFlags.P2PFlags(opNodeFlags.EnvVarPrefix) {
+		_ = f.Apply(fs)
+	}
+	if cfg.DisableP2P {
+		_ = fs.Set(opNodeFlags.DisableP2PName, "true")
 	}
 	// Configure P2P if not disabled
 	if !cfg.DisableP2P {
