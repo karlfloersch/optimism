@@ -135,6 +135,26 @@ func main() {
 	case "valid-msg":
 		// Use messenger path like earlier: send initiating msg via L2ToL2CrossDomainMessenger, relay via CrossL2Inbox
 		srcRPC, dstChain := pickSrcDst(*fromChain, *rpc901, *rpc902)
+		// Determine destination RPC
+		var dstRPCRelay string
+		if dstChain == "901" { dstRPCRelay = *rpc901 } else { dstRPCRelay = *rpc902 }
+		fmt.Printf("valid-msg config: sv2=%s srcRPC=%s dstChain=%s dstRPC=%s\n", sv2URL, srcRPC, dstChain, dstRPCRelay)
+		// Preflight: check chain IDs and code presence for messenger/inbox
+		for _, checkRPC := range []string{srcRPC, dstRPCRelay} {
+			ctx, cancel := contextWithTimeout(5 * time.Second)
+			cli, err := ethclient.DialContext(ctx, checkRPC)
+			if err != nil {
+				fmt.Printf("preflight: dial failed: %s err=%v\n", checkRPC, err)
+				cancel()
+				os.Exit(1)
+			}
+			cid, _ := cli.ChainID(ctx)
+			codeMsg, _ := cli.CodeAt(ctx, common.HexToAddress("0x4200000000000000000000000000000000000023"), nil)
+			codeInbox, _ := cli.CodeAt(ctx, common.HexToAddress("0x4200000000000000000000000000000000000022"), nil)
+			fmt.Printf("preflight: %s chainID=%v messenger_code_len=%d inbox_code_len=%d\n", checkRPC, cid, len(codeMsg), len(codeInbox))
+			cli.Close()
+			cancel()
+		}
 		var target common.Address
 		if *targetFlag != "" {
 			target = common.HexToAddress(*targetFlag)
@@ -161,7 +181,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Prepared relay payload from SentMessage (logIndex=%d)\n", msgLog.Index)
-		recRelay, err := relayMessage(dstChain, privKey, id, sentPayload)
+		fmt.Printf("Relaying on dstRPC=%s\n", dstRPCRelay)
+		recRelay, err := relayMessage(dstRPCRelay, privKey, id, sentPayload)
 		if err != nil {
 			fmt.Printf("ERROR: relayMessage: %v\n", err)
 			os.Exit(1)
@@ -171,21 +192,35 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("relayMessage succeeded on destination chain; block=%s\n", recRelay.BlockNumber.String())
-		srcChain := strings.TrimSpace(*fromChain)
-		if srcChain != "901" && srcChain != "902" {
-			srcChain = "901"
+		// Resolve actual source chainID from srcRPC for SV2 queries
+		var srcChainIDStr string
+		{
+			ctx, cancel := contextWithTimeout(5 * time.Second)
+			cli, err := ethclient.DialContext(ctx, srcRPC)
+			if err == nil {
+				cid, err2 := cli.ChainID(ctx)
+				if err2 == nil { srcChainIDStr = cid.String() }
+				cli.Close()
+			}
+			cancel()
+		}
+		if srcChainIDStr == "" {
+			// fallback to labels if needed
+			srcLabel := strings.TrimSpace(*fromChain)
+			if srcLabel != "901" && srcLabel != "902" { srcLabel = "901" }
+			srcChainIDStr = srcLabel
 		}
 		fmt.Printf("Valid message mined in block %d on src chain %s; hash=%s. Now waiting for CrossSafe to pass tx+5...\n",
-			receipt.BlockNumber.Uint64(), srcChain, receipt.BlockHash.Hex())
+			receipt.BlockNumber.Uint64(), srcChainIDStr, receipt.BlockHash.Hex())
 		dl := time.Now().Add(*timeout)
 		if sv2URL != "" {
 			var srcRPC string
-			if srcChain == "901" {
+			if strings.TrimSpace(*fromChain) == "901" {
 				srcRPC = *rpc901
 			} else {
 				srcRPC = *rpc902
 			}
-			if err := waitSV2LocalSafeAtLeast(sv2URL, srcChain, srcRPC, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
+			if err := waitSV2LocalSafeAtLeast(sv2URL, srcChainIDStr, srcRPC, receipt.BlockNumber.Uint64(), dl, *pollInterval); err != nil {
 				fmt.Printf("ERROR: SV2 local-safe progression: %v\n", err)
 				os.Exit(1)
 			}
@@ -193,8 +228,8 @@ func main() {
 		}
 		targetPlus := receipt.BlockNumber.Uint64() + 5
 		var srcRPC2 string
-		if srcChain == "901" { srcRPC2 = *rpc901 } else { srcRPC2 = *rpc902 }
-		if err := waitSV2CrossPast(sv2URL, srcChain, srcRPC2, targetPlus, dl, *pollInterval); err != nil {
+		if strings.TrimSpace(*fromChain) == "901" { srcRPC2 = *rpc901 } else { srcRPC2 = *rpc902 }
+		if err := waitSV2CrossPast(sv2URL, srcChainIDStr, srcRPC2, targetPlus, dl, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 cross-safe progression: %v\n", err)
 			os.Exit(1)
 		}
@@ -220,6 +255,21 @@ func main() {
 			receipt.BlockNumber.Uint64(), receipt.BlockHash.Hex(), recRelay.BlockNumber.Uint64(), recRelay.BlockHash.Hex())
 	case "invalid-msg":
 		srcRPC, dstChain := pickSrcDst(*fromChain, *rpc901, *rpc902)
+		// Determine destination RPC and chainID for logging and SV2 polling
+		var dstRPCRelay string
+		if dstChain == "901" { dstRPCRelay = *rpc901 } else { dstRPCRelay = *rpc902 }
+		var dstChainIDStr string
+		{
+			ctx, cancel := contextWithTimeout(5 * time.Second)
+			cli, err := ethclient.DialContext(ctx, dstRPCRelay)
+			if err == nil {
+				cid, err2 := cli.ChainID(ctx)
+				if err2 == nil { dstChainIDStr = cid.String() }
+				cli.Close()
+			}
+			cancel()
+		}
+		fmt.Printf("invalid-msg config: sv2=%s srcRPC=%s dstChainLabel=%s dstRPC=%s dstChainID=%s\n", sv2URL, srcRPC, dstChain, dstRPCRelay, dstChainIDStr)
 		var target common.Address
 		if *targetFlag != "" {
 			target = common.HexToAddress(*targetFlag)
@@ -244,7 +294,8 @@ func main() {
 			fmt.Println("Mutated Identifier: incremented LogIndex by +1 to force invalid execution")
 		}
 		// Expect relay to succeed on-chain (ValidateMessage) but SV2 should later detect and rollback
-		recRelay, err := relayMessage(dstChain, privKey, id, sentPayload)
+		fmt.Printf("Relaying on dstRPC=%s\n", dstRPCRelay)
+		recRelay, err := relayMessage(dstRPCRelay, privKey, id, sentPayload)
 		if err != nil {
 			fmt.Printf("relayMessage error (unexpected): %v\n", err)
 		} else {
@@ -256,7 +307,9 @@ func main() {
 		targetPlus := recRelay.BlockNumber.Uint64() + 5
 		var dstRPCWait string
 		if dstChain == "901" { dstRPCWait = *rpc901 } else { dstRPCWait = *rpc902 }
-		if err := waitSV2CrossPast(sv2URL, dstChain, dstRPCWait, targetPlus, dl, *pollInterval); err != nil {
+		chainForSV2 := dstChainIDStr
+		if chainForSV2 == "" { chainForSV2 = dstChain }
+		if err := waitSV2CrossPast(sv2URL, chainForSV2, dstRPCWait, targetPlus, dl, *pollInterval); err != nil {
 			fmt.Printf("ERROR: SV2 cross-safe progression (dst): %v\n", err)
 			os.Exit(1)
 		}
@@ -528,16 +581,8 @@ func buildRelayFromReceipt(srcRPC string, receipt *types.Receipt) (*types.Log, [
 }
 
 // relayMessage calls MESSENGER.relayMessage on the destination chain using the provided tuple and payload.
-func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage []byte) (*types.Receipt, error) {
-	// Pick RPC based on chain id string like 901/902 default mapping
-	var rpc string
-	if dstChain == "901" {
-		rpc = "http://127.0.0.1:9545"
-	} else if dstChain == "902" {
-		rpc = "http://127.0.0.1:9546"
-	} else {
-		rpc = "http://127.0.0.1:9545"
-	}
+func relayMessage(dstRPC string, privKey string, id [5]*big.Int, sentMessage []byte) (*types.Receipt, error) {
+	rpc := dstRPC
 	ctx, cancel := contextWithTimeout(90 * time.Second)
 	defer cancel()
 	pk, err := parseECDSA(privKey)
@@ -553,6 +598,7 @@ func relayMessage(dstChain string, privKey string, id [5]*big.Int, sentMessage [
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("relayMessage: dialing dstRPC=%s chainID=%s\n", rpc, chainID.String())
 	auth, err := bind.NewKeyedTransactorWithChainID(pk, chainID)
 	if err != nil {
 		return nil, err
