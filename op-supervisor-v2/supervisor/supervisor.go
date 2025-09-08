@@ -826,7 +826,31 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 					continue
 				}
 				query := types.ContainsQuery{BlockNum: msg.BlockNum, LogIdx: msg.LogIdx, Timestamp: msg.Timestamp, Checksum: msg.Checksum}
-				if _, err := initContainer.logsDB.Contains(query); err != nil {
+
+				// Note: this if-block exists to prevent cycles from being validated, by preventing executing messages from pointing to the current timestamp
+				// HOWEVER this is technically not to-spec. Executing Messages may point at the current timestamp, so long as they do not form cycles.
+				// Rather than adding cycle detection, we are simply failing the block in these conditions.
+				// Production software will need to support cycle detection.
+				if msg.Timestamp == ts {
+					s.log.Info("xsafe: exec validation failed due to *potential* cycle", "exec_chain", v, "init_chain", initCID, "timestamp", msg.Timestamp)
+					allValid = false
+					invalidCount++
+					if !rolledBack[v] {
+						s.mu.Lock()
+						container := s.chains[v]
+						s.mu.Unlock()
+						if container != nil && container.virtualCfg != nil && container.virtualCfg.Rcfg != nil && container.logsDB != nil {
+							if targetNum, terr := container.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
+								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
+									if s.denylist != nil {
+										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
+										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
+									}
+								}
+							}
+						}
+					}
+				} else if _, err := initContainer.logsDB.Contains(query); err != nil {
 					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
 					allValid = false
 					invalidCount++
