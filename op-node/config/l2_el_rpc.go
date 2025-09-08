@@ -53,7 +53,7 @@ func (cfg *L2EndpointConfig) Setup(ctx context.Context, log log.Logger,
 	auth := rpc.WithHTTPAuth(gn.NewJWTAuth(cfg.L2EngineJWTSecret))
 	opts := []client.RPCOption{
 		client.WithGethRPCOptions(auth),
-		client.WithDialAttempts(10),
+		client.WithDialAttempts(500),
 		client.WithCallTimeout(cfg.L2EngineCallTimeout),
 		client.WithRPCRecorder(metrics.NewRecorder("engine-api")),
 	}
