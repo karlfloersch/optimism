@@ -491,7 +491,7 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	// set up a minimal system with SV2 embedding an op-node
 
 	// test setup and minimal system bring-up
-	t, ctx, cancel, _, l2Net, chainID, sv2URL := setupMinimalSystemSV2(gt, testName)
+	t, ctx, cancel, _, l2Net, chainID, sv2URL, _ := setupMinimalSystemSV2(gt, testName)
 	defer cancel()
 
 	// test preparation complete
@@ -523,8 +523,6 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	}
 	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &rec, "eth_getTransactionReceipt", execTxHash))
 	t.Require().Empty(rec.BlockHash, "invalid executing tx should not be included yet")
-
-	time.Sleep(120 * time.Second)
 
 	gt.Logf("%s: Test completed - invalid executing message handled, cross-safe advanced, and reorg observed", testName)
 	//////////////////////////////////////////////////////////////////////
@@ -605,8 +603,8 @@ func TestTwoChainValidExecutingMessage(gt *testing.T) {
 
 // setupMinimalSystemSV2 performs the common test setup used by these system tests and brings up
 // a minimal system with Supervisor V2 on the first chain and an embedded op-node. It returns
-// the test context, package scope, context with timeout, cancel func, and hydrated system.
-func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.Context, context.CancelFunc, stack.ExtensibleSystem, stack.L2Network, uint64, string) {
+// the test context, package scope, context with timeout, cancel func, hydrated system, and l1Net.
+func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.Context, context.CancelFunc, stack.ExtensibleSystem, stack.L2Network, uint64, string, stack.L1Network) {
 	// test setup
 	t := devtest.SerialT(gt)
 	gt.Logf("%s: Starting system setup", testName)
@@ -652,8 +650,9 @@ func setupMinimalSystemSV2(gt *testing.T, testName string) (devtest.T, context.C
 
 	// Provide common handles useful to tests
 	l2Net := system.L2Networks()[0]
+	l1Net := system.L1Network(match.FirstL1Network)
 	chainID := l2Net.RollupConfig().L2ChainID.Uint64()
-	return t, ctx, cancel, system, l2Net, chainID, sv2URL
+	return t, ctx, cancel, system, l2Net, chainID, sv2URL, l1Net
 }
 
 // mustSendValidInitiatingMessage deploys the EventLogger contract and submits a valid initiating message.

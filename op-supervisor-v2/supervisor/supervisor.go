@@ -352,10 +352,14 @@ func (s *Supervisor) ProgressCrossSafe() {
 		}
 
 		// Step 5: get executing messages, validate them, and rollback if needed
-		s.validateExecutingMessagesAtTimestamp(ctx, activeChains, ts)
+		valid := s.validateExecutingMessagesAtTimestamp(ctx, activeChains, ts)
 
-		// Step 6: commit new timestamp with metadata
-		s.commitNewTimestamp(ts, pairs)
+		// Step 6: commit new timestamp with metadata only if validation passed
+		if valid {
+			s.commitNewTimestamp(ts, pairs)
+		} else {
+			s.log.Info("xsafe: skipping timestamp commit due to validation failure", "ts", ts)
+		}
 
 		// Step end: wait for next tick
 		time.Sleep(tick)
