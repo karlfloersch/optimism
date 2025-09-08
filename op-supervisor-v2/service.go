@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"sync"
 
 	"github.com/urfave/cli/v2"
 
@@ -143,52 +144,72 @@ func New(_ context.Context, cfg *Config, logger log.Logger, version string, _ an
 		}
 		// Recompute HTTP bind address after applying file overrides
 		httpAddr = fmt.Sprintf("%s:%d", cfg.HTTPAddr, cfg.HTTPPort)
-		// Add each chain
+		// Add each chain in parallel
+		var wg sync.WaitGroup
+		errCh := make(chan error, len(fc.Chains))
 		for i, c := range fc.Chains {
-			if c.L1RPC == "" || c.BeaconAddr == "" || c.L2AuthRPC == "" || c.L2UserRPC == "" || c.JWTPath == "" || c.RollupPath == "" {
-				return nil, fmt.Errorf("sv2.config chains[%d]: missing required fields", i)
-			}
-			// Read JWT
-			data, err := os.ReadFile(c.JWTPath)
+			i, c := i, c // capture
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if c.L1RPC == "" || c.BeaconAddr == "" || c.L2AuthRPC == "" || c.L2UserRPC == "" || c.JWTPath == "" || c.RollupPath == "" {
+					errCh <- fmt.Errorf("sv2.config chains[%d]: missing required fields", i)
+					return
+				}
+				// Read JWT
+				data, err := os.ReadFile(c.JWTPath)
+				if err != nil {
+					errCh <- fmt.Errorf("chains[%d]: read jwt_secret: %w", i, err)
+					return
+				}
+				s := strings.TrimPrefix(strings.TrimSpace(string(data)), "0x")
+				b, err := hex.DecodeString(s)
+				if err != nil || len(b) != 32 {
+					errCh <- fmt.Errorf("chains[%d]: invalid jwt_secret", i)
+					return
+				}
+				var jwt [32]byte
+				copy(jwt[:], b)
+				// Read rollup config
+				cfgBytes, err := os.ReadFile(c.RollupPath)
+				if err != nil {
+					errCh <- fmt.Errorf("chains[%d]: read rollup_config: %w", i, err)
+					return
+				}
+				var rcfg rollup.Config
+				if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
+					errCh <- fmt.Errorf("chains[%d]: parse rollup_config: %w", i, err)
+					return
+				}
+				vCfg := &vnode.VirtualNodeConfig{
+					L1RPC:             c.L1RPC,
+					BeaconAddr:        c.BeaconAddr,
+					L2AuthRPC:         c.L2AuthRPC,
+					L2UserRPC:         c.L2UserRPC,
+					JwtSecret:         jwt,
+					Rcfg:              &rcfg,
+					Interval:          cfg.PollInterval,
+					ConfirmDepth:      cfg.ConfirmDepth,
+					UserRPCListenAddr: c.UserRPCListenAddr,
+					UserRPCPort:       c.UserRPCPort,
+					DataDir:           cfg.DataDir,
+					StaticPeers:       c.StaticPeers,
+					Bootnodes:         c.Bootnodes,
+					PeerstorePath:     c.PeerstorePath,
+					DiscoveryPath:     c.DiscoveryPath,
+					DisableP2P:        cfg.DisableP2P,
+				}
+				if _, err := sup.AddChain(vCfg); err != nil {
+					errCh <- fmt.Errorf("chains[%d]: add chain: %w", i, err)
+					return
+				}
+			}()
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
 			if err != nil {
-				return nil, fmt.Errorf("chains[%d]: read jwt_secret: %w", i, err)
-			}
-			s := strings.TrimPrefix(strings.TrimSpace(string(data)), "0x")
-			b, err := hex.DecodeString(s)
-			if err != nil || len(b) != 32 {
-				return nil, fmt.Errorf("chains[%d]: invalid jwt_secret", i)
-			}
-			var jwt [32]byte
-			copy(jwt[:], b)
-			// Read rollup config
-			cfgBytes, err := os.ReadFile(c.RollupPath)
-			if err != nil {
-				return nil, fmt.Errorf("chains[%d]: read rollup_config: %w", i, err)
-			}
-			var rcfg rollup.Config
-			if err := json.Unmarshal(cfgBytes, &rcfg); err != nil {
-				return nil, fmt.Errorf("chains[%d]: parse rollup_config: %w", i, err)
-			}
-			vCfg := &vnode.VirtualNodeConfig{
-				L1RPC:             c.L1RPC,
-				BeaconAddr:        c.BeaconAddr,
-				L2AuthRPC:         c.L2AuthRPC,
-				L2UserRPC:         c.L2UserRPC,
-				JwtSecret:         jwt,
-				Rcfg:              &rcfg,
-				Interval:          cfg.PollInterval,
-				ConfirmDepth:      cfg.ConfirmDepth,
-				UserRPCListenAddr: c.UserRPCListenAddr,
-				UserRPCPort:       c.UserRPCPort,
-				DataDir:           cfg.DataDir,
-				StaticPeers:       c.StaticPeers,
-				Bootnodes:         c.Bootnodes,
-				PeerstorePath:     c.PeerstorePath,
-				DiscoveryPath:     c.DiscoveryPath,
-				DisableP2P:        cfg.DisableP2P,
-			}
-			if _, err := sup.AddChain(vCfg); err != nil {
-				return nil, fmt.Errorf("chains[%d]: add chain: %w", i, err)
+				return nil, err
 			}
 		}
 	} else if cfg.L1RPC != "" || cfg.BeaconAddr != "" || cfg.L2AuthRPC != "" || cfg.L2UserRPC != "" || cfg.JWTPath != "" || cfg.RollupPath != "" {
