@@ -115,7 +115,7 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	if container.logsDB != nil && s.denylist != nil {
 		invalidNum := toBlock + 1
 		if ref, _, _, err := container.logsDB.OpenBlock(invalidNum); err == nil {
-			_ = s.denylist.Add(chainID, ref.Hash.Hex())
+			_ = s.denylist.Add(chainID, ref.Time, ref.Hash.Hex())
 		}
 	}
 

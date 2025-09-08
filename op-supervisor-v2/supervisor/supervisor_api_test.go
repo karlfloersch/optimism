@@ -29,7 +29,7 @@ func TestDenylistHTTP(t *testing.T) {
 	}
 
 	// emulate internal add
-	_ = sup.denylist.Add(901, "0xabc")
+	_ = sup.denylist.Add(901, 1234567890, "0xabc")
 
 	// check again, expect true
 	resp, err = http.Get(srv.URL + "/denylist/v1/check?chainId=901&id=0xabc")

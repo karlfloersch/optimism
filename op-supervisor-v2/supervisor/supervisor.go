@@ -419,11 +419,23 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 			"err", err)
 
 		// Rollback procedure:
-		// 1. Prune the latest entry from crossSafeHistory
+		// 1. Get timestamp from latest cross-safe entry before pruning
+		timestampToPrune := latest.Timestamp
+
+		// 2. Prune denylist entries at or newer than the timestamp
+		if s.denylist != nil {
+			if err := s.denylist.PruneAtOrNewerThan(timestampToPrune); err != nil {
+				s.log.Warn("xsafe: failed to prune denylist", "timestamp", timestampToPrune, "err", err)
+			} else {
+				s.log.Info("xsafe: pruned denylist entries at or newer than timestamp", "timestamp", timestampToPrune)
+			}
+		}
+
+		// 3. Prune the latest entry from crossSafeHistory
 		newLatestTimestamp := s.pruneLatestCrossSafeEntry()
 		s.log.Info("xsafe: pruned latest cross-safe entry", "new_latest_ts", newLatestTimestamp)
 
-		// 2. Prune all containers back to the new latest timestamp
+		// 4. Prune all containers back to the new latest timestamp
 		s.pruneContainersToTimestamp(ctx, activeChains, newLatestTimestamp)
 
 		return false
@@ -827,7 +839,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 							if targetNum, terr := container.virtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
 								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
-										_ = s.denylist.Add(v, ref.Hash.Hex())
+										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
 										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
 									}
 								}
@@ -958,11 +970,6 @@ func (s *Supervisor) EnsureL1Client(ctx context.Context, l1Cli opclient.RPC, l1 
 	}
 	return l1Cli, l1
 }
-
-// ============================================================================
-// HTTP API & Handlers
-// ============================================================================
-// HTTPHandler implementation moved to supervisor_http.go
 
 // crossFinalizedFromDBOrFallback returns 0 since cross DBs were removed in v2.
 // Kept for API compatibility.
