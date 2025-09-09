@@ -1,0 +1,166 @@
+# Supernode: single process for multi-chain with fixed per-chain op-node ports
+
+## Goals
+- Run a single op-supernode managing multiple chains in Kurtosis.
+- Prefer direct per-chain op-node ports; retain the HTTP reverse proxy (/opnode/{chainId}/) for tests and optional usage.
+- Provide configuration for chains, EL endpoints, L1 endpoints, and desired per-chain op-node ports.
+
+## Current status
+- Milestone 1 complete: library lifecycle + minimal main wired; service loads chains from supernode.config at startup.
+- Devstack presets now generate per-chain rollup JSON files (named by numeric ChainID), populate `supernode.json` with all chains, and start supernode with that config; no manual AddChain in presets.
+- Rollup `L2ChainID` is set to match each EL `eth_chainId` in the generated JSON; chain-ID normalization fallback in the service was removed (mismatches fail during startup via downstream validation).
+- Confirm depth separation: supernode.json `confirm_depth` configures the embedded op-node SequencerConfDepth (default 2 in presets); supervisor cross-safety gating uses an internal preset default (40) and is not configured via supernode.json.
+- user_rpc_port and user_rpc_listen_addr are plumbed per-chain via `supernode.config` → `VirtualNodeConfig` → `StartVirtualNode`.
+- The service honors top-level http_addr/http_port from `supernode.config`.
+- Config tests (`supervisor_v2_config_test.go`) cover JSON load/bind of HTTP, per-chain user_rpc_port (proxy and direct), and explicit HTTP port. All pass, as do all tests in `op-devstack/sysgo/supervisor_v2_system_test.go`.
+
+## High-level design
+- Extend the supernode CLI multi-chain JSON config with optional user_rpc_port per chain.
+- StartVirtualNode consumes a VirtualNodeConfig; ConfirmDepth in this config maps to the op-node Driver.SequencerConfDepth.
+- Extend ChainContainer to store the chosen userRPCPort and expose it via /status.
+- Keep reverse proxy available (behind a flag); default off in Kurtosis.
+- Adopt the op-node style, cycle-safe CLI structure: keep `SupervisorMain(ctx, closeApp) (cliapp.Lifecycle, error)` in `cmd/main.go` (like `op-node`). The library exposes `NewConfig(...)` and a `New(...)` constructor that returns a `cliapp.Lifecycle`. Sysgo imports the library and calls the constructor directly, avoiding any dependency on `cmd` and thus avoiding circular dependencies.
+
+## Package layout (op-node style, cycle-safe)
+- `op-supernode/` (library)
+  - `service.go`: exports `NewConfig(ctx, log)` and `New(ctx context.Context, cfg, log, version, metrics) (cliapp.Lifecycle, error)` similar to `op-node/service.go` + `op-node/node.New` pattern.
+  - `flags/`: CLI flag definitions (mirrors `op-node/flags`).
+  - `super/...`: runtime logic (virtual node, chain orchestrator, status, etc.).
+- `op-supernode/cmd/main.go` (binary)
+  - Minimal wrapper: sets up logging/version, `app.Flags = cliapp.ProtectFlags(flags.Flags)`, `app.Action = cliapp.LifecycleCmd(SupervisorMain)` and defines `SupervisorMain(ctx, closeApp)` which uses the library `NewConfig(...)` and `New(...)` to build the lifecycle, mirroring `op-node/cmd/main.go:RollupNodeMain`.
+
+Dependency flow (no cycles):
+`sysgo tests -> op-supernode (service, flags, super)`
+`cmd/main.go -> op-supernode`
+There is no `op-supernode -> sysgo` or `sysgo -> cmd` edge.
+
+## Config shape (example)
+{
+  "http_addr": "0.0.0.0",
+  "http_port": 9750,
+  "proxy_opnode": false,
+  "supernode_data_dir": "/data",
+  "confirm_depth": 15,
+  "poll_interval": "1s",
+  "chains": [
+    {
+      "l1_rpc": "http://l1-el:8545",
+      "beacon_addr": "http://l1-cl:5052",
+      "l2_authrpc": "http://l2a-geth:8551",
+      "l2_userrpc": "http://l2a-geth:8545",
+      "jwt_secret": "/secrets/jwt-901.hex",
+      "rollup_config": "/artifacts/chain-901/rollup.json",
+      "user_rpc_port": 9701
+    },
+    {
+      "l1_rpc": "http://l1-el:8545",
+      "beacon_addr": "http://l1-cl:5052",
+      "l2_authrpc": "http://l2b-geth:8551",
+      "l2_userrpc": "http://l2b-geth:8545",
+      "jwt_secret": "/secrets/jwt-902.hex",
+      "rollup_config": "/artifacts/chain-902/rollup.json",
+      "user_rpc_port": 9702
+    }
+  ]
+}
+
+## Code changes
+1) op-supernode/service.go (new)
+- Implemented `NewConfig(ctx, log)` in the library (like `op-node/service.go:NewConfig`).
+- Implemented `New(ctx context.Context, cfg, log, version, metrics) (cliapp.Lifecycle, error)` that constructs and returns the lifecycle instance.
+- Parses `supernode.config` (multi-chain JSON) and calls `AddChain` internally for each chain during startup.
+- Parses `user_rpc_port` and optional `user_rpc_listen_addr` per chain and passes into `VirtualNodeConfig`.
+- Recomputes HTTP bind address after applying file overrides to honor `http_addr`/`http_port` from the JSON.
+
+2) op-supernode/cmd/main.go
+- Minimal main: logging defaults, version, `app.Flags = cliapp.ProtectFlags(flags.Flags)`, `app.Action = cliapp.LifecycleCmd(SupernodeMain)`; define `SupernodeMain(ctx, closeApp)` that wires logging/metrics, calls `service.NewConfig(...)`, sets `cfg.Cancel = closeApp`, and returns `service.New(...)`.
+
+3) super/chain/virtual_node.go
+- StartVirtualNode now takes a `*VirtualNodeConfig` and uses `ConfirmDepth` for op-node `Driver.SequencerConfDepth`.
+- Added `UserRPCListenAddr` / `UserRPCPort` to `VirtualNodeConfig` and sets op-node RPC listen address/port accordingly.
+
+4) super/chain_orchestrator.go
+- Build `VirtualNodeConfig` (per chain) and pass into `StartVirtualNode`.
+- Capture selected port in `ChainContainer.virtualOpNodeUserRPC` as http://<addr>:<port>.
+- Include chosen port in /status.
+
+5) Reverse proxy
+- Keep proxy; default proxy.opnode=false for Kurtosis.
+
+## Sysgo integration (in-process, no cycles)
+- Sysgo imports the library package, not the `cmd` package.
+- Presets now generate per-chain rollup JSON (with `L2ChainID` set from EL) and a populated `sv2.json` for multi-chain startup. The service registers chains internally from JSON.
+
+## Kurtosis wiring
+- One supernode service; per chain only EL (no standalone op-node).
+- Provide supernode config with user_rpc_port per chain.
+- Batchers/proposers point directly to http://supernode:<port>.
+
+## Risks
+- Config correctness is strict: mismatched `L2ChainID` and EL `eth_chainId` will cause startup to fail via downstream validation. Keep JSON and EL aligned.
+- Port conflicts: fail fast with clear logs.
+
+## Milestones
+- Milestone 1: Library constructor + minimal main + sysgo harness
+  - [x] Keep `SupervisorMain` in `cmd/main.go`; implement `NewConfig` and `New(...)` in library
+  - [x] Use in-process sysgo presets that import the library (no `cmd` import)
+  - Testing:
+    - [x] System: all tests in `supervisor_v2_system_test.go` pass; health/status exercised indirectly
+- Milestone 2: Config plumbing (user_rpc_port)
+  - [x] Extend JSON schema (sv2.config) with `user_rpc_port` and optional `user_rpc_listen_addr`
+  - [x] Wire fields end-to-end (sv2.config → VirtualNodeConfig → StartVirtualNode)
+  - [x] Honor top-level `http_addr`/`http_port` from sv2.config
+  - Testing:
+    - [x] Config: service HTTP binds; per-chain user_rpc_port reachable via proxy and directly
+    - [x] System: all tests in `supervisor_v2_system_test.go` continue to pass
+- Milestone 3: Cross-safe persistence
+  - [ ] Add cross_db config/flag and default under sv2_data_dir
+  - [ ] Implement atomic load/save of cross-safe timestamp and metadata
+  - Testing:
+    - [ ] Sysgo: advance, restart restore; rollback persists; corrupt DB recovers
+- Milestone 4: Kurtosis integration (staged; keep system green)
+  Phase A: SV2-simple devnet bootstrap (no SV2 yet)
+  - [x] Create `kurtosis-devnet/sv2-simple.yaml` by copying `kurtosis-devnet/simple.yaml` (single L2, legacy op-node intact).
+  - [x] Add `just sv2-simple-devnet` target to render and run the env end-to-end (build, deploy, wait). Also add `just smoke-sv2-simple-devnet-msgcheck` to run tx smoke against a running env.
+  - Testing gates:
+    - [x] Health: EL and op-node RPCs reachable; `eth_chainId` matches template.
+    - [x] Progress: `eth_blockNumber` increases; safe head advances N blocks within T seconds.
+
+  Phase B: Two-chain devnet (still op-node; no SV2)
+  - [x] Create `kurtosis-devnet/sv2-simple-2chains.yaml` (two parallel L2 chains, each with EL+op-node participants).
+  - [x] Add `just sv2-simple-2chains` target to stand up both chains simultaneously.
+  - Testing gates:
+    - [x] Both chains healthy: per-chain RPCs reachable and report distinct `eth_chainId`s.
+    - [x] Both chains progress: heads advance on both chains concurrently (safe head advancing confirmed).
+    - [x] No port collisions; endpoints discoverable via existing `ServiceFinder`.
+
+  Phase C: Swap op-nodes for SV2 (two-chain under supervisor)
+  - [ ] Introduce an `op-supervisor-v2` service and generate `sv2.json` for both chains (rollup paths, EL endpoints, `user_rpc_port` per chain; proxy disabled by default).
+  - [ ] Remove standalone op-node participants from the two-chain template; keep EL-only per chain.
+  - [ ] Point batchers/proposers at `http://sv2:<user_rpc_port>` for each chain (via template extra_params or package wiring).
+  - [ ] Add `just sv2-2chains-sv2` target to build/deploy the SV2-backed two-chain devnet.
+  - Testing gates:
+    - [ ] SV2 health: `supervisor_syncStatus` OK on the SV2 HTTP port.
+    - [ ] Per-chain RPC health via SV2 direct ports: `eth_chainId`, `eth_blockNumber`.
+    - [ ] Progress on both chains; batches/outputs flow (logs or RPC counters).
+    - [ ] Clean shutdown/startup repeatability.
+
+  Acceptance criteria
+  - [ ] Phase A/B/C scripts are reproducible via `just` targets, with clear pass/fail output.
+  - [ ] Two-chain with SV2 fully replaces op-node while preserving progress and health.
+  - [ ] Templates remain minimal-diff and composable (feature flag to keep legacy op-node path if needed).
+
+- Milestone 5: Docs and examples
+  - [ ] Document config fields and endpoints
+  - [ ] Example Kurtosis YAML snippet and env vars
+  - Testing:
+    - [ ] Sysgo smoke: example config reaches healthy state
+
+Note: We will not land milestones with placeholder or dummy values routed through functions; each milestone completes its wiring fully before moving on.
+
+## Future Work
+- Interop mempool filtering: add config flag, plumb into embedded op-node, and validate with behavior tests (transactions filtered vs accepted).
+
+## Test implementation location
+- Prefer sysgo-based tests alongside existing SV2 tests.
+- Existing coverage in `op-devstack/sysgo/supervisor_v2_system_test.go` ensures end-to-end behavior under presets; add focused tests for new config fields as they land.
