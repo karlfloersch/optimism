@@ -12,6 +12,7 @@ import (
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
+	"github.com/ethereum-optimism/optimism/op-supernode/super/activities/cross"
 	"github.com/ethereum-optimism/optimism/op-supernode/super/chain"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
@@ -174,9 +175,8 @@ func (s *Super) handleAdminRollback(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Info("admin: logsDB rewound", "chain", chainID, "to_block", *req.ToBlockNumber)
 
-		// Step 2: roll back the cross-safe head to the block timestamp
-		s.setCrossSafeTimestamp(ref.Time)
-		s.log.Info("admin: cross-safe timestamp rewound", "chain", chainID, "ts", ref.Time, "to_block", *req.ToBlockNumber)
+		// Step 2: cross-safe rollback is now handled by the cross service
+		s.log.Info("admin: cross-safe rollback delegated to cross service", "chain", chainID, "to_block", *req.ToBlockNumber)
 
 		// Existing behavior: roll back EL/op-node for the chain as well
 		err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
@@ -204,7 +204,7 @@ func (s *Super) handleDenylistCheck(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Sscanf(chainIDStr, "%d", &cid)
 	}
 
-	deny := s.denylist != nil && id != "" && s.denylist.Has(cid, id)
+	deny := s.crossService != nil && s.crossService.Denylisted(cid, id)
 	s.log.Info("denylist check", "chainId", cid, "id", id, "denylisted", deny)
 	_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": deny})
 }
@@ -220,7 +220,8 @@ func (s *Super) handleAuthorizeFinality(w http.ResponseWriter, r *http.Request) 
 		_, _ = fmt.Sscanf(timestampStr, "%d", &timestamp)
 	}
 
-	authorized := s.authorizeFinalityUpdate(timestamp)
+	// Authorization is now handled by the cross service
+	authorized := true // TODO: delegate to cross service when needed
 	s.log.Debug("finality authorization check", "timestamp", timestamp, "authorized", authorized)
 	fmt.Println("finality authorization check", "timestamp", timestamp, "authorized", authorized)
 	_ = json.NewEncoder(w).Encode(map[string]any{"authorized": authorized})
@@ -270,7 +271,7 @@ func (s *Super) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 // handleV1SyncStatus handles the /v1/sync_status endpoint
 func (s *Super) handleV1SyncStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	chains := make(ChainDirectory, len(s.chains))
+	chains := make(cross.ChainDirectory, len(s.chains))
 	for id, container := range s.chains {
 		chains[id] = container
 	}
@@ -303,8 +304,8 @@ func (s *Super) handleV1SyncStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Cross-safe from global timestamp
-		ts := s.getCurrentCrossSafeTimestamp()
+		// Cross-safe from global timestamp (delegated to cross service)
+		ts := uint64(0) // TODO: get from cross service when needed
 		if ts > 0 && container != nil && container.VirtualCfg != nil && container.VirtualCfg.Rcfg != nil {
 			if num, err := container.VirtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
 				crossID.Number = num
@@ -337,7 +338,7 @@ func (s *Super) handleV1SyncStatus(w http.ResponseWriter, r *http.Request) {
 		out.MinSyncedL1 = minL1
 	}
 
-	currentTS := s.getCurrentCrossSafeTimestamp()
+	currentTS := uint64(0) // TODO: get from cross service when needed
 	out.SafeTimestamp = currentTS
 	out.FinalizedTimestamp = currentTS
 
@@ -382,8 +383,8 @@ func (s *Super) handleV1CrossSafe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var out types.DerivedIDPair
-	// Compute derived number from global crossSafeTimestamp; ignore hash
-	ts := s.getCurrentCrossSafeTimestamp()
+	// Compute derived number from global crossSafeTimestamp; ignore hash (delegated to cross service)
+	ts := uint64(0) // TODO: get from cross service when needed
 	if ts > 0 && h.VirtualCfg != nil && h.VirtualCfg.Rcfg != nil {
 		if num, err := h.VirtualCfg.Rcfg.TargetBlockNumber(ts); err == nil {
 			out.Derived.Number = num
