@@ -157,19 +157,25 @@ func (s *Super) handleAdminRollback(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		h := s.chains[chainID]
 		s.mu.Unlock()
-		if h == nil || h.LogsDB == nil {
+		if h == nil {
+			http.Error(w, "chain not found", http.StatusNotFound)
+			return
+		}
+
+		logsDB := s.crossService.GetLogsDB(chainID)
+		if logsDB == nil {
 			http.Error(w, "missing logsDB for chain", http.StatusServiceUnavailable)
 			return
 		}
 
-		ref, _, _, openErr := h.LogsDB.OpenBlock(*req.ToBlockNumber)
+		ref, _, _, openErr := logsDB.OpenBlock(*req.ToBlockNumber)
 		if openErr != nil {
 			http.Error(w, "target block not found in logsDB", http.StatusConflict)
 			return
 		}
 
 		inv := reads.NewRegistry(s.log)
-		if rewindErr := h.LogsDB.Rewind(inv, ref.ID()); rewindErr != nil {
+		if rewindErr := logsDB.Rewind(inv, ref.ID()); rewindErr != nil {
 			http.Error(w, rewindErr.Error(), http.StatusInternalServerError)
 			return
 		}

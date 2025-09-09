@@ -265,7 +265,12 @@ func (s *CrossService) pruneContainersToTimestamp(ctx context.Context, activeCha
 		container := s.chains[chainID]
 		s.mu.Unlock()
 
-		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil || container.LogsDB == nil {
+		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil {
+			continue
+		}
+
+		logsDB := s.GetLogsDB(chainID)
+		if logsDB == nil {
 			continue
 		}
 
@@ -396,7 +401,12 @@ func (s *CrossService) xsafeIngestLogsTo(ctx context.Context, activeChains []eth
 		s.mu.Unlock()
 
 		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "container", container)
-		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil || container.LogsDB == nil {
+		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil {
+			continue
+		}
+
+		logsDB := s.GetLogsDB(v)
+		if logsDB == nil {
 			continue
 		}
 		targetPair, ok := pairs[v]
@@ -405,7 +415,7 @@ func (s *CrossService) xsafeIngestLogsTo(ctx context.Context, activeChains []eth
 			continue
 		}
 		targetNum := targetPair.Derived.Number
-		if blk, ok := container.LogsDB.LatestSealedBlock(); ok {
+		if blk, ok := logsDB.LatestSealedBlock(); ok {
 			s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
 			if blk.Number >= targetNum {
 				// Already at or past target; skip
@@ -438,20 +448,20 @@ func (s *CrossService) xsafeIngestLogsTo(ctx context.Context, activeChains []eth
 
 		// Determine ingest start
 		start := targetNum
-		if blk, ok := container.LogsDB.LatestSealedBlock(); ok {
+		if blk, ok := logsDB.LatestSealedBlock(); ok {
 			start = blk.Number + 1
 			if start > targetNum {
 				start = targetNum
 			}
 		}
 		s.log.Info("xsafe: ingest range", "chain", v, "start", start, "end", targetNum)
-		if err := s.ingestRange(ctx, l2, container.LogsDB, start, targetNum); err != nil {
+		if err := s.ingestRange(ctx, l2, logsDB, start, targetNum); err != nil {
 			s.log.Info("xsafe: ingest failed", "chain", v, "err", err)
 			l2Cli.Close()
 			ready = false
 			break
 		}
-		if blk, ok := container.LogsDB.LatestSealedBlock(); ok {
+		if blk, ok := logsDB.LatestSealedBlock(); ok {
 			s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
 		}
 		l2Cli.Close()
@@ -519,8 +529,14 @@ func (s *CrossService) getExecutingMessages(activeChains []eth.ChainID, ts uint6
 		container := s.chains[v]
 		s.mu.Unlock()
 
-		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil || container.LogsDB == nil {
-			s.log.Info("xsafe: validation skip (missing cfg/db)", "chain", v)
+		if container == nil || container.VirtualCfg == nil || container.VirtualCfg.Rcfg == nil {
+			s.log.Info("xsafe: validation skip (missing cfg)", "chain", v)
+			continue
+		}
+
+		logsDB := s.GetLogsDB(v)
+		if logsDB == nil {
+			s.log.Info("xsafe: validation skip (missing logsDB)", "chain", v)
 			continue
 		}
 		rcfg := container.VirtualCfg.Rcfg
@@ -529,7 +545,7 @@ func (s *CrossService) getExecutingMessages(activeChains []eth.ChainID, ts uint6
 			s.log.Info("xsafe: validation target before genesis", "chain", v, "ts", ts)
 			continue
 		}
-		_, logcount, execMsgs, err := container.LogsDB.OpenBlock(targetNum)
+		_, logcount, execMsgs, err := logsDB.OpenBlock(targetNum)
 		s.log.Info("xsafe: getExecutingMessages", "chain", v, "logcount", logcount, "execMsgs", execMsgs)
 		if err != nil {
 			s.log.Info("xsafe: validation open block failed", "chain", v, "block", targetNum, "err", err)
@@ -572,7 +588,9 @@ func (s *CrossService) validateExecutingMessages(ctx context.Context, activeChai
 				s.mu.Lock()
 				initContainer := s.chains[initCID]
 				s.mu.Unlock()
-				if initContainer == nil || initContainer.LogsDB == nil {
+
+				initLogsDB := s.GetLogsDB(initCID)
+				if initContainer == nil || initLogsDB == nil {
 					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
 					allValid = false
 					invalidCount++
@@ -592,9 +610,11 @@ func (s *CrossService) validateExecutingMessages(ctx context.Context, activeChai
 						s.mu.Lock()
 						container := s.chains[v]
 						s.mu.Unlock()
-						if container != nil && container.VirtualCfg != nil && container.VirtualCfg.Rcfg != nil && container.LogsDB != nil {
+
+						execLogsDB := s.GetLogsDB(v)
+						if container != nil && container.VirtualCfg != nil && container.VirtualCfg.Rcfg != nil && execLogsDB != nil {
 							if targetNum, terr := container.VirtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
-								if ref, _, _, oerr := container.LogsDB.OpenBlock(targetNum); oerr == nil {
+								if ref, _, _, oerr := execLogsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
 										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
 										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
@@ -603,7 +623,7 @@ func (s *CrossService) validateExecutingMessages(ctx context.Context, activeChai
 							}
 						}
 					}
-				} else if _, err := initContainer.LogsDB.Contains(query); err != nil {
+				} else if _, err := initLogsDB.Contains(query); err != nil {
 					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
 					allValid = false
 					invalidCount++
@@ -612,9 +632,11 @@ func (s *CrossService) validateExecutingMessages(ctx context.Context, activeChai
 						s.mu.Lock()
 						container := s.chains[v]
 						s.mu.Unlock()
-						if container != nil && container.VirtualCfg != nil && container.VirtualCfg.Rcfg != nil && container.LogsDB != nil {
+
+						execLogsDB := s.GetLogsDB(v)
+						if container != nil && container.VirtualCfg != nil && container.VirtualCfg.Rcfg != nil && execLogsDB != nil {
 							if targetNum, terr := container.VirtualCfg.Rcfg.TargetBlockNumber(ts); terr == nil {
-								if ref, _, _, oerr := container.LogsDB.OpenBlock(targetNum); oerr == nil {
+								if ref, _, _, oerr := execLogsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
 										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
 										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)

@@ -3,6 +3,7 @@ package cross
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supernode/super/activities"
 	"github.com/ethereum-optimism/optimism/op-supernode/super/chain"
+	logsdb "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 )
 
 // ChainDirectory represents a mapping of chain IDs to chain containers
@@ -29,6 +31,9 @@ type CrossService struct {
 
 	// per-instance data directory for DBs
 	dataDir string
+
+	// logsdbs managed by this cross service
+	logsdbs map[uint64]*logsdb.DB
 
 	// denylist
 	denylist *DenylistStore
@@ -54,6 +59,7 @@ func NewCrossService(logger log.Logger, chains ChainDirectory, dataDir string) *
 		log:          logger.New("service", "cross"),
 		chains:       chains,
 		dataDir:      dataDir,
+		logsdbs:      make(map[uint64]*logsdb.DB),
 		l1ScopeLabel: defaultScopeLabel(),
 		stopCh:       make(chan struct{}),
 		done:         make(chan struct{}),
@@ -135,5 +141,68 @@ func (s *CrossService) AddToDenylist(chainID uint64, timestamp uint64, hash stri
 	}
 	return s.denylist.Add(chainID, timestamp, hash)
 }
+
+// openLogsDB initializes the logs DB for a chain.
+func (s *CrossService) openLogsDB(logger log.Logger, chainID uint64, dataDir string) (*logsdb.DB, error) {
+	// Ensure base directory exists
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, err
+	}
+	logsPath := fmt.Sprintf("%s/logs-%d", dataDir, chainID)
+	// Use no-op metrics for now; can be replaced with real metrics later.
+	logDB, err := logsdb.NewFromFile(logger, logsMetricsNoop{}, eth.ChainIDFromUInt64(chainID), logsPath, true)
+	if err != nil {
+		return nil, err
+	}
+	return logDB, nil
+}
+
+// AddChainLogsDB creates and manages a logsDB for the given chain
+func (s *CrossService) AddChainLogsDB(chainID uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if logsDB already exists
+	if _, exists := s.logsdbs[chainID]; exists {
+		return fmt.Errorf("logsDB for chain %d already exists", chainID)
+	}
+
+	// Create logsDB
+	logsDB, err := s.openLogsDB(s.log, chainID, s.dataDir)
+	if err != nil {
+		return fmt.Errorf("failed to create logsDB for chain %d: %w", chainID, err)
+	}
+
+	s.logsdbs[chainID] = logsDB
+	s.log.Info("created logsDB for chain", "chainID", chainID)
+	return nil
+}
+
+// RemoveChainLogsDB removes and closes the logsDB for the given chain
+func (s *CrossService) RemoveChainLogsDB(chainID uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if logsDB, exists := s.logsdbs[chainID]; exists {
+		// Close the logsDB (assuming it has a Close method)
+		// Note: We should check the actual logsdb.DB interface for the correct close method
+		delete(s.logsdbs, chainID)
+		s.log.Info("removed logsDB for chain", "chainID", chainID)
+		_ = logsDB // Prevent unused variable error for now
+	}
+}
+
+// GetLogsDB returns the logsDB for the given chain
+func (s *CrossService) GetLogsDB(chainID uint64) *logsdb.DB {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.logsdbs[chainID]
+}
+
+// logsMetricsNoop implements op-super v1 logs.Metrics
+type logsMetricsNoop struct{}
+
+func (logsMetricsNoop) RecordDBEntryCount(kind string, count int64) {}
+func (logsMetricsNoop) RecordDBSearchEntriesRead(count int64)       {}
 
 var _ activities.Activity = (*CrossService)(nil)

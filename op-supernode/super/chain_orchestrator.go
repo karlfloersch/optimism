@@ -26,14 +26,12 @@ func (s *Super) AddChain(vCfg *chain.VirtualNodeConfig) (uint64, error) {
 	container.VirtualCfg = vCfg
 	container.Started = time.Now()
 
-	// Open logs DB for chain
-	logsDB, err := s.openLogsDB(s.log, chainID, s.getDataDir())
-	if err != nil {
+	// Create logs DB for chain via cross service
+	if err := s.crossService.AddChainLogsDB(chainID); err != nil {
 		// Stop the virtual op-node before returning the error
 		_ = stopFn(context.Background())
 		return 0, err
 	}
-	container.LogsDB = logsDB
 
 	s.mu.Lock()
 	if s.chains == nil {
@@ -63,6 +61,8 @@ func (s *Super) RemoveChain(chainID uint64) {
 	// Update cross service with new chain directory
 	if s.crossService != nil {
 		s.crossService.UpdateChains(s.chains)
+		// Remove logsDB for this chain
+		s.crossService.RemoveChainLogsDB(chainID)
 	}
 
 	if container == nil {
@@ -102,25 +102,26 @@ func (s *Super) RollbackChain(ctx context.Context, chainID uint64, toBlock uint6
 		cancel()
 	}
 
-	// Attempt to record the soon-to-be-invalidated block (toBlock+1) in the denylist
-	if container.LogsDB != nil && s.crossService != nil {
-		invalidNum := toBlock + 1
-		if _, _, _, err := container.LogsDB.OpenBlock(invalidNum); err == nil {
-			// Access denylist through cross service (we'll need to add a method for this)
-			// For now, we'll skip this functionality as it should be handled by the cross service internally
+	// Roll back logsDB to the target block number via cross service
+	if s.crossService != nil {
+		if logsDB := s.crossService.GetLogsDB(chainID); logsDB != nil {
+			// Attempt to record the soon-to-be-invalidated block (toBlock+1) in the denylist
+			invalidNum := toBlock + 1
+			if _, _, _, err := logsDB.OpenBlock(invalidNum); err == nil {
+				// Access denylist through cross service (we'll need to add a method for this)
+				// For now, we'll skip this functionality as it should be handled by the cross service internally
+			}
+
+			// Roll back logsDB to the target block number
+			if blockRef, _, _, openErr := logsDB.OpenBlock(toBlock); openErr == nil {
+				inv := reads.NewRegistry(s.log)
+				_ = logsDB.Rewind(inv, blockRef.ID())
+			}
 		}
 	}
 
-	// Roll back logsDB to the target block number
-	if container.LogsDB != nil {
-		if blockRef, _, _, openErr := container.LogsDB.OpenBlock(toBlock); openErr == nil {
-			inv := reads.NewRegistry(s.log)
-			_ = container.LogsDB.Rewind(inv, blockRef.ID())
-		}
-	}
-
-	// Roll back EL head to the absolute target via pluggable implementation
-	if err := rollbackEL(ctx, container.VirtualCfg.L2UserRPC, toBlock); err != nil {
+	// Roll back EL head to the absolute target via container method
+	if err := container.RollbackEL(ctx, toBlock); err != nil {
 		return err
 	}
 
