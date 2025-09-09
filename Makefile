@@ -13,7 +13,7 @@ help: ## Prints this help message
 build: build-go build-contracts ## Builds Go components and contracts-bedrock
 .PHONY: build
 
-build-go: submodules op-node op-proposer op-batcher op-challenger op-dispute-mon op-program cannon ## Builds main Go components
+build-go: submodules op-node op-proposer op-batcher op-challenger op-dispute-mon op-supernode op-program cannon ## Builds main Go components
 .PHONY: build-go
 
 build-contracts:
@@ -38,7 +38,7 @@ golang-docker: ## Builds Docker images for Go components using buildx
 			--progress plain \
 			--load \
 			-f docker-bake.hcl \
-			op-node op-batcher op-proposer op-challenger op-dispute-mon op-supervisor
+			op-node op-batcher op-proposer op-challenger op-dispute-mon op-supervisor op-supernode
 .PHONY: golang-docker
 
 docker-builder-clean: ## Removes the Docker buildx builder
@@ -118,6 +118,10 @@ op-challenger: ## Builds op-challenger binary
 op-dispute-mon: ## Builds op-dispute-mon binary
 	make -C ./op-dispute-mon op-dispute-mon
 .PHONY: op-dispute-mon
+
+op-supernode: ## Builds op-supernode binary
+	just $(JUSTFLAGS) ./op-supernode/op-supernode
+.PHONY: op-supernode
 
 op-program: ## Builds op-program binary
 	make -C ./op-program op-program

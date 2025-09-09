@@ -270,7 +270,7 @@ func (s *Super) addV1SyncStatusEndpoint(mux *http.ServeMux) {
 // handleV1SyncStatus handles the /v1/sync_status endpoint
 func (s *Super) handleV1SyncStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	chains := make(map[uint64]*chain.ChainContainer, len(s.chains))
+	chains := make(ChainDirectory, len(s.chains))
 	for id, container := range s.chains {
 		chains[id] = container
 	}
@@ -463,7 +463,7 @@ func (s *Super) handleV1SuperrootAtTs(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 // resolveChainFromQuery parses chainId and returns the chain container, replying with errors if invalid.
-func (s *Super) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *chain.ChainContainer) {
+func (s *Super) resolveChainFromQuery(w http.ResponseWriter, r *http.Request) (uint64, *chain.ChainContainerImpl) {
 	q := r.URL.Query()
 	var chainID uint64
 	if cidStr := q.Get("chainId"); cidStr != "" {

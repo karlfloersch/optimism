@@ -26,6 +26,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
+type ChainDirectory map[uint64]*chain.ChainContainerImpl
+
 type Super struct {
 	log log.Logger
 	mu  sync.Mutex
@@ -36,7 +38,7 @@ type Super struct {
 	// denylist
 	denylist *DenylistStore
 
-	chains   map[uint64]*chain.ChainContainer
+	chains   ChainDirectory
 	chainsMu sync.Mutex
 
 	// L1 scope label used for cross-safe L1 confirmation depth gating (default: eth.Safe; tests may override to eth.Unsafe)
@@ -963,7 +965,7 @@ func (s *Super) EnableOpNodeProxy(v bool) { s.enableOpNodeProxy = v }
 func (s *Super) Stop() {
 	// Stop all chains
 	s.mu.Lock()
-	chains := make(map[uint64]*chain.ChainContainer)
+	chains := make(ChainDirectory)
 	for id, container := range s.chains {
 		chains[id] = container
 	}

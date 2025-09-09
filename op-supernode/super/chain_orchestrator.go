@@ -19,12 +19,11 @@ func (s *Super) AddChain(vCfg *chain.VirtualNodeConfig) (uint64, error) {
 		return 0, err
 	}
 
-	container := &chain.ChainContainer{
-		VirtualOpNodeUserRPC: userRPC,
-		StopVirtualOpNode:    stopFn,
-		VirtualCfg:           vCfg,
-		Started:              time.Now(),
-	}
+	container := chain.NewChainContainer()
+	container.VirtualOpNodeUserRPC = userRPC
+	container.StopVirtualOpNode = stopFn
+	container.VirtualCfg = vCfg
+	container.Started = time.Now()
 
 	// Open logs DB for chain
 	logsDB, err := s.openLogsDB(s.log, chainID, s.getDataDir())
@@ -37,7 +36,7 @@ func (s *Super) AddChain(vCfg *chain.VirtualNodeConfig) (uint64, error) {
 
 	s.mu.Lock()
 	if s.chains == nil {
-		s.chains = make(map[uint64]*chain.ChainContainer)
+		s.chains = make(ChainDirectory)
 	}
 	s.chains[chainID] = container
 	s.mu.Unlock()
