@@ -104,22 +104,10 @@ func (s *CrossService) Denylisted(chainID uint64, id string) bool {
 	return s.denylist != nil && id != "" && s.denylist.Has(chainID, id)
 }
 
-// Finalized returns the finalized L2 block for a given chain
-func (s *CrossService) Finalized(ctx context.Context, chainID uint64) (eth.BlockID, error) {
-	s.mu.Lock()
-	container := s.chains[chainID]
-	s.mu.Unlock()
-
-	if container == nil || container.VirtualOpNodeUserRPC == "" {
-		return eth.BlockID{}, fmt.Errorf("chain %d not found or no op-node RPC", chainID)
-	}
-
-	st, err := s.fetchSyncStatus(ctx, container.VirtualOpNodeUserRPC)
-	if err != nil || st == nil {
-		return eth.BlockID{}, fmt.Errorf("failed to fetch sync status: %w", err)
-	}
-
-	return st.FinalizedL2.ID(), nil
+// Finalized returns if a timestamp is at or before the latest Cross Valid timestamp
+func (s *CrossService) Finalized(timestamp uint64) bool {
+	latestCrossSafeTimestamp := s.getCurrentCrossSafeTimestamp()
+	return timestamp <= latestCrossSafeTimestamp
 }
 
 // SetRollbackFn sets the rollback function for testing
