@@ -31,6 +31,10 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	s.addV1SyncStatusEndpoint(mux)
 	s.addV1QueryEndpoints(mux)
 
+	// Message filtering endpoints
+	mux.HandleFunc("/v1/check_message", s.handleCheckMessage)
+	mux.HandleFunc("/enable_check_message", s.handleEnableCheckMessage)
+
 	// Optional op-node proxy
 	if s.enableOpNodeProxy {
 		mux.HandleFunc("/opnode/", s.handleOpNodeProxy)
@@ -455,6 +459,123 @@ func (s *Supervisor) handleV1SuperrootAtTs(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": "superroot endpoint is not supported in Supervisor v2",
 	})
+}
+
+// handleCheckMessage handles the /v1/check_message endpoint
+// This endpoint provides the same functionality as the Contains function in the original supervisor
+func (s *Supervisor) handleCheckMessage(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	q := r.URL.Query()
+
+	// Extract chainId parameter
+	var chainID uint64
+	if cidStr := q.Get("chainId"); cidStr != "" {
+		if _, err := fmtSscanf(cidStr, &chainID); err != nil {
+			http.Error(w, "invalid chainId parameter", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Extract required parameters
+	var timestamp, blockNum, logIdxU64 uint64
+	checksum := q.Get("checksum")
+
+	if _, err := fmtSscanf(q.Get("timestamp"), &timestamp); err != nil {
+		http.Error(w, "invalid or missing timestamp parameter", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := fmtSscanf(q.Get("blockNum"), &blockNum); err != nil {
+		http.Error(w, "invalid or missing blockNum parameter", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := fmtSscanf(q.Get("logIdx"), &logIdxU64); err != nil {
+		http.Error(w, "invalid or missing logIdx parameter", http.StatusBadRequest)
+		return
+	}
+	logIdx := uint32(logIdxU64)
+
+	if checksum == "" {
+		http.Error(w, "missing checksum parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Validate chain exists in multi-chain mode
+	s.mu.Lock()
+	hasChains := len(s.chains) > 0
+	var container *ChainContainer
+	if hasChains {
+		if chainID == 0 {
+			s.mu.Unlock()
+			http.Error(w, "missing chainId parameter", http.StatusBadRequest)
+			return
+		}
+		container = s.chains[chainID]
+		if container == nil {
+			s.mu.Unlock()
+			http.Error(w, "unknown chainId", http.StatusNotFound)
+			return
+		}
+	}
+	s.mu.Unlock()
+
+	// Call the actual CheckMessage implementation
+	blockSeal, err := s.CheckMessage(r.Context(), chainID, timestamp, blockNum, logIdx, checksum)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("message check failed: %v", err), http.StatusNotFound)
+		return
+	}
+
+	// Return the block seal information
+	response := map[string]any{
+		"hash":      blockSeal.Hash.Hex(),
+		"number":    blockSeal.Number,
+		"timestamp": blockSeal.Timestamp,
+		"found":     true,
+	}
+
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// handleEnableCheckMessage handles the /enable_check_message endpoint
+func (s *Supervisor) handleEnableCheckMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		// Set the enabled state
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		s.checkMessageEnabled = req.Enabled
+		s.mu.Unlock()
+
+		s.log.Info("Message checking enabled state changed", "enabled", req.Enabled)
+
+		response := map[string]any{
+			"enabled": req.Enabled,
+			"message": fmt.Sprintf("Message checking %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
+		}
+		_ = json.NewEncoder(w).Encode(response)
+
+	} else if r.Method == http.MethodGet {
+		// Get the current enabled state
+		s.mu.Lock()
+		enabled := s.checkMessageEnabled
+		s.mu.Unlock()
+
+		response := map[string]any{
+			"enabled": enabled,
+		}
+		_ = json.NewEncoder(w).Encode(response)
+
+	} else {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ============================================================================

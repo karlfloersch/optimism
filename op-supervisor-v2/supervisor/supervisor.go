@@ -32,6 +32,9 @@ type Supervisor struct {
 	// if true, HTTP handler exposes an /opnode/ reverse proxy to the virtual op-node user RPC
 	enableOpNodeProxy bool
 
+	// if true, message checking is enabled; if false, CheckMessage returns stub responses
+	checkMessageEnabled bool
+
 	// denylist
 	denylist *DenylistStore
 
@@ -84,6 +87,8 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l.New("service", "supervisor_v2")}
 	// initialize shared linker state
 	s.l1ScopeLabel = defaultScopeLabel()
+	// enable message checking by default
+	s.checkMessageEnabled = true
 
 	// default fetcher dials the op-node and returns SyncStatus
 	s.fetchSyncStatus = func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
