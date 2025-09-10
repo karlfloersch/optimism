@@ -23,7 +23,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/txintent"
 	"github.com/ethereum-optimism/optimism/op-service/txplan"
-	supertypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 
 	// use sysgo variant of the two-chain preset to avoid generics mismatch
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
@@ -32,6 +31,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
+	supervisorTypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
 func TestJustSitThere(gt *testing.T) {
@@ -111,7 +111,7 @@ func TestJustSitThere(gt *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			return false
 		}
-		var out supertypes.DerivedIDPair
+		var out supervisorTypes.DerivedIDPair
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return false
 		}
@@ -227,7 +227,7 @@ func TestManualRollback(gt *testing.T) {
 	t.Require().NoError(err)
 	defer resp2.Body.Close()
 	t.Require().Equal(http.StatusOK, resp2.StatusCode)
-	var afterRB supertypes.DerivedIDPair
+	var afterRB supervisorTypes.DerivedIDPair
 	t.Require().NoError(json.NewDecoder(resp2.Body).Decode(&afterRB))
 	gt.Logf("%s: Cross-safe after rollback derived=%d", testName, afterRB.Derived.Number)
 	t.Require().LessOrEqual(afterRB.Derived.Number, rollbackHeight)
@@ -278,7 +278,7 @@ func TestManualRollback(gt *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			return false
 		}
-		var out supertypes.DerivedIDPair
+		var out supervisorTypes.DerivedIDPair
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return false
 		}
@@ -457,6 +457,77 @@ func TestValidExecutingMessage(gt *testing.T) {
 		gt.Logf("%s: Executing receipt not found in block scan post-rollback (acceptable)", testName)
 	}
 
+	//////////////////////////////////////////////////////////////////////
+	// Validate the executing message using check_message API
+	if foundExec {
+		gt.Logf("%s: Validating executing message using check_message API", testName)
+
+		// Use the initiating message to generate the checksum (not the executing message)
+		// The executing message references the initiating message via checksum
+		initBlockNum := initReceipt.BlockNumber.Uint64()
+		initBlockNumHex := fmt.Sprintf("0x%x", initBlockNum)
+		var initBlock struct {
+			Timestamp string `json:"timestamp"`
+		}
+		t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &initBlock, "eth_getBlockByNumber", initBlockNumHex, false))
+
+		// Parse timestamp from hex
+		var initTimestamp uint64
+		_, err = fmt.Sscanf(initBlock.Timestamp, "0x%x", &initTimestamp)
+		t.Require().NoError(err)
+
+		// Use the first log from the initiating receipt directly
+		initLog := initReceipt.Logs[0] // EventLogger.emitLog is the first log
+		initGlobalLogIdx := uint32(0)  // First log in the transaction
+
+		t.Require().NotNil(initLog, "Initiating message log should be found")
+
+		// Generate the checksum from the initiating message using original supervisor's ChecksumArgs
+		payloadHash := crypto.Keccak256Hash(supervisorTypes.LogToMessagePayload(initLog))
+		logHash := supervisorTypes.PayloadHashToLogHash(payloadHash, initLog.Address)
+
+		checksumArgs := supervisorTypes.ChecksumArgs{
+			BlockNumber: initBlockNum,
+			LogIndex:    initGlobalLogIdx,
+			Timestamp:   initTimestamp,
+			ChainID:     eth.ChainIDFromUInt64(chainID),
+			LogHash:     logHash,
+		}
+		checksum := common.Hash(checksumArgs.Checksum()).Hex()
+
+		gt.Logf("%s: Generated checksum %s from initiating message at block %d, log %d", testName, checksum, initBlockNum, initGlobalLogIdx)
+		fmt.Printf("DEBUG TEST: Generated checksum: %s\n", checksum)
+		fmt.Printf("DEBUG TEST: Log data: %x\n", initLog.Data)
+		fmt.Printf("DEBUG TEST: Log address: %s\n", initLog.Address.Hex())
+		fmt.Printf("DEBUG TEST: Block: %d, Timestamp: %d, LogIdx: %d, ChainID: %d\n", initBlockNum, initTimestamp, initGlobalLogIdx, chainID)
+
+		// Call check_message API to validate the message (using initiating message parameters)
+		checkURL := fmt.Sprintf("%s/v1/check_message?chainId=%d&timestamp=%d&blockNum=%d&logIdx=%d&checksum=%s",
+			sv2URL, chainID, initTimestamp, initBlockNum, initGlobalLogIdx, checksum)
+		req, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+		t.Require().NoError(err)
+
+		resp, err := http.DefaultClient.Do(req)
+		t.Require().NoError(err)
+		defer resp.Body.Close()
+
+		// Valid message should return 200 OK with found=true
+		t.Require().Equal(http.StatusOK, resp.StatusCode, "valid executing message should pass check_message validation")
+
+		var checkResult struct {
+			Hash      string `json:"hash"`
+			Number    uint64 `json:"number"`
+			Timestamp uint64 `json:"timestamp"`
+			Found     bool   `json:"found"`
+		}
+		t.Require().NoError(json.NewDecoder(resp.Body).Decode(&checkResult))
+		t.Require().True(checkResult.Found, "valid executing message should be found by check_message API")
+		t.Require().Equal(initBlockNum, checkResult.Number, "block number should match")
+
+		gt.Logf("%s: Valid executing message successfully validated via check_message API", testName)
+	}
+	//////////////////////////////////////////////////////////////////////
+
 	// assert cross safe (finalized) is advancing and contains the executing message
 	require.Eventually(t, func() bool {
 		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/v1/cross_safe?chainId=%d", sv2URL, chainID), nil)
@@ -471,7 +542,7 @@ func TestValidExecutingMessage(gt *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			return false
 		}
-		var out supertypes.DerivedIDPair
+		var out supervisorTypes.DerivedIDPair
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return false
 		}
@@ -524,6 +595,101 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &rec, "eth_getTransactionReceipt", execTxHash))
 	t.Require().Empty(rec.BlockHash, "invalid executing tx should not be included yet")
 
+	// TODO: Add message filtering validation for invalid executing message
+	//////////////////////////////////////////////////////////////////////
+	// Test check_message API with invalid message (should fail when enabled)
+	gt.Logf("%s: Testing check_message API with invalid executing message", testName)
+
+	// Generate a fake/invalid checksum for testing using the initiating message details
+	// We'll use the initiating message block details but with a corrupted checksum
+	// Get the initReceipt from the initTx (same pattern as ValidExecutingMessage test)
+	initReceiptFromTx, err := initTx.PlannedTx.Included.Eval(ctx)
+	t.Require().NoError(err)
+	initBlockNum := initReceiptFromTx.BlockNumber.Uint64()
+
+	// Get the initiating block timestamp
+	initBlockHex := fmt.Sprintf("0x%x", initBlockNum)
+	var initBlock struct {
+		Timestamp string `json:"timestamp"`
+	}
+	t.Require().NoError(el.L2EthClient().RPC().CallContext(ctx, &initBlock, "eth_getBlockByNumber", initBlockHex, false))
+	var initTimestamp uint64
+	_, err = fmt.Sscanf(initBlock.Timestamp, "0x%x", &initTimestamp)
+	t.Require().NoError(err)
+
+	// Use a fake checksum that should fail validation (corrupted initiating message)
+	logIdx := uint32(0) // assume first log in initiating transaction
+	fakeChecksum := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+	gt.Logf("%s: Using fake checksum %s for invalid initiating message test", testName, fakeChecksum)
+
+	// Call check_message API - should fail for invalid message (using initiating message parameters)
+	checkURL := fmt.Sprintf("%s/v1/check_message?chainId=%d&timestamp=%d&blockNum=%d&logIdx=%d&checksum=%s",
+		sv2URL, chainID, initTimestamp, initBlockNum, logIdx, fakeChecksum)
+	req, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+	t.Require().NoError(err)
+
+	resp, err := http.DefaultClient.Do(req)
+	t.Require().NoError(err)
+	defer resp.Body.Close()
+
+	// Invalid message should return 404 Not Found
+	t.Require().Equal(http.StatusNotFound, resp.StatusCode, "invalid executing message should fail check_message validation")
+	gt.Logf("%s: Invalid executing message correctly rejected by check_message API", testName)
+
+	// Test disabling message checking feature
+	gt.Logf("%s: Testing enable_check_message disable functionality", testName)
+
+	// Disable message checking
+	disableReq := map[string]bool{"enabled": false}
+	disableBody, _ := json.Marshal(disableReq)
+	disableResp, err := http.Post(fmt.Sprintf("%s/enable_check_message", sv2URL), "application/json", bytes.NewReader(disableBody))
+	t.Require().NoError(err)
+	defer disableResp.Body.Close()
+	t.Require().Equal(http.StatusOK, disableResp.StatusCode, "should be able to disable message checking")
+
+	var disableResult struct {
+		Enabled bool   `json:"enabled"`
+		Message string `json:"message"`
+	}
+	t.Require().NoError(json.NewDecoder(disableResp.Body).Decode(&disableResult))
+	t.Require().False(disableResult.Enabled, "message checking should be disabled")
+
+	// Now the same invalid message should return success (stub response)
+	req2, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+	t.Require().NoError(err)
+
+	resp2, err := http.DefaultClient.Do(req2)
+	t.Require().NoError(err)
+	defer resp2.Body.Close()
+
+	// With checking disabled, should return 200 OK with found=true (stub response)
+	t.Require().Equal(http.StatusOK, resp2.StatusCode, "disabled message checking should return success for any message")
+
+	var stubResult struct {
+		Hash      string `json:"hash"`
+		Number    uint64 `json:"number"`
+		Timestamp uint64 `json:"timestamp"`
+		Found     bool   `json:"found"`
+	}
+	t.Require().NoError(json.NewDecoder(resp2.Body).Decode(&stubResult))
+	t.Require().True(stubResult.Found, "disabled message checking should return found=true")
+	t.Require().Equal(initBlockNum, stubResult.Number, "block number should match")
+	t.Require().Equal("0x0000000000000000000000000000000000000000000000000000000000000000", stubResult.Hash, "should return empty hash when disabled")
+
+	gt.Logf("%s: Message checking disable functionality working correctly", testName)
+
+	// Re-enable message checking for cleanup
+	enableReq := map[string]bool{"enabled": true}
+	enableBody, _ := json.Marshal(enableReq)
+	enableResp, err := http.Post(fmt.Sprintf("%s/enable_check_message", sv2URL), "application/json", bytes.NewReader(enableBody))
+	t.Require().NoError(err)
+	defer enableResp.Body.Close()
+	t.Require().Equal(http.StatusOK, enableResp.StatusCode, "should be able to re-enable message checking")
+
+	gt.Logf("%s: Message checking re-enabled for cleanup", testName)
+	//////////////////////////////////////////////////////////////////////
+
 	gt.Logf("%s: Test completed - invalid executing message handled, cross-safe advanced, and reorg observed", testName)
 	//////////////////////////////////////////////////////////////////////
 }
@@ -534,7 +700,6 @@ func TestTwoChainValidExecutingMessage(gt *testing.T) {
 	const testName = "TwoChainValidExecutingMessage"
 	const interopOffset = uint64(6)
 	const confirmDepth = uint64(1)
-	const crossSafeTarget = uint64(8)
 
 	//////////////////////////////////////////////////////////////////////
 	// bring up a two-chain system with SV2 across both chains and batchers
@@ -726,7 +891,7 @@ func waitCrossSafeAtLeast(ctx context.Context, t devtest.T, sv2URL string, chain
 		if resp.StatusCode != http.StatusOK {
 			return false
 		}
-		var out supertypes.DerivedIDPair
+		var out supervisorTypes.DerivedIDPair
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return false
 		}
@@ -755,3 +920,5 @@ func buildFundedPlan(ctx context.Context, t devtest.T, l2Net stack.L2Network) (t
 	)
 	return plan, el
 }
+
+// Note: Using original supervisor's ChecksumArgs and helper functions instead of duplicating them

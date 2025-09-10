@@ -87,7 +87,6 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	s := &Supervisor{log: l.New("service", "supervisor_v2")}
 	// initialize shared linker state
 	s.l1ScopeLabel = defaultScopeLabel()
-	// enable message checking by default
 	s.checkMessageEnabled = true
 
 	// default fetcher dials the op-node and returns SyncStatus

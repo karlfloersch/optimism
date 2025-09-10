@@ -467,10 +467,13 @@ func (s *Supervisor) handleCheckMessage(w http.ResponseWriter, r *http.Request) 
 	// Parse query parameters
 	q := r.URL.Query()
 
+	fmt.Printf("DEBUG API: Received check_message request: %s\n", r.URL.RawQuery)
+
 	// Extract chainId parameter
 	var chainID uint64
 	if cidStr := q.Get("chainId"); cidStr != "" {
 		if _, err := fmtSscanf(cidStr, &chainID); err != nil {
+			fmt.Printf("DEBUG API: Invalid chainId: %v\n", err)
 			http.Error(w, "invalid chainId parameter", http.StatusBadRequest)
 			return
 		}
@@ -520,12 +523,18 @@ func (s *Supervisor) handleCheckMessage(w http.ResponseWriter, r *http.Request) 
 	}
 	s.mu.Unlock()
 
+	fmt.Printf("DEBUG API: Calling CheckMessage with chainID=%d, timestamp=%d, blockNum=%d, logIdx=%d, checksum=%s\n",
+		chainID, timestamp, blockNum, logIdx, checksum)
+
 	// Call the actual CheckMessage implementation
 	blockSeal, err := s.CheckMessage(r.Context(), chainID, timestamp, blockNum, logIdx, checksum)
 	if err != nil {
+		fmt.Printf("DEBUG API: CheckMessage failed: %v\n", err)
 		http.Error(w, fmt.Sprintf("message check failed: %v", err), http.StatusNotFound)
 		return
 	}
+
+	fmt.Printf("DEBUG API: CheckMessage succeeded\n")
 
 	// Return the block seal information
 	response := map[string]any{
