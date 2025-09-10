@@ -3,6 +3,7 @@ package sysgo
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -458,12 +459,11 @@ func TestValidExecutingMessage(gt *testing.T) {
 	}
 
 	//////////////////////////////////////////////////////////////////////
-	// Validate the executing message using check_message API
+	// Validate the executing message using supervisor_checkAccessList API
 	if foundExec {
-		gt.Logf("%s: Validating executing message using check_message API", testName)
+		gt.Logf("%s: Validating executing message using supervisor_checkAccessList API", testName)
 
-		// Use the initiating message to generate the checksum (not the executing message)
-		// The executing message references the initiating message via checksum
+		// Use the initiating message to generate the access list entry
 		initBlockNum := initReceipt.BlockNumber.Uint64()
 		initBlockNumHex := fmt.Sprintf("0x%x", initBlockNum)
 		var initBlock struct {
@@ -493,38 +493,87 @@ func TestValidExecutingMessage(gt *testing.T) {
 			ChainID:     eth.ChainIDFromUInt64(chainID),
 			LogHash:     logHash,
 		}
-		checksum := common.Hash(checksumArgs.Checksum()).Hex()
+		messageChecksum := checksumArgs.Checksum()
 
-		gt.Logf("%s: Generated checksum %s from initiating message at block %d, log %d", testName, checksum, initBlockNum, initGlobalLogIdx)
-		fmt.Printf("DEBUG TEST: Generated checksum: %s\n", checksum)
+		gt.Logf("%s: Generated checksum %s from initiating message at block %d, log %d", testName, common.Hash(messageChecksum).Hex(), initBlockNum, initGlobalLogIdx)
+		fmt.Printf("DEBUG TEST: Generated checksum: %s\n", common.Hash(messageChecksum).Hex())
 		fmt.Printf("DEBUG TEST: Log data: %x\n", initLog.Data)
 		fmt.Printf("DEBUG TEST: Log address: %s\n", initLog.Address.Hex())
 		fmt.Printf("DEBUG TEST: Block: %d, Timestamp: %d, LogIdx: %d, ChainID: %d\n", initBlockNum, initTimestamp, initGlobalLogIdx, chainID)
 
-		// Call check_message API to validate the message (using initiating message parameters)
-		checkURL := fmt.Sprintf("%s/v1/check_message?chainId=%d&timestamp=%d&blockNum=%d&logIdx=%d&checksum=%s",
-			sv2URL, chainID, initTimestamp, initBlockNum, initGlobalLogIdx, checksum)
-		req, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+		// Create access list entry using the original supervisor's Access type (for reference)
+		_ = supervisorTypes.Access{
+			BlockNumber: initBlockNum,
+			Timestamp:   initTimestamp,
+			LogIndex:    initGlobalLogIdx,
+			ChainID:     eth.ChainIDFromUInt64(chainID),
+			Checksum:    messageChecksum,
+		}
+
+		// Encode the access list entry (this is a simplified version - in reality it would be more complex)
+		// For now, we'll create the access list entries manually using the original supervisor's encoding
+		var inboxEntries []common.Hash
+
+		// Create lookup entry
+		lookupEntry := common.Hash{}
+		lookupEntry[0] = 1 // PrefixLookup
+		// bytes 1-3: zero padding
+		// bytes 4-11: chainID (8 bytes, big-endian)
+		chainIDBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(chainIDBytes, chainID)
+		copy(lookupEntry[4:12], chainIDBytes)
+		// bytes 12-19: blockNumber (8 bytes, big-endian)
+		blockNumBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(blockNumBytes, initBlockNum)
+		copy(lookupEntry[12:20], blockNumBytes)
+		// bytes 20-27: timestamp (8 bytes, big-endian)
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, initTimestamp)
+		copy(lookupEntry[20:28], timestampBytes)
+		// bytes 28-31: logIndex (4 bytes, big-endian)
+		logIdxBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(logIdxBytes, initGlobalLogIdx)
+		copy(lookupEntry[28:32], logIdxBytes)
+		inboxEntries = append(inboxEntries, lookupEntry)
+
+		// Create checksum entry
+		checksumEntry := common.Hash(messageChecksum)
+		checksumEntry[0] = 3 // PrefixChecksum
+		inboxEntries = append(inboxEntries, checksumEntry)
+
+		// Convert to hex strings for JSON
+		inboxEntriesHex := make([]string, len(inboxEntries))
+		for i, entry := range inboxEntries {
+			inboxEntriesHex[i] = entry.Hex()
+		}
+
+		// Call supervisor_checkAccessList API
+		requestBody := map[string]interface{}{
+			"inboxEntries": inboxEntriesHex,
+			"minSafety":    "LocalUnsafe",
+			"executingDescriptor": map[string]interface{}{
+				"chainID":   fmt.Sprintf("0x%x", chainID),
+				"timestamp": initTimestamp,
+				"timeout":   uint64(0),
+			},
+		}
+
+		reqBodyBytes, err := json.Marshal(requestBody)
 		t.Require().NoError(err)
+
+		checkURL := fmt.Sprintf("%s/supervisor_checkAccessList", sv2URL)
+		req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(reqBodyBytes))
+		t.Require().NoError(err)
+		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)
 		t.Require().NoError(err)
 		defer resp.Body.Close()
 
-		// Valid message should return 200 OK with found=true
-		t.Require().Equal(http.StatusOK, resp.StatusCode, "valid executing message should pass check_message validation")
+		// Valid access list should return 200 OK
+		t.Require().Equal(http.StatusOK, resp.StatusCode, "valid access list should pass supervisor_checkAccessList validation")
 
-		var checkResult struct {
-			Hash      string `json:"hash"`
-			Number    uint64 `json:"number"`
-			Timestamp uint64 `json:"timestamp"`
-			Found     bool   `json:"found"`
-		}
-		t.Require().NoError(json.NewDecoder(resp.Body).Decode(&checkResult))
-		t.Require().True(checkResult.Found, "valid executing message should be found by check_message API")
-		t.Require().Equal(initBlockNum, checkResult.Number, "block number should match")
-
-		gt.Logf("%s: Valid executing message successfully validated via check_message API", testName)
+		gt.Logf("%s: Valid executing message successfully validated via supervisor_checkAccessList API", testName)
 	}
 	//////////////////////////////////////////////////////////////////////
 
@@ -597,8 +646,8 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 
 	// TODO: Add message filtering validation for invalid executing message
 	//////////////////////////////////////////////////////////////////////
-	// Test check_message API with invalid message (should fail when enabled)
-	gt.Logf("%s: Testing check_message API with invalid executing message", testName)
+	// Test supervisor_checkAccessList API with invalid message (should fail)
+	gt.Logf("%s: Testing supervisor_checkAccessList API with invalid executing message", testName)
 
 	// Generate a fake/invalid checksum for testing using the initiating message details
 	// We'll use the initiating message block details but with a corrupted checksum
@@ -619,75 +668,114 @@ func TestInvalidExecutingMessage(gt *testing.T) {
 
 	// Use a fake checksum that should fail validation (corrupted initiating message)
 	logIdx := uint32(0) // assume first log in initiating transaction
-	fakeChecksum := "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	fakeChecksum := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
 
-	gt.Logf("%s: Using fake checksum %s for invalid initiating message test", testName, fakeChecksum)
+	gt.Logf("%s: Using fake checksum %s for invalid initiating message test", testName, fakeChecksum.Hex())
 
-	// Call check_message API - should fail for invalid message (using initiating message parameters)
-	checkURL := fmt.Sprintf("%s/v1/check_message?chainId=%d&timestamp=%d&blockNum=%d&logIdx=%d&checksum=%s",
-		sv2URL, chainID, initTimestamp, initBlockNum, logIdx, fakeChecksum)
-	req, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+	// Create access list entry with fake checksum
+	var inboxEntries []common.Hash
+
+	// Create lookup entry
+	lookupEntry := common.Hash{}
+	lookupEntry[0] = 1 // PrefixLookup
+	// bytes 1-3: zero padding
+	// bytes 4-11: chainID (8 bytes, big-endian)
+	chainIDBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(chainIDBytes, chainID)
+	copy(lookupEntry[4:12], chainIDBytes)
+	// bytes 12-19: blockNumber (8 bytes, big-endian)
+	blockNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockNumBytes, initBlockNum)
+	copy(lookupEntry[12:20], blockNumBytes)
+	// bytes 20-27: timestamp (8 bytes, big-endian)
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, initTimestamp)
+	copy(lookupEntry[20:28], timestampBytes)
+	// bytes 28-31: logIndex (4 bytes, big-endian)
+	logIdxBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(logIdxBytes, logIdx)
+	copy(lookupEntry[28:32], logIdxBytes)
+	inboxEntries = append(inboxEntries, lookupEntry)
+
+	// Create fake checksum entry
+	checksumEntry := fakeChecksum
+	checksumEntry[0] = 3 // PrefixChecksum
+	inboxEntries = append(inboxEntries, checksumEntry)
+
+	// Convert to hex strings for JSON
+	inboxEntriesHex := make([]string, len(inboxEntries))
+	for i, entry := range inboxEntries {
+		inboxEntriesHex[i] = entry.Hex()
+	}
+
+	// Call supervisor_checkAccessList API - should fail for invalid message
+	requestBody := map[string]interface{}{
+		"inboxEntries": inboxEntriesHex,
+		"minSafety":    "LocalUnsafe",
+		"executingDescriptor": map[string]interface{}{
+			"chainID":   fmt.Sprintf("0x%x", chainID),
+			"timestamp": initTimestamp,
+			"timeout":   uint64(0),
+		},
+	}
+
+	reqBodyBytes, err := json.Marshal(requestBody)
 	t.Require().NoError(err)
+
+	checkURL := fmt.Sprintf("%s/supervisor_checkAccessList", sv2URL)
+	req, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(reqBodyBytes))
+	t.Require().NoError(err)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	t.Require().NoError(err)
 	defer resp.Body.Close()
 
-	// Invalid message should return 404 Not Found
-	t.Require().Equal(http.StatusNotFound, resp.StatusCode, "invalid executing message should fail check_message validation")
-	gt.Logf("%s: Invalid executing message correctly rejected by check_message API", testName)
+	// Invalid access list should return 400 Bad Request (checksum mismatch)
+	t.Require().Equal(http.StatusBadRequest, resp.StatusCode, "invalid access list should fail supervisor_checkAccessList validation")
+	gt.Logf("%s: Invalid executing message correctly rejected by supervisor_checkAccessList API", testName)
 
-	// Test disabling message checking feature
-	gt.Logf("%s: Testing enable_check_message disable functionality", testName)
+	// Test disabling checkAccessList feature
+	gt.Logf("%s: Testing enable_supervisor_checkAccessList disable functionality", testName)
 
-	// Disable message checking
+	// Disable checkAccessList checking
 	disableReq := map[string]bool{"enabled": false}
 	disableBody, _ := json.Marshal(disableReq)
-	disableResp, err := http.Post(fmt.Sprintf("%s/enable_check_message", sv2URL), "application/json", bytes.NewReader(disableBody))
+	disableResp, err := http.Post(fmt.Sprintf("%s/enable_supervisor_checkAccessList", sv2URL), "application/json", bytes.NewReader(disableBody))
 	t.Require().NoError(err)
 	defer disableResp.Body.Close()
-	t.Require().Equal(http.StatusOK, disableResp.StatusCode, "should be able to disable message checking")
+	t.Require().Equal(http.StatusOK, disableResp.StatusCode, "should be able to disable checkAccessList")
 
 	var disableResult struct {
 		Enabled bool   `json:"enabled"`
 		Message string `json:"message"`
 	}
 	t.Require().NoError(json.NewDecoder(disableResp.Body).Decode(&disableResult))
-	t.Require().False(disableResult.Enabled, "message checking should be disabled")
+	t.Require().False(disableResult.Enabled, "checkAccessList should be disabled")
 
-	// Now the same invalid message should return success (stub response)
-	req2, err := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
+	// Now the same invalid access list should return success (disabled validation)
+	req2, err := http.NewRequestWithContext(ctx, "POST", checkURL, bytes.NewReader(reqBodyBytes))
 	t.Require().NoError(err)
+	req2.Header.Set("Content-Type", "application/json")
 
 	resp2, err := http.DefaultClient.Do(req2)
 	t.Require().NoError(err)
 	defer resp2.Body.Close()
 
-	// With checking disabled, should return 200 OK with found=true (stub response)
-	t.Require().Equal(http.StatusOK, resp2.StatusCode, "disabled message checking should return success for any message")
+	// With checking disabled, should return 200 OK (no validation performed)
+	t.Require().Equal(http.StatusOK, resp2.StatusCode, "disabled checkAccessList should return success for any access list")
 
-	var stubResult struct {
-		Hash      string `json:"hash"`
-		Number    uint64 `json:"number"`
-		Timestamp uint64 `json:"timestamp"`
-		Found     bool   `json:"found"`
-	}
-	t.Require().NoError(json.NewDecoder(resp2.Body).Decode(&stubResult))
-	t.Require().True(stubResult.Found, "disabled message checking should return found=true")
-	t.Require().Equal(initBlockNum, stubResult.Number, "block number should match")
-	t.Require().Equal("0x0000000000000000000000000000000000000000000000000000000000000000", stubResult.Hash, "should return empty hash when disabled")
+	gt.Logf("%s: CheckAccessList disable functionality working correctly", testName)
 
-	gt.Logf("%s: Message checking disable functionality working correctly", testName)
-
-	// Re-enable message checking for cleanup
+	// Re-enable checkAccessList for cleanup
 	enableReq := map[string]bool{"enabled": true}
 	enableBody, _ := json.Marshal(enableReq)
-	enableResp, err := http.Post(fmt.Sprintf("%s/enable_check_message", sv2URL), "application/json", bytes.NewReader(enableBody))
+	enableResp, err := http.Post(fmt.Sprintf("%s/enable_supervisor_checkAccessList", sv2URL), "application/json", bytes.NewReader(enableBody))
 	t.Require().NoError(err)
 	defer enableResp.Body.Close()
-	t.Require().Equal(http.StatusOK, enableResp.StatusCode, "should be able to re-enable message checking")
+	t.Require().Equal(http.StatusOK, enableResp.StatusCode, "should be able to re-enable checkAccessList")
 
-	gt.Logf("%s: Message checking re-enabled for cleanup", testName)
+	gt.Logf("%s: CheckAccessList re-enabled for cleanup", testName)
 	//////////////////////////////////////////////////////////////////////
 
 	gt.Logf("%s: Test completed - invalid executing message handled, cross-safe advanced, and reorg observed", testName)

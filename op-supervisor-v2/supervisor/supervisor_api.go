@@ -9,11 +9,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
+	supervisorTypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
 // HTTPHandler returns the main HTTP handler for the supervisor
@@ -32,8 +35,8 @@ func (s *Supervisor) HTTPHandler() http.Handler {
 	s.addV1QueryEndpoints(mux)
 
 	// Message filtering endpoints
-	mux.HandleFunc("/v1/check_message", s.handleCheckMessage)
-	mux.HandleFunc("/enable_check_message", s.handleEnableCheckMessage)
+	mux.HandleFunc("/supervisor_checkAccessList", s.handleCheckAccessList)
+	mux.HandleFunc("/enable_supervisor_checkAccessList", s.handleEnableCheckAccessList)
 
 	// Optional op-node proxy
 	if s.enableOpNodeProxy {
@@ -461,94 +464,81 @@ func (s *Supervisor) handleV1SuperrootAtTs(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// handleCheckMessage handles the /v1/check_message endpoint
-// This endpoint provides the same functionality as the Contains function in the original supervisor
-func (s *Supervisor) handleCheckMessage(w http.ResponseWriter, r *http.Request) {
-	// Parse query parameters
-	q := r.URL.Query()
-
-	fmt.Printf("DEBUG API: Received check_message request: %s\n", r.URL.RawQuery)
-
-	// Extract chainId parameter
-	var chainID uint64
-	if cidStr := q.Get("chainId"); cidStr != "" {
-		if _, err := fmtSscanf(cidStr, &chainID); err != nil {
-			fmt.Printf("DEBUG API: Invalid chainId: %v\n", err)
-			http.Error(w, "invalid chainId parameter", http.StatusBadRequest)
-			return
-		}
-	}
-
-	// Extract required parameters
-	var timestamp, blockNum, logIdxU64 uint64
-	checksum := q.Get("checksum")
-
-	if _, err := fmtSscanf(q.Get("timestamp"), &timestamp); err != nil {
-		http.Error(w, "invalid or missing timestamp parameter", http.StatusBadRequest)
+// handleCheckAccessList handles the /supervisor_checkAccessList endpoint
+// This endpoint provides the same functionality as the CheckAccessList function in the original supervisor
+func (s *Supervisor) handleCheckAccessList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if _, err := fmtSscanf(q.Get("blockNum"), &blockNum); err != nil {
-		http.Error(w, "invalid or missing blockNum parameter", http.StatusBadRequest)
+	// Parse JSON request body
+	var req struct {
+		InboxEntries        []string `json:"inboxEntries"`
+		MinSafety           string   `json:"minSafety"`
+		ExecutingDescriptor struct {
+			ChainID   string `json:"chainID"`
+			Timestamp uint64 `json:"timestamp"`
+			Timeout   uint64 `json:"timeout"`
+		} `json:"executingDescriptor"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
 		return
 	}
 
-	if _, err := fmtSscanf(q.Get("logIdx"), &logIdxU64); err != nil {
-		http.Error(w, "invalid or missing logIdx parameter", http.StatusBadRequest)
+	s.log.Info("handleCheckAccessList: received request", "entries", len(req.InboxEntries), "minSafety", req.MinSafety)
+
+	// Convert string entries to common.Hash
+	inboxEntries := make([]common.Hash, len(req.InboxEntries))
+	for i, entry := range req.InboxEntries {
+		inboxEntries[i] = common.HexToHash(entry)
+	}
+
+	// Parse minSafety
+	var minSafety supervisorTypes.SafetyLevel
+	switch req.MinSafety {
+	case "LocalUnsafe":
+		minSafety = supervisorTypes.LocalUnsafe
+	case "CrossUnsafe":
+		minSafety = supervisorTypes.CrossUnsafe
+	case "LocalSafe":
+		minSafety = supervisorTypes.LocalSafe
+	case "CrossSafe":
+		minSafety = supervisorTypes.CrossSafe
+	case "Finalized":
+		minSafety = supervisorTypes.Finalized
+	default:
+		http.Error(w, "invalid minSafety level", http.StatusBadRequest)
 		return
 	}
-	logIdx := uint32(logIdxU64)
 
-	if checksum == "" {
-		http.Error(w, "missing checksum parameter", http.StatusBadRequest)
-		return
+	// Parse executing descriptor
+	var execDescr supervisorTypes.ExecutingDescriptor
+	if req.ExecutingDescriptor.ChainID != "" {
+		chainIDHash := common.HexToHash(req.ExecutingDescriptor.ChainID)
+		execDescr.ChainID = eth.ChainIDFromBytes32(chainIDHash)
 	}
+	execDescr.Timestamp = req.ExecutingDescriptor.Timestamp
+	execDescr.Timeout = req.ExecutingDescriptor.Timeout
 
-	// Validate chain exists in multi-chain mode
-	s.mu.Lock()
-	hasChains := len(s.chains) > 0
-	var container *ChainContainer
-	if hasChains {
-		if chainID == 0 {
-			s.mu.Unlock()
-			http.Error(w, "missing chainId parameter", http.StatusBadRequest)
-			return
-		}
-		container = s.chains[chainID]
-		if container == nil {
-			s.mu.Unlock()
-			http.Error(w, "unknown chainId", http.StatusNotFound)
-			return
-		}
-	}
-	s.mu.Unlock()
-
-	fmt.Printf("DEBUG API: Calling CheckMessage with chainID=%d, timestamp=%d, blockNum=%d, logIdx=%d, checksum=%s\n",
-		chainID, timestamp, blockNum, logIdx, checksum)
-
-	// Call the actual CheckMessage implementation
-	blockSeal, err := s.CheckMessage(r.Context(), chainID, timestamp, blockNum, logIdx, checksum)
+	// Call the CheckAccessList implementation
+	err := s.CheckAccessList(r.Context(), inboxEntries, minSafety, execDescr)
 	if err != nil {
-		fmt.Printf("DEBUG API: CheckMessage failed: %v\n", err)
-		http.Error(w, fmt.Sprintf("message check failed: %v", err), http.StatusNotFound)
+		s.log.Error("handleCheckAccessList: access list check failed", "error", err)
+		http.Error(w, fmt.Sprintf("access list check failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	fmt.Printf("DEBUG API: CheckMessage succeeded\n")
+	s.log.Info("handleCheckAccessList: access list check succeeded")
 
-	// Return the block seal information
-	response := map[string]any{
-		"hash":      blockSeal.Hash.Hex(),
-		"number":    blockSeal.Number,
-		"timestamp": blockSeal.Timestamp,
-		"found":     true,
-	}
-
-	_ = json.NewEncoder(w).Encode(response)
+	// Return success (no body needed for successful access list check)
+	w.WriteHeader(http.StatusOK)
 }
 
-// handleEnableCheckMessage handles the /enable_check_message endpoint
-func (s *Supervisor) handleEnableCheckMessage(w http.ResponseWriter, r *http.Request) {
+// handleEnableCheckAccessList handles the /enable_supervisor_checkAccessList endpoint
+func (s *Supervisor) handleEnableCheckAccessList(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		// Set the enabled state
 		var req struct {
@@ -560,21 +550,21 @@ func (s *Supervisor) handleEnableCheckMessage(w http.ResponseWriter, r *http.Req
 		}
 
 		s.mu.Lock()
-		s.checkMessageEnabled = req.Enabled
+		s.checkAccessListEnabled = req.Enabled
 		s.mu.Unlock()
 
-		s.log.Info("Message checking enabled state changed", "enabled", req.Enabled)
+		s.log.Info("CheckAccessList enabled state changed", "enabled", req.Enabled)
 
 		response := map[string]any{
 			"enabled": req.Enabled,
-			"message": fmt.Sprintf("Message checking %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
+			"message": fmt.Sprintf("CheckAccessList %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
 		}
 		_ = json.NewEncoder(w).Encode(response)
 
 	} else if r.Method == http.MethodGet {
 		// Get the current enabled state
 		s.mu.Lock()
-		enabled := s.checkMessageEnabled
+		enabled := s.checkAccessListEnabled
 		s.mu.Unlock()
 
 		response := map[string]any{

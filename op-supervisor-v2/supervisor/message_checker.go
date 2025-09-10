@@ -11,56 +11,81 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
-	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	supervisorTypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// CheckMessage validates if a message exists at the specified location and matches the provided checksum.
-// This method provides the same functionality as the Contains function in the original supervisor.
+// CheckAccessList validates an access list of messages, parsing each entry and checking if the referenced logs exist.
+// This method provides the same functionality as the CheckAccessList function in the original supervisor.
 //
 // Parameters:
 //   - ctx: Context for the operation
-//   - chainID: The chain ID to check
-//   - timestamp: Expected block timestamp
-//   - blockNum: Block number containing the log
-//   - logIdx: Index of the log within the block
-//   - checksum: Expected message checksum (hex string)
+//   - inboxEntries: Array of encoded access list entries
+//   - minSafety: Minimum safety level required for validation
+//   - execDescr: Executing descriptor with chain ID, timestamp, and timeout
 //
 // Returns:
-//   - BlockSeal information if the message is found and valid
-//   - Error if validation fails or message is not found
-func (s *Supervisor) CheckMessage(ctx context.Context, chainID uint64, timestamp, blockNum uint64, logIdx uint32, checksumHex string) (supervisorTypes.BlockSeal, error) {
-	s.log.Info("checkMessage: starting", "chainID", chainID, "timestamp", timestamp, "blockNum", blockNum, "logIdx", logIdx, "checksumHex", checksumHex)
-	// Check if message checking is enabled
+//   - Error if validation fails or any message is not found
+func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.Hash, minSafety supervisorTypes.SafetyLevel, execDescr supervisorTypes.ExecutingDescriptor) error {
+	s.log.Info("CheckAccessList: starting", "entries", len(inboxEntries), "minSafety", minSafety)
+
+	// Check if access list checking is enabled
 	s.mu.Lock()
-	enabled := s.checkMessageEnabled
+	enabled := s.checkAccessListEnabled
 	s.mu.Unlock()
 
 	if !enabled {
-		// Return stub response when checking is disabled
-		return supervisorTypes.BlockSeal{
-			Hash:      common.Hash{}, // empty hash
-			Number:    blockNum,
-			Timestamp: timestamp,
-		}, nil
+		s.log.Info("CheckAccessList: disabled, returning success without validation")
+		return nil
 	}
 
-	// Parse checksum from hex string
-	checksumBytes := common.FromHex(checksumHex)
-	if len(checksumBytes) != 32 {
-		s.log.Error("checkMessage: invalid checksum length", "expected", 32, "got", len(checksumBytes))
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("invalid checksum length: expected 32 bytes, got %d", len(checksumBytes))
+	// Validate safety level
+	switch minSafety {
+	case supervisorTypes.LocalUnsafe, supervisorTypes.CrossUnsafe, supervisorTypes.LocalSafe, supervisorTypes.CrossSafe, supervisorTypes.Finalized:
+		// valid safety level
+	default:
+		return fmt.Errorf("unexpected minSafety level: %v", minSafety)
 	}
 
-	// Get chain container
+	// Parse and validate each access entry
+	entries := inboxEntries
+	for len(entries) > 0 {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("stopped access-list check early: %w", err)
+		}
+
+		// Parse the next access entry
+		remaining, acc, err := supervisorTypes.ParseAccess(entries)
+		if err != nil {
+			return fmt.Errorf("failed to parse access entry: %w", err)
+		}
+		entries = remaining
+
+		s.log.Info("CheckAccessList: validating access", "chainID", acc.ChainID, "blockNum", acc.BlockNumber, "logIdx", acc.LogIndex, "timestamp", acc.Timestamp)
+
+		// Validate the access entry using our existing CheckMessage functionality
+		err = s.checkAccessEntry(ctx, acc)
+		if err != nil {
+			return fmt.Errorf("access validation failed for chain %s, block %d, log %d: %w", acc.ChainID, acc.BlockNumber, acc.LogIndex, err)
+		}
+	}
+
+	s.log.Info("CheckAccessList: all entries validated successfully")
+	return nil
+}
+
+// checkAccessEntry validates a single access entry by checking if the referenced log exists and matches the checksum
+func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.Access) error {
+	chainID, _ := acc.ChainID.Uint64()
+
+	// Get the chain container for the specified chain ID
 	s.mu.Lock()
 	container := s.chains[chainID]
 	s.mu.Unlock()
 
 	if container == nil {
-		s.log.Error("checkMessage: unknown chain ID", "chainID", chainID)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("unknown chain ID: %d", chainID)
+		s.log.Error("checkAccessEntry: unknown chain ID", "chainID", chainID)
+		return fmt.Errorf("unknown chain ID: %d", chainID)
 	}
 
 	// Get the execution engine RPC endpoint and JWT secret from the virtual node config
@@ -74,44 +99,44 @@ func (s *Supervisor) CheckMessage(ctx context.Context, chainID uint64, timestamp
 	container.stateMu.Unlock()
 
 	if l2AuthRPC == "" {
-		s.log.Error("checkMessage: no execution engine RPC configured for chain", "chainID", chainID)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("no execution engine RPC configured for chain %d", chainID)
+		s.log.Error("checkAccessEntry: no execution engine RPC configured for chain", "chainID", chainID)
+		return fmt.Errorf("no execution engine RPC configured for chain %d", chainID)
 	}
 
 	// Create execution engine client with JWT authentication
 	auth := rpc.WithHTTPAuth(gn.NewJWTAuth(jwtSecret))
 	client, err := opclient.NewRPC(ctx, s.log, l2AuthRPC, opclient.WithGethRPCOptions(auth))
 	if err != nil {
-		s.log.Error("checkMessage: failed to connect to execution engine", "chainID", chainID, "error", err)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("failed to connect to execution engine: %w", err)
+		s.log.Error("checkAccessEntry: failed to connect to execution engine", "chainID", chainID, "error", err)
+		return fmt.Errorf("failed to connect to execution engine: %w", err)
 	}
 	defer client.Close()
 
-	// Create execution client wrapper
+	// Create L2 client
 	execClient, err := sources.NewL2Client(client, s.log, nil, sources.L2ClientDefaultConfig(container.virtualCfg.Rcfg, false))
 	if err != nil {
-		s.log.Error("checkMessage: failed to create L2 client", "chainID", chainID, "error", err)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("failed to create L2 client: %w", err)
+		s.log.Error("checkAccessEntry: failed to create L2 client", "chainID", chainID, "error", err)
+		return fmt.Errorf("failed to create L2 client: %w", err)
 	}
 
-	// Get the block by number to validate timestamp
-	blockRef, err := execClient.L2BlockRefByNumber(ctx, blockNum)
+	// Get block by number
+	blockRef, err := execClient.L2BlockRefByNumber(ctx, acc.BlockNumber)
 	if err != nil {
-		s.log.Error("checkMessage: failed to get block by number", "chainID", chainID, "blockNum", blockNum, "error", err)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("failed to get block %d: %w", blockNum, err)
+		s.log.Error("checkAccessEntry: failed to get block by number", "chainID", chainID, "blockNum", acc.BlockNumber, "error", err)
+		return fmt.Errorf("failed to get block %d: %w", acc.BlockNumber, err)
 	}
 
 	// Verify timestamp matches
-	if blockRef.Time != timestamp {
-		s.log.Error("checkMessage: timestamp mismatch", "chainID", chainID, "expected", timestamp, "got", blockRef.Time)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("timestamp mismatch: expected %d, got %d", timestamp, blockRef.Time)
+	if blockRef.Time != acc.Timestamp {
+		s.log.Error("checkAccessEntry: timestamp mismatch", "chainID", chainID, "expected", acc.Timestamp, "got", blockRef.Time)
+		return fmt.Errorf("timestamp mismatch: expected %d, got %d", acc.Timestamp, blockRef.Time)
 	}
 
 	// Get block receipts
 	_, receipts, err := execClient.FetchReceipts(ctx, blockRef.Hash)
 	if err != nil {
-		s.log.Error("checkMessage: failed to fetch receipts", "chainID", chainID, "blockHash", blockRef.Hash, "error", err)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("failed to fetch receipts for block %s: %w", blockRef.Hash, err)
+		s.log.Error("checkAccessEntry: failed to fetch receipts", "chainID", chainID, "blockHash", blockRef.Hash, "error", err)
+		return fmt.Errorf("failed to fetch receipts for block %s: %w", blockRef.Hash, err)
 	}
 
 	// Find the log at the specified index using double nested loop
@@ -120,7 +145,7 @@ func (s *Supervisor) CheckMessage(ctx context.Context, chainID uint64, timestamp
 
 	for _, receipt := range receipts {
 		for _, log := range receipt.Logs {
-			if currentLogIdx == logIdx {
+			if currentLogIdx == acc.LogIndex {
 				targetLog = log
 				break
 			}
@@ -132,44 +157,36 @@ func (s *Supervisor) CheckMessage(ctx context.Context, chainID uint64, timestamp
 	}
 
 	if targetLog == nil {
-		s.log.Error("checkMessage: log index not found", "chainID", chainID, "logIdx", logIdx, "blockNum", blockNum)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("log index %d not found in block %d", logIdx, blockNum)
+		s.log.Error("checkAccessEntry: log index not found", "chainID", chainID, "logIdx", acc.LogIndex, "blockNum", acc.BlockNumber)
+		return fmt.Errorf("log index %d not found in block %d", acc.LogIndex, acc.BlockNumber)
 	}
 
 	// Calculate the checksum for the found log using original supervisor's ChecksumArgs
-	expectedChecksum := supervisorTypes.MessageChecksum(common.BytesToHash(checksumBytes))
-
 	// Use the original supervisor's checksum calculation
 	payloadHash := crypto.Keccak256Hash(supervisorTypes.LogToMessagePayload(targetLog))
 	logHash := supervisorTypes.PayloadHashToLogHash(payloadHash, targetLog.Address)
 
 	checksumArgs := supervisorTypes.ChecksumArgs{
-		BlockNumber: blockNum,
-		LogIndex:    logIdx,
-		Timestamp:   timestamp,
-		ChainID:     eth.ChainIDFromUInt64(chainID),
+		BlockNumber: acc.BlockNumber,
+		LogIndex:    acc.LogIndex,
+		Timestamp:   acc.Timestamp,
+		ChainID:     acc.ChainID,
 		LogHash:     logHash,
 	}
 	actualChecksum := checksumArgs.Checksum()
 
 	// Log both checksums for debugging
-	fmt.Printf("checkMessage: Expected checksum: %s\n", common.Hash(expectedChecksum).Hex())
-	fmt.Printf("checkMessage: Calculated checksum: %s\n", common.Hash(actualChecksum).Hex())
-	fmt.Printf("checkMessage: Log data: %x\n", targetLog.Data)
-	fmt.Printf("checkMessage: Log address: %s\n", targetLog.Address.Hex())
-	fmt.Printf("checkMessage: Block: %d, Timestamp: %d, LogIdx: %d, ChainID: %d\n", blockNum, timestamp, logIdx, chainID)
+	s.log.Debug("checkAccessEntry: checksum comparison",
+		"expected", common.Hash(acc.Checksum).Hex(),
+		"calculated", common.Hash(actualChecksum).Hex(),
+		"chainID", chainID, "blockNum", acc.BlockNumber, "logIdx", acc.LogIndex)
 
 	// Verify checksum matches
-	if actualChecksum != expectedChecksum {
-		s.log.Error("checkMessage: checksum mismatch", "chainID", chainID, "expected", expectedChecksum, "got", actualChecksum)
-		return supervisorTypes.BlockSeal{}, fmt.Errorf("checksum mismatch: expected %s, got %s", common.Hash(expectedChecksum).Hex(), common.Hash(actualChecksum).Hex())
+	if actualChecksum != acc.Checksum {
+		s.log.Error("checkAccessEntry: checksum mismatch", "chainID", chainID, "expected", acc.Checksum, "got", actualChecksum)
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", common.Hash(acc.Checksum).Hex(), common.Hash(actualChecksum).Hex())
 	}
 
-	s.log.Info("checkMessage: checksum matches", "chainID", chainID, "expected", expectedChecksum, "got", actualChecksum)
-	// Return block seal information
-	return supervisorTypes.BlockSeal{
-		Hash:      blockRef.Hash,
-		Number:    blockRef.Number,
-		Timestamp: blockRef.Time,
-	}, nil
+	s.log.Debug("checkAccessEntry: checksum matches", "chainID", chainID, "checksum", actualChecksum)
+	return nil
 }
