@@ -223,7 +223,7 @@ func (s *CrossService) validateExecutingMessagesAtTimestamp(ctx context.Context,
 
 	valid := s.validateExecutingMessages(ctx, activeChains, ts, execByChain)
 	if !valid {
-		s.log.Info("xsafe: validation detected issues (rollback was handled in validateExecutingMessages and it should honestly happen at a higher level idk bro)")
+		s.log.Warn("Cross-safe validation failed, rollback performed", "timestamp", ts)
 	}
 
 	return valid

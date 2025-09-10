@@ -171,11 +171,11 @@ func (s *Supervisor) handleAdminRollback(w http.ResponseWriter, r *http.Request)
 			http.Error(w, rewindErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.log.Info("admin: logsDB rewound", "chain", chainID, "to_block", *req.ToBlockNumber)
+		s.log.Info("LogsDB rewound", "chain_id", chainID, "target_block", *req.ToBlockNumber)
 
 		// Step 2: roll back the cross-safe head to the block timestamp
 		s.setCrossSafeTimestamp(ref.Time)
-		s.log.Info("admin: cross-safe timestamp rewound", "chain", chainID, "ts", ref.Time, "to_block", *req.ToBlockNumber)
+		s.log.Info("Cross-safe timestamp rewound", "chain_id", chainID, "timestamp", ref.Time, "target_block", *req.ToBlockNumber)
 
 		// Existing behavior: roll back EL/op-node for the chain as well
 		err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
@@ -204,7 +204,7 @@ func (s *Supervisor) handleDenylistCheck(w http.ResponseWriter, r *http.Request)
 	}
 
 	deny := s.denylist != nil && id != "" && s.denylist.Has(cid, id)
-	s.log.Info("denylist check", "chainId", cid, "id", id, "denylisted", deny)
+	s.log.Info("Denylist check completed", "chain_id", cid, "identifier", id, "denied", deny)
 	_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": deny})
 }
 
@@ -220,7 +220,7 @@ func (s *Supervisor) handleAuthorizeFinality(w http.ResponseWriter, r *http.Requ
 	}
 
 	authorized := s.authorizeFinalityUpdate(timestamp)
-	s.log.Debug("finality authorization check", "timestamp", timestamp, "authorized", authorized)
+	s.log.Info("finality authorization check", "timestamp", timestamp, "authorized", authorized)
 	fmt.Println("finality authorization check", "timestamp", timestamp, "authorized", authorized)
 	_ = json.NewEncoder(w).Encode(map[string]any{"authorized": authorized})
 }

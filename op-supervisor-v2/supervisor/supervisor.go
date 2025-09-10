@@ -274,16 +274,16 @@ func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, activeChain
 		rcfg := container.virtualCfg.Rcfg
 		targetBlockNum, err := rcfg.TargetBlockNumber(targetTimestamp)
 		if err != nil {
-			s.log.Warn("xsafe: failed to calculate target block for rollback", "chain", chainID, "ts", targetTimestamp, "err", err)
+			s.log.Warn("Failed to calculate target block for rollback", "chain_id", chainID, "timestamp", targetTimestamp, "error", err)
 			continue
 		}
 
 		// Rollback the chain to the target block
 		if s.rollbackFn != nil {
 			if rerr := s.rollbackFn(ctx, chainID, targetBlockNum); rerr != nil {
-				s.log.Warn("xsafe: rollback failed during L1 consistency recovery", "chain", chainID, "to_block", targetBlockNum, "err", rerr)
+				s.log.Warn("Chain rollback failed during L1 consistency recovery", "chain_id", chainID, "target_block", targetBlockNum, "error", rerr)
 			} else {
-				s.log.Info("xsafe: rollback executed during L1 consistency recovery", "chain", chainID, "to_block", targetBlockNum)
+				s.log.Info("Chain rollback completed during L1 consistency recovery", "chain_id", chainID, "target_block", targetBlockNum)
 			}
 		}
 	}
@@ -295,15 +295,15 @@ func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, activeChain
 
 func (s *Supervisor) ProgressCrossSafe() {
 	// configure loop tick duration
-	tick := 50 * time.Millisecond
+	tick := 500 * time.Millisecond
 	for {
-		s.log.Info("xsafe: loop start")
+		s.log.Info("Cross-safe processing cycle started")
 		ctx := context.Background()
 
 		// Step 0: snapshot active chains and early-exit if none
 		activeChains := s.xsafeSnapshotActiveChains()
 		if len(activeChains) == 0 {
-			s.log.Info("xsafe: no active chains; skipping")
+			s.log.Info("No active chains available, skipping cross-safe processing")
 			time.Sleep(tick)
 			continue
 		}
@@ -327,7 +327,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 
 		// Step 2.5: if the candidate timestamp is already recorded, skip this iteration
 		if s.getCurrentCrossSafeTimestamp() == ts {
-			s.log.Info("xsafe: candidate timestamp already recorded, skipping")
+			s.log.Info("Candidate timestamp already processed", "timestamp", ts)
 			time.Sleep(tick)
 			continue
 		}
@@ -335,11 +335,11 @@ func (s *Supervisor) ProgressCrossSafe() {
 		// Step 3: obtain L1<>L2 block pairs that meet or precede ts
 		pairs, err := s.getBlocksAtTimestamp(ctx, activeChains, ts)
 		if err != nil {
-			s.log.Info("xsafe: blocks not ready", "err", err)
+			s.log.Info("Required blocks not yet available", "timestamp", ts, "error", err)
 			time.Sleep(tick)
 			continue
 		}
-		s.log.Info("xsafe: blocks at ts", "ts", ts, "chains", len(pairs))
+		s.log.Info("Retrieved block pairs for timestamp", "timestamp", ts, "chain_count", len(pairs))
 
 		// Step 4: per-chain target and ingest up to it (manual seals) using pairs
 		if !s.xsafeIngestLogsTo(ctx, activeChains, pairs) {
@@ -354,7 +354,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		if valid {
 			s.commitNewTimestamp(ts, pairs)
 		} else {
-			s.log.Info("xsafe: skipping timestamp commit due to validation failure", "ts", ts)
+			s.log.Info("Skipping timestamp commit due to validation failure", "timestamp", ts)
 		}
 
 		// Step end: wait for next tick
@@ -373,7 +373,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 	// Only perform L1 consistency check if the L1Block is initialized (not zero value)
 	// Skip check for entries created during initialization that don't have L1Block data yet
 	if latest.L1Block.Number == 0 {
-		s.log.Info("xsafe: skipping L1 consistency check for uninitialized L1Block")
+		s.log.Info("Skipping L1 consistency check for uninitialized L1 block")
 		return true
 	}
 
@@ -412,7 +412,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 	expectedL1Block := latest.L1Block
 	currentL1Block, err := l1.BlockRefByNumber(ctx, expectedL1Block.Number)
 	if err != nil || currentL1Block.Hash != expectedL1Block.Hash {
-		s.log.Warn("xsafe: L1 consistency check failed - L1 block changed, rolling back",
+		s.log.Warn("L1 consistency check failed - L1 block changed, initiating rollback",
 			"expected_hash", expectedL1Block.Hash,
 			"expected_num", expectedL1Block.Number,
 			"current_hash", currentL1Block.Hash,
@@ -425,15 +425,15 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 		// 2. Prune denylist entries at or newer than the timestamp
 		if s.denylist != nil {
 			if err := s.denylist.PruneAtOrNewerThan(timestampToPrune); err != nil {
-				s.log.Warn("xsafe: failed to prune denylist", "timestamp", timestampToPrune, "err", err)
+				s.log.Warn("Failed to prune denylist during rollback", "timestamp", timestampToPrune, "error", err)
 			} else {
-				s.log.Info("xsafe: pruned denylist entries at or newer than timestamp", "timestamp", timestampToPrune)
+				s.log.Info("Pruned denylist entries during rollback", "timestamp", timestampToPrune)
 			}
 		}
 
 		// 3. Prune the latest entry from crossSafeHistory
 		newLatestTimestamp := s.pruneLatestCrossSafeEntry()
-		s.log.Info("xsafe: pruned latest cross-safe entry", "new_latest_ts", newLatestTimestamp)
+		s.log.Info("Pruned latest cross-safe entry during rollback", "new_latest_timestamp", newLatestTimestamp)
 
 		// 4. Prune all containers back to the new latest timestamp
 		s.pruneContainersToTimestamp(ctx, activeChains, newLatestTimestamp)
@@ -441,7 +441,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 		return false
 	}
 
-	s.log.Info("xsafe: L1 consistency check passed", "l1_block", expectedL1Block.Number)
+	s.log.Info("L1 consistency check passed", "l1_block_number", expectedL1Block.Number)
 	return true
 }
 
@@ -449,7 +449,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 // Returns true if initialization is complete, false if needs to wait for next tick
 func (s *Supervisor) initializeCrossSafeTimestamp(activeChains []eth.ChainID) bool {
 	ts := s.getCurrentCrossSafeTimestamp()
-	s.log.Info("xsafe: current timestamp", "ts", ts)
+	s.log.Info("Current cross-safe timestamp", "timestamp", ts)
 
 	if ts == 0 {
 		if minGenesis := s.getMinGenesisTimestamp(activeChains); minGenesis != 0 {
@@ -465,18 +465,18 @@ func (s *Supervisor) initializeCrossSafeTimestamp(activeChains []eth.ChainID) bo
 // computeCandidateTimestamp computes the next candidate timestamp
 func (s *Supervisor) computeCandidateTimestamp() uint64 {
 	ts := s.getCurrentCrossSafeTimestamp() + 1
-	s.log.Info("xsafe: candidate next timestamp", "ts", ts)
+	s.log.Info("Computing candidate timestamp", "timestamp", ts)
 	return ts
 }
 
 // validateExecutingMessagesAtTimestamp gets executing messages, validates them, and handles rollback if needed
 func (s *Supervisor) validateExecutingMessagesAtTimestamp(ctx context.Context, activeChains []eth.ChainID, ts uint64) bool {
 	execByChain := s.getExecutingMessages(activeChains, ts)
-	s.log.Info("xsafe: executing messages", "execByChain", execByChain)
+	s.log.Info("Retrieved executing messages for validation", "messages_by_chain", execByChain)
 
 	valid := s.validateExecutingMessages(ctx, activeChains, ts, execByChain)
 	if !valid {
-		s.log.Info("xsafe: validation detected issues (rollback was handled in validateExecutingMessages and it should honestly happen at a higher level idk bro)")
+		s.log.Warn("Cross-safe validation failed, rollback performed", "timestamp", ts)
 	}
 
 	return valid
@@ -503,7 +503,7 @@ func (s *Supervisor) commitNewTimestamp(ts uint64, pairs map[uint64]types.Derive
 	}
 
 	s.addCrossSafeEntry(newEntry)
-	s.log.Info("xsafe: committed new timestamp", "ts", ts, "l1_block", latestL1Block.Number, "l2_chains", len(l2Blocks))
+	s.log.Info("Cross-safe timestamp committed", "timestamp", ts, "l1_block_number", latestL1Block.Number, "l2_chain_count", len(l2Blocks))
 }
 
 // ============================================================================
@@ -638,7 +638,7 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, activeChains []et
 		if st.SafeL2.Number < targetNum {
 			return nil, fmt.Errorf("chain %d: safe head too low: have %d need %d", v, st.SafeL2.Number, targetNum)
 		}
-		s.log.Info("xsafe: gate ok", "chain", v, "safe_num", st.SafeL2.Number, "need_num", targetNum)
+		s.log.Info("Chain safety gate passed", "chain_id", v, "safe_block", st.SafeL2.Number, "required_block", targetNum)
 		// Ensure clients
 		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
 		l2Cli, err := opclient.NewRPC(ctx, s.log, container.virtualCfg.L2UserRPC)
@@ -688,7 +688,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 		container := s.chains[v]
 		s.mu.Unlock()
 
-		s.log.Info("xsafe: xsafeIngestLogsTo", "chain", v, "container", container)
+		s.log.Info("Processing log ingestion for chain", "chain_id", v)
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			continue
 		}
@@ -699,19 +699,19 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 		}
 		targetNum := targetPair.Derived.Number
 		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
-			s.log.Info("xsafe: logs head before", "chain", v, "num", blk.Number)
+			s.log.Info("Chain logs head before ingestion", "chain_id", v, "block_number", blk.Number)
 			if blk.Number >= targetNum {
 				// Already at or past target; skip
 				continue
 			}
 		}
 		rcfg := container.virtualCfg.Rcfg
-		s.log.Info("xsafe: target computed", "chain", v, "target", targetNum)
+		s.log.Info("Computed ingestion target", "chain_id", v, "target_block", targetNum)
 
 		// Ensure L1 client
 		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
 		if l1 == nil {
-			s.log.Info("xsafe: missing L1 client", "chain", v)
+			s.log.Warn("Missing L1 client for chain", "chain_id", v)
 			ready = false
 			break
 		}
@@ -737,15 +737,15 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 				start = targetNum
 			}
 		}
-		s.log.Info("xsafe: ingest range", "chain", v, "start", start, "end", targetNum)
+		s.log.Info("Ingesting log range", "chain_id", v, "start_block", start, "end_block", targetNum)
 		if err := s.ingestRange(ctx, l2, container.logsDB, start, targetNum); err != nil {
-			s.log.Info("xsafe: ingest failed", "chain", v, "err", err)
+			s.log.Warn("Log ingestion failed for chain", "chain_id", v, "error", err)
 			l2Cli.Close()
 			ready = false
 			break
 		}
 		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
-			s.log.Info("xsafe: logs head after", "chain", v, "num", blk.Number)
+			s.log.Info("Chain logs head after ingestion", "chain_id", v, "block_number", blk.Number)
 		}
 		l2Cli.Close()
 	}
@@ -755,7 +755,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 // getExecutingMessages returns the executing messages per chain at the target block for ts.
 func (s *Supervisor) getExecutingMessages(activeChains []eth.ChainID, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
 	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(activeChains))
-	s.log.Info("xsafe: getExecutingMessages", "activeChains", activeChains, "ts", ts)
+	s.log.Info("Retrieving executing messages", "active_chains", activeChains, "timestamp", ts)
 	for _, id := range activeChains {
 		v, ok := id.Uint64()
 		if !ok {
@@ -767,29 +767,29 @@ func (s *Supervisor) getExecutingMessages(activeChains []eth.ChainID, ts uint64)
 		s.mu.Unlock()
 
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
-			s.log.Info("xsafe: validation skip (missing cfg/db)", "chain", v)
+			s.log.Info("Skipping validation for chain (missing config/database)", "chain_id", v)
 			continue
 		}
 		rcfg := container.virtualCfg.Rcfg
 		targetNum, err := rcfg.TargetBlockNumber(ts)
 		if err != nil {
-			s.log.Info("xsafe: validation target before genesis", "chain", v, "ts", ts)
+			s.log.Info("Validation target before genesis", "chain_id", v, "timestamp", ts)
 			continue
 		}
 		_, logcount, execMsgs, err := container.logsDB.OpenBlock(targetNum)
-		s.log.Info("xsafe: getExecutingMessages", "chain", v, "logcount", logcount, "execMsgs", execMsgs)
+		s.log.Info("Retrieved messages for chain", "chain_id", v, "log_count", logcount, "executing_messages", len(execMsgs))
 		if err != nil {
-			s.log.Info("xsafe: validation open block failed", "chain", v, "block", targetNum, "err", err)
+			s.log.Info("Failed to open block for validation", "chain_id", v, "block_number", targetNum, "error", err)
 			continue
 		}
 		if len(execMsgs) == 0 {
-			s.log.Info("xsafe: validation no executing messages", "chain", v, "block", targetNum)
+			s.log.Info("No executing messages found", "chain_id", v, "block_number", targetNum)
 		}
 		for logIdx, msg := range execMsgs {
 			if msg == nil {
 				continue
 			}
-			s.log.Info("xsafe: exec found", "chain", v, "block", targetNum, "logIdx", logIdx, "init_chain", msg.ChainID, "init_block", msg.BlockNum, "init_log", msg.LogIdx, "ts", msg.Timestamp)
+			s.log.Info("Found executing message", "chain_id", v, "block_number", targetNum, "log_index", logIdx, "initiating_chain", msg.ChainID, "initiating_block", msg.BlockNum, "timestamp", msg.Timestamp)
 		}
 		out[v] = execMsgs
 	}
@@ -820,7 +820,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 				initContainer := s.chains[initCID]
 				s.mu.Unlock()
 				if initContainer == nil || initContainer.logsDB == nil {
-					s.log.Info("xsafe: validation missing initiating logsDB", "init_chain", initCID)
+					s.log.Info("Missing initiating logsDB for validation", "initiating_chain", initCID)
 					allValid = false
 					invalidCount++
 					continue
@@ -832,7 +832,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 				// Rather than adding cycle detection, we are simply failing the block in these conditions.
 				// Production software will need to support cycle detection.
 				if msg.Timestamp == ts {
-					s.log.Info("xsafe: exec validation failed due to *potential* cycle", "exec_chain", v, "init_chain", initCID, "timestamp", msg.Timestamp)
+					s.log.Warn("Execution validation failed due to potential cycle", "executing_chain", v, "initiating_chain", initCID, "timestamp", msg.Timestamp)
 					allValid = false
 					invalidCount++
 					if !rolledBack[v] {
@@ -851,7 +851,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 						}
 					}
 				} else if _, err := initContainer.logsDB.Contains(query); err != nil {
-					s.log.Info("xsafe: exec validation failed", "exec_chain", v, "init_chain", initCID, "err", err)
+					s.log.Warn("Execution validation failed", "executing_chain", v, "initiating_chain", initCID, "error", err)
 					allValid = false
 					invalidCount++
 					// Side-effects: mark denylist and rollback the executing chain before the block at this ts
@@ -875,7 +875,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 									if rerr := s.rollbackFn(ctx, v, to); rerr != nil {
 										s.log.Warn("xsafe: rollback failed", "chain", v, "to", to, "err", rerr)
 									} else {
-										s.log.Info("xsafe: rollback executed", "chain", v, "to", to)
+										s.log.Info("Chain rollback executed", "chain_id", v, "target_block", to)
 									}
 								}
 								rolledBack[v] = true
@@ -883,12 +883,12 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 						}
 					}
 				} else {
-					s.log.Info("xsafe: exec validation ok", "exec_chain", v, "init_chain", initCID)
+					s.log.Info("Execution validation passed", "executing_chain", v, "initiating_chain", initCID)
 				}
 			}
 		}
 	}
-	s.log.Info("xsafe: exec validation summary", "total", totalCount, "invalid", invalidCount)
+	s.log.Info("Execution message validation completed", "total_messages", totalCount, "invalid_messages", invalidCount)
 	return allValid
 }
 
@@ -900,7 +900,7 @@ func (s *Supervisor) authorizeFinalityUpdate(timestamp uint64) bool {
 
 	// If no cross-safe history exists, deny finality updates
 	if len(s.crossSafeHistory) == 0 {
-		s.log.Debug("finality authorization denied: no cross-safe history", "timestamp", timestamp)
+		s.log.Info("finality authorization denied: no cross-safe history", "timestamp", timestamp)
 		return false
 	}
 
@@ -909,12 +909,12 @@ func (s *Supervisor) authorizeFinalityUpdate(timestamp uint64) bool {
 
 	// Check if the timestamp is at or before the latest cross-safe timestamp
 	if timestamp > latest.Timestamp {
-		s.log.Debug("finality authorization denied: timestamp too recent",
+		s.log.Info("finality authorization denied: timestamp too recent",
 			"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
 		return false
 	}
 
-	s.log.Debug("finality authorization granted",
+	s.log.Info("finality authorization granted",
 		"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
 	return true
 }
