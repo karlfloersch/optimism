@@ -178,11 +178,11 @@ func (s *Supervisor) handleAdminRollback(w http.ResponseWriter, r *http.Request)
 			http.Error(w, rewindErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.log.Info("LogsDB rewound", "chain_id", chainID, "target_block", *req.ToBlockNumber)
+		s.log.Info("LogsDB rewound", "function", "handleAdminRollback", "chain_id", chainID, "target_block", *req.ToBlockNumber)
 
 		// Step 2: roll back the cross-safe head to the block timestamp
 		s.setCrossSafeTimestamp(ref.Time)
-		s.log.Info("Cross-safe timestamp rewound", "chain_id", chainID, "timestamp", ref.Time, "target_block", *req.ToBlockNumber)
+		s.log.Info("Cross-safe timestamp rewound", "function", "handleAdminRollback", "chain_id", chainID, "timestamp", ref.Time, "target_block", *req.ToBlockNumber)
 
 		// Existing behavior: roll back EL/op-node for the chain as well
 		err = s.RollbackChain(r.Context(), chainID, *req.ToBlockNumber)
@@ -211,7 +211,7 @@ func (s *Supervisor) handleDenylistCheck(w http.ResponseWriter, r *http.Request)
 	}
 
 	deny := s.denylist != nil && id != "" && s.denylist.Has(cid, id)
-	s.log.Info("Denylist check completed", "chain_id", cid, "identifier", id, "denied", deny)
+	s.log.Info("Denylist check completed", "function", "handleDenylistCheck", "chain_id", cid, "identifier", id, "denied", deny)
 	_ = json.NewEncoder(w).Encode(map[string]any{"denylisted": deny})
 }
 
@@ -227,7 +227,7 @@ func (s *Supervisor) handleAuthorizeFinality(w http.ResponseWriter, r *http.Requ
 	}
 
 	authorized := s.authorizeFinalityUpdate(timestamp)
-	s.log.Info("finality authorization check", "timestamp", timestamp, "authorized", authorized)
+	s.log.Info("Finality authorization check", "function", "handleAuthorizeFinality", "timestamp", timestamp, "authorized", authorized)
 	fmt.Println("finality authorization check", "timestamp", timestamp, "authorized", authorized)
 	_ = json.NewEncoder(w).Encode(map[string]any{"authorized": authorized})
 }
@@ -488,7 +488,7 @@ func (s *Supervisor) handleCheckAccessList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.log.Info("handleCheckAccessList: received request", "entries", len(req.InboxEntries), "minSafety", req.MinSafety)
+	s.log.Info("Received access list check request", "function", "handleCheckAccessList", "entries", len(req.InboxEntries), "min_safety", req.MinSafety)
 
 	// Convert string entries to common.Hash
 	inboxEntries := make([]common.Hash, len(req.InboxEntries))
@@ -526,12 +526,12 @@ func (s *Supervisor) handleCheckAccessList(w http.ResponseWriter, r *http.Reques
 	// Call the CheckAccessList implementation
 	err := s.CheckAccessList(r.Context(), inboxEntries, minSafety, execDescr)
 	if err != nil {
-		s.log.Error("handleCheckAccessList: access list check failed", "error", err)
+		s.log.Error("Access list check failed", "function", "handleCheckAccessList", "error", err)
 		http.Error(w, fmt.Sprintf("access list check failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	s.log.Info("handleCheckAccessList: access list check succeeded")
+	s.log.Info("Access list check succeeded", "function", "handleCheckAccessList")
 
 	// Return success (no body needed for successful access list check)
 	w.WriteHeader(http.StatusOK)
@@ -553,7 +553,7 @@ func (s *Supervisor) handleEnableCheckAccessList(w http.ResponseWriter, r *http.
 		s.checkAccessListEnabled = req.Enabled
 		s.mu.Unlock()
 
-		s.log.Info("CheckAccessList enabled state changed", "enabled", req.Enabled)
+		s.log.Info("CheckAccessList enabled state changed", "function", "handleEnableCheckAccessList", "enabled", req.Enabled)
 
 		response := map[string]any{
 			"enabled": req.Enabled,

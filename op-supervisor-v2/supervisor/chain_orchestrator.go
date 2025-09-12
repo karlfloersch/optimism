@@ -33,8 +33,12 @@ type ChainContainer struct {
 func (s *Supervisor) AddChain(vCfg *virtual_node.VirtualNodeConfig) (uint64, error) {
 	chainID := vCfg.Rcfg.L2ChainID.Uint64()
 
+	// Create chain-specific logger for supervisor operations
+	chainLogger := s.log.New("chain", chainID)
+	chainLogger.Info("adding chain to supervisor", "chain_id", chainID)
+
 	// Start virtual op-node
-	userRPC, stopFn, err := virtual_node.StartVirtualNode(vCfg, s.log)
+	userRPC, stopFn, err := virtual_node.StartVirtualNode(vCfg, chainLogger)
 	if err != nil {
 		return 0, err
 	}
@@ -47,7 +51,7 @@ func (s *Supervisor) AddChain(vCfg *virtual_node.VirtualNodeConfig) (uint64, err
 	}
 
 	// Open logs DB for chain
-	logsDB, err := s.openLogsDB(s.log, chainID, s.getDataDir())
+	logsDB, err := s.openLogsDB(chainLogger, chainID, s.getDataDir())
 	if err != nil {
 		// Stop the virtual op-node before returning the error
 		_ = stopFn(context.Background())
@@ -62,6 +66,7 @@ func (s *Supervisor) AddChain(vCfg *virtual_node.VirtualNodeConfig) (uint64, err
 	s.chains[chainID] = container
 	s.mu.Unlock()
 
+	chainLogger.Info("chain added successfully", "chain_id", chainID, "user_rpc", userRPC)
 	return chainID, nil
 }
 
@@ -70,11 +75,15 @@ func (s *Supervisor) getCrossFinalized() uint64 { return s.crossFinalizedFromDBO
 
 // RemoveChain stops and unregisters a chain by ID.
 func (s *Supervisor) RemoveChain(chainID uint64) {
+	chainLogger := s.log.New("chain", chainID)
+	chainLogger.Info("removing chain from supervisor", "chain_id", chainID)
+
 	s.mu.Lock()
 	container := s.chains[chainID]
 	delete(s.chains, chainID)
 	s.mu.Unlock()
 	if container == nil {
+		chainLogger.Warn("remove chain skipped - container not found", "chain_id", chainID)
 		return
 	}
 	container.stateMu.Lock()
@@ -87,14 +96,19 @@ func (s *Supervisor) RemoveChain(chainID uint64) {
 		container.stopVirtualOpNode = nil
 	}
 	container.stateMu.Unlock()
+	chainLogger.Info("chain removed successfully", "chain_id", chainID)
 }
 
 // RollbackChain rolls a specific chain back to an absolute block number.
 func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock uint64) error {
+	chainLogger := s.log.New("chain", chainID)
+	chainLogger.Info("rolling back chain", "chain_id", chainID, "to_block", toBlock)
+
 	s.mu.Lock()
 	container := s.chains[chainID]
 	s.mu.Unlock()
 	if container == nil || container.virtualCfg == nil {
+		chainLogger.Warn("rollback skipped - missing container or config", "chain_id", chainID)
 		return nil
 	}
 	container.stateMu.Lock()
@@ -133,12 +147,13 @@ func (s *Supervisor) RollbackChain(ctx context.Context, chainID uint64, toBlock 
 	}
 
 	// Restart virtual op-node and polling
-	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg, s.log)
+	userRPC, stopFn2, err := virtual_node.StartVirtualNode(container.virtualCfg, chainLogger)
 	if err != nil {
 		return err
 	}
 	container.virtualOpNodeUserRPC = userRPC
 	container.stopVirtualOpNode = stopFn2
+	chainLogger.Info("chain rollback completed", "chain_id", chainID, "to_block", toBlock, "user_rpc", userRPC)
 	//go s.startChainPolling(ctxPoll, h, roll, l2, chainID)
 	return nil
 }

@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -284,9 +284,9 @@ func (l *sv2Lifecycle) Start(ctx context.Context) error {
 	l.ln = ln
 	// Start HTTP server in background
 	go func() {
-		l.logger.Info("starting sv2 http server", "addr", ln.Addr().String(), "version", l.version)
+		l.logger.Info("Starting sv2 http server", "function", "Start", "addr", ln.Addr().String(), "version", l.version)
 		if err := l.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			l.logger.Error("http server error", "err", err)
+			l.logger.Error("HTTP server error", "function", "Start", "error", err)
 		}
 	}()
 	return nil

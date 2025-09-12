@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/log"
 )
 
 func TestDenylistStore_AddHas(t *testing.T) {
-	dl := NewDenylistStore("")
+	dl := NewDenylistStore("", log.Root())
 	chainID := uint64(901)
 	timestamp := uint64(1234567890)
 	hash := "0xdeadbeef"
@@ -33,7 +35,7 @@ func TestDenylistStore_PersistReload(t *testing.T) {
 	hash2 := "0xbbb"
 
 	// First instance: add entries and ensure file/dirs created
-	dl1 := NewDenylistStore(path)
+	dl1 := NewDenylistStore(path, log.Root())
 	if err := dl1.Add(cid, ts1, hash1); err != nil {
 		t.Fatalf("add hash1: %v", err)
 	}
@@ -48,7 +50,7 @@ func TestDenylistStore_PersistReload(t *testing.T) {
 	}
 
 	// Second instance: reload from same path, entries must persist
-	dl2 := NewDenylistStore(path)
+	dl2 := NewDenylistStore(path, log.Root())
 	if !dl2.Has(cid, hash1) || !dl2.Has(cid, hash2) {
 		t.Fatalf("expected entries present after reload")
 	}
@@ -58,7 +60,7 @@ func TestDenylistStore_PersistReload(t *testing.T) {
 }
 
 func TestDenylistStore_PruneAtOrNewerThan(t *testing.T) {
-	dl := NewDenylistStore("")
+	dl := NewDenylistStore("", log.Root())
 	chainID := uint64(903)
 
 	// Add entries with different timestamps

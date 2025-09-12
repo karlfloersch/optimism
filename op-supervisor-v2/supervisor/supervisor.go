@@ -106,12 +106,12 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	// unique temp dir per instance (can be overridden via SetDataDir or CLI)
 	s.dataDir = fmt.Sprintf("%s/sv2-%d-%d", os.TempDir(), os.Getpid(), time.Now().UnixNano())
 	// initialize denylist under data dir by default
-	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"), s.log)
 	// initialize cross-safe history file path
 	s.crossSafeHistoryFile = filepath.Join(s.dataDir, "crossSafeHistory.json")
 	// load existing cross-safe history if available
 	if err := s.loadCrossSafeHistory(); err != nil {
-		s.log.Warn("failed to load cross-safe history", "err", err)
+		s.log.Warn("Failed to load cross-safe history", "function", "NewSupervisor", "error", err)
 	}
 	go s.ProgressCrossSafe()
 	return s
@@ -164,7 +164,7 @@ func (s *Supervisor) addCrossSafeEntry(entry crossSafeMD) {
 	defer s.mu.Unlock()
 	s.crossSafeHistory = append(s.crossSafeHistory, entry)
 	if err := s.saveCrossSafeHistory(); err != nil {
-		s.log.Warn("failed to save cross-safe history", "err", err)
+		s.log.Warn("Failed to save cross-safe history", "function", "addCrossSafeEntry", "error", err)
 	}
 }
 
@@ -174,7 +174,7 @@ func (s *Supervisor) setCrossSafeTimestamp(timestamp uint64) {
 	defer s.mu.Unlock()
 	s.crossSafeHistory = []crossSafeMD{{Timestamp: timestamp}}
 	if err := s.saveCrossSafeHistory(); err != nil {
-		s.log.Warn("failed to save cross-safe history", "err", err)
+		s.log.Warn("Failed to save cross-safe history", "function", "setCrossSafeTimestamp", "error", err)
 	}
 }
 
@@ -189,14 +189,14 @@ func (s *Supervisor) pruneLatestCrossSafeEntry() uint64 {
 		// If only one entry, clear the history
 		s.crossSafeHistory = nil
 		if err := s.saveCrossSafeHistory(); err != nil {
-			s.log.Warn("failed to save cross-safe history", "err", err)
+			s.log.Warn("Failed to save cross-safe history", "function", "pruneLatestCrossSafeEntry", "error", err)
 		}
 		return 0
 	}
 	// Remove the last entry
 	s.crossSafeHistory = s.crossSafeHistory[:len(s.crossSafeHistory)-1]
 	if err := s.saveCrossSafeHistory(); err != nil {
-		s.log.Warn("failed to save cross-safe history", "err", err)
+		s.log.Warn("Failed to save cross-safe history", "function", "pruneLatestCrossSafeEntry", "error", err)
 	}
 	// Return the new latest timestamp
 	return s.crossSafeHistory[len(s.crossSafeHistory)-1].Timestamp
@@ -230,7 +230,7 @@ func (s *Supervisor) loadCrossSafeHistory() error {
 	}
 
 	s.crossSafeHistory = history
-	s.log.Info("loaded cross-safe history from file", "entries", len(history), "file", s.crossSafeHistoryFile)
+	s.log.Info("Loaded cross-safe history from file", "function", "loadCrossSafeHistory", "entries", len(history), "file", s.crossSafeHistoryFile)
 	return nil
 }
 
@@ -278,16 +278,16 @@ func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, activeChain
 		rcfg := container.virtualCfg.Rcfg
 		targetBlockNum, err := rcfg.TargetBlockNumber(targetTimestamp)
 		if err != nil {
-			s.log.Warn("Failed to calculate target block for rollback", "chain_id", chainID, "timestamp", targetTimestamp, "error", err)
+			s.log.Warn("Failed to calculate target block for rollback", "function", "checkL1Consistency", "chain_id", chainID, "timestamp", targetTimestamp, "error", err)
 			continue
 		}
 
 		// Rollback the chain to the target block
 		if s.rollbackFn != nil {
 			if rerr := s.rollbackFn(ctx, chainID, targetBlockNum); rerr != nil {
-				s.log.Warn("Chain rollback failed during L1 consistency recovery", "chain_id", chainID, "target_block", targetBlockNum, "error", rerr)
+				s.log.Warn("Chain rollback failed during L1 consistency recovery", "function", "checkL1Consistency", "chain_id", chainID, "target_block", targetBlockNum, "error", rerr)
 			} else {
-				s.log.Info("Chain rollback completed during L1 consistency recovery", "chain_id", chainID, "target_block", targetBlockNum)
+				s.log.Info("Chain rollback completed during L1 consistency recovery", "function", "checkL1Consistency", "chain_id", chainID, "target_block", targetBlockNum)
 			}
 		}
 	}
@@ -301,13 +301,13 @@ func (s *Supervisor) ProgressCrossSafe() {
 	// configure loop tick duration
 	tick := 500 * time.Millisecond
 	for {
-		s.log.Info("Cross-safe processing cycle started")
+		s.log.Info("Cross-safe processing cycle started", "function", "ProgressCrossSafe")
 		ctx := context.Background()
 
 		// Step 0: snapshot active chains and early-exit if none
 		activeChains := s.xsafeSnapshotActiveChains()
 		if len(activeChains) == 0 {
-			s.log.Info("No active chains available, skipping cross-safe processing")
+			s.log.Info("No active chains available, skipping cross-safe processing", "function", "ProgressCrossSafe")
 			time.Sleep(tick)
 			continue
 		}
@@ -331,7 +331,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 
 		// Step 2.5: if the candidate timestamp is already recorded, skip this iteration
 		if s.getCurrentCrossSafeTimestamp() == ts {
-			s.log.Info("Candidate timestamp already processed", "timestamp", ts)
+			s.log.Info("Candidate timestamp already processed", "function", "ProgressCrossSafe", "timestamp", ts)
 			time.Sleep(tick)
 			continue
 		}
@@ -339,11 +339,11 @@ func (s *Supervisor) ProgressCrossSafe() {
 		// Step 3: obtain L1<>L2 block pairs that meet or precede ts
 		pairs, err := s.getBlocksAtTimestamp(ctx, activeChains, ts)
 		if err != nil {
-			s.log.Info("Required blocks not yet available", "timestamp", ts, "error", err)
+			s.log.Info("Required blocks not yet available", "function", "ProgressCrossSafe", "timestamp", ts, "error", err)
 			time.Sleep(tick)
 			continue
 		}
-		s.log.Info("Retrieved block pairs for timestamp", "timestamp", ts, "chain_count", len(pairs))
+		s.log.Info("Retrieved block pairs for timestamp", "function", "ProgressCrossSafe", "timestamp", ts, "chain_count", len(pairs))
 
 		// Step 4: per-chain target and ingest up to it (manual seals) using pairs
 		if !s.xsafeIngestLogsTo(ctx, activeChains, pairs) {
@@ -358,7 +358,7 @@ func (s *Supervisor) ProgressCrossSafe() {
 		if valid {
 			s.commitNewTimestamp(ts, pairs)
 		} else {
-			s.log.Info("Skipping timestamp commit due to validation failure", "timestamp", ts)
+			s.log.Info("Skipping timestamp commit due to validation failure", "function", "ProgressCrossSafe", "timestamp", ts)
 		}
 
 		// Step end: wait for next tick
@@ -377,7 +377,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 	// Only perform L1 consistency check if the L1Block is initialized (not zero value)
 	// Skip check for entries created during initialization that don't have L1Block data yet
 	if latest.L1Block.Number == 0 {
-		s.log.Info("Skipping L1 consistency check for uninitialized L1 block")
+		s.log.Info("Skipping L1 consistency check for uninitialized L1 block", "function", "checkL1Consistency")
 		return true
 	}
 
@@ -429,15 +429,15 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 		// 2. Prune denylist entries at or newer than the timestamp
 		if s.denylist != nil {
 			if err := s.denylist.PruneAtOrNewerThan(timestampToPrune); err != nil {
-				s.log.Warn("Failed to prune denylist during rollback", "timestamp", timestampToPrune, "error", err)
+				s.log.Warn("Failed to prune denylist during rollback", "function", "checkL1Consistency", "timestamp", timestampToPrune, "error", err)
 			} else {
-				s.log.Info("Pruned denylist entries during rollback", "timestamp", timestampToPrune)
+				s.log.Info("Pruned denylist entries during rollback", "function", "checkL1Consistency", "timestamp", timestampToPrune)
 			}
 		}
 
 		// 3. Prune the latest entry from crossSafeHistory
 		newLatestTimestamp := s.pruneLatestCrossSafeEntry()
-		s.log.Info("Pruned latest cross-safe entry during rollback", "new_latest_timestamp", newLatestTimestamp)
+		s.log.Info("Pruned latest cross-safe entry during rollback", "function", "checkL1Consistency", "new_latest_timestamp", newLatestTimestamp)
 
 		// 4. Prune all containers back to the new latest timestamp
 		s.pruneContainersToTimestamp(ctx, activeChains, newLatestTimestamp)
@@ -445,7 +445,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 		return false
 	}
 
-	s.log.Info("L1 consistency check passed", "l1_block_number", expectedL1Block.Number)
+	s.log.Info("L1 consistency check passed", "function", "checkL1Consistency", "l1_block_number", expectedL1Block.Number)
 	return true
 }
 
@@ -453,7 +453,7 @@ func (s *Supervisor) checkL1Consistency(ctx context.Context, activeChains []eth.
 // Returns true if initialization is complete, false if needs to wait for next tick
 func (s *Supervisor) initializeCrossSafeTimestamp(activeChains []eth.ChainID) bool {
 	ts := s.getCurrentCrossSafeTimestamp()
-	s.log.Info("Current cross-safe timestamp", "timestamp", ts)
+	s.log.Info("Current cross-safe timestamp", "function", "initializeCrossSafeTimestamp", "timestamp", ts)
 
 	if ts == 0 {
 		if minGenesis := s.getMinGenesisTimestamp(activeChains); minGenesis != 0 {
@@ -469,18 +469,18 @@ func (s *Supervisor) initializeCrossSafeTimestamp(activeChains []eth.ChainID) bo
 // computeCandidateTimestamp computes the next candidate timestamp
 func (s *Supervisor) computeCandidateTimestamp() uint64 {
 	ts := s.getCurrentCrossSafeTimestamp() + 1
-	s.log.Info("Computing candidate timestamp", "timestamp", ts)
+	s.log.Info("Computing candidate timestamp", "function", "computeCandidateTimestamp", "timestamp", ts)
 	return ts
 }
 
 // validateExecutingMessagesAtTimestamp gets executing messages, validates them, and handles rollback if needed
 func (s *Supervisor) validateExecutingMessagesAtTimestamp(ctx context.Context, activeChains []eth.ChainID, ts uint64) bool {
 	execByChain := s.getExecutingMessages(activeChains, ts)
-	s.log.Info("Retrieved executing messages for validation", "messages_by_chain", execByChain)
+	s.log.Info("Retrieved executing messages for validation", "function", "validateExecutingMessagesAtTimestamp", "messages_by_chain", execByChain)
 
 	valid := s.validateExecutingMessages(ctx, activeChains, ts, execByChain)
 	if !valid {
-		s.log.Warn("Cross-safe validation failed, rollback performed", "timestamp", ts)
+		s.log.Warn("Cross-safe validation failed, rollback performed", "function", "validateExecutingMessagesAtTimestamp", "timestamp", ts)
 	}
 
 	return valid
@@ -507,7 +507,7 @@ func (s *Supervisor) commitNewTimestamp(ts uint64, pairs map[uint64]types.Derive
 	}
 
 	s.addCrossSafeEntry(newEntry)
-	s.log.Info("Cross-safe timestamp committed", "timestamp", ts, "l1_block_number", latestL1Block.Number, "l2_chain_count", len(l2Blocks))
+	s.log.Info("Cross-safe timestamp committed", "function", "commitCrossSafeTimestamp", "timestamp", ts, "l1_block_number", latestL1Block.Number, "l2_chain_count", len(l2Blocks))
 }
 
 // ============================================================================
@@ -530,48 +530,91 @@ func (s *Supervisor) openLogsDB(logger log.Logger, chainID uint64, dataDir strin
 }
 
 // ingestRange fetches payload, receipts and appends logs for [start,end] (inclusive).
-func (s *Supervisor) ingestRange(ctx context.Context, l2 *sources.L2Client, logs *logsdb.DB, start, end uint64) error {
+func (s *Supervisor) ingestRange(ctx context.Context, l2 *sources.L2Client, logs *logsdb.DB, chainID, start, end uint64) error {
+	blockCount := end - start + 1
+	rangeLogger := s.log.New("operation", "log_ingestion", "chain", chainID, "start_block", start, "end_block", end, "block_count", blockCount)
+	rangeLogger.Info("starting log ingestion range")
+
+	totalLogs := uint64(0)
+	execMsgCount := uint64(0)
+	totalTxs := uint64(0)
+
 	for n := start; n <= end; n++ {
+		blockLogger := rangeLogger.New("block", n)
+
 		env, err := l2.PayloadByNumber(ctx, n)
 		if err != nil {
+			blockLogger.Error("failed to fetch payload", "error", err)
 			return err
 		}
 		ref, err := derive.PayloadToBlockRef(l2.RollupConfig(), env.ExecutionPayload)
 		if err != nil {
+			blockLogger.Error("failed to convert payload to block ref", "error", err)
 			return err
 		}
 		// Fetch tx receipts to obtain logs per tx
 		info, receipts, err := l2.FetchReceiptsByNumber(ctx, n)
 		if err != nil {
+			blockLogger.Error("failed to fetch receipts", "error", err)
 			return err
 		}
+
+		totalTxs += uint64(len(receipts))
+		blockLogger.Debug("fetched block data", "tx_count", len(receipts), "block_hash", ref.Hash)
 		// Collect logs flat in block order
 		var allLogs []*ethTypes.Log
 		for _, r := range receipts {
 			allLogs = append(allLogs, r.Logs...)
 		}
+
+		blockLogCount := uint64(len(allLogs))
+		totalLogs += blockLogCount
+		blockLogger.Debug("collected logs from receipts", "log_count", blockLogCount)
+
 		// Write logs to DB
 		// Identify parent block by number-1
 		var parent eth.BlockID
 		if n > 0 {
 			parent = eth.BlockID{Hash: ref.ParentHash, Number: n - 1}
 		}
+
+		blockExecMsgCount := uint64(0)
 		for i, lg := range allLogs {
 			// Try to decode ExecutingMessage; may be nil for non-exec logs
 			var exec *types.ExecutingMessage
 			if m, err := processors.DecodeExecutingMessageLog(lg); err == nil && m != nil {
 				exec = m
+				blockExecMsgCount++
+				blockLogger.Debug("decoded executing message",
+					"log_idx", i,
+					"initiating_chain", m.ChainID,
+					"block_num", m.BlockNum,
+					"timestamp", m.Timestamp)
 			}
 			if err := logs.AddLog(processors.LogToLogHash(lg), parent, uint32(i), exec); err != nil {
+				blockLogger.Error("failed to add log to database", "log_idx", i, "error", err)
 				return err
 			}
+		}
 
+		execMsgCount += blockExecMsgCount
+		if blockExecMsgCount > 0 {
+			blockLogger.Info("processed executing messages", "exec_msg_count", blockExecMsgCount)
 		}
 		// Seal block in logs DB
 		if err := logs.SealBlock(ref.ParentHash, eth.ToBlockID(info), ref.Time); err != nil {
+			blockLogger.Error("failed to seal block in logs database", "error", err)
 			return err
 		}
+
+		blockLogger.Debug("block sealed successfully", "block_hash", info.Hash, "timestamp", ref.Time)
 	}
+
+	rangeLogger.Info("log ingestion range completed",
+		"total_logs", totalLogs,
+		"total_txs", totalTxs,
+		"executing_messages", execMsgCount,
+		"avg_logs_per_block", float64(totalLogs)/float64(blockCount))
 	return nil
 }
 
@@ -642,7 +685,7 @@ func (s *Supervisor) getBlocksAtTimestamp(ctx context.Context, activeChains []et
 		if st.SafeL2.Number < targetNum {
 			return nil, fmt.Errorf("chain %d: safe head too low: have %d need %d", v, st.SafeL2.Number, targetNum)
 		}
-		s.log.Info("Chain safety gate passed", "chain_id", v, "safe_block", st.SafeL2.Number, "required_block", targetNum)
+		s.log.Info("Chain safety gate passed", "function", "getBlocksAtTimestamp", "chain_id", v, "safe_block", st.SafeL2.Number, "required_block", targetNum)
 		// Ensure clients
 		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
 		l2Cli, err := opclient.NewRPC(ctx, s.log, container.virtualCfg.L2UserRPC)
@@ -692,7 +735,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 		container := s.chains[v]
 		s.mu.Unlock()
 
-		s.log.Info("Processing log ingestion for chain", "chain_id", v)
+		s.log.Info("Processing log ingestion for chain", "function", "xsafeIngestLogsTo", "chain_id", v)
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
 			continue
 		}
@@ -703,19 +746,19 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 		}
 		targetNum := targetPair.Derived.Number
 		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
-			s.log.Info("Chain logs head before ingestion", "chain_id", v, "block_number", blk.Number)
+			s.log.Info("Chain logs head before ingestion", "function", "xsafeIngestLogsTo", "chain_id", v, "block_number", blk.Number)
 			if blk.Number >= targetNum {
 				// Already at or past target; skip
 				continue
 			}
 		}
 		rcfg := container.virtualCfg.Rcfg
-		s.log.Info("Computed ingestion target", "chain_id", v, "target_block", targetNum)
+		s.log.Info("Computed ingestion target", "function", "xsafeIngestLogsTo", "chain_id", v, "target_block", targetNum)
 
 		// Ensure L1 client
 		l1Cli, l1 = s.EnsureL1Client(ctx, l1Cli, l1, container.virtualCfg.L1RPC, rcfg)
 		if l1 == nil {
-			s.log.Warn("Missing L1 client for chain", "chain_id", v)
+			s.log.Warn("Missing L1 client for chain", "function", "xsafeIngestLogsTo", "chain_id", v)
 			ready = false
 			break
 		}
@@ -741,15 +784,15 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 				start = targetNum
 			}
 		}
-		s.log.Info("Ingesting log range", "chain_id", v, "start_block", start, "end_block", targetNum)
-		if err := s.ingestRange(ctx, l2, container.logsDB, start, targetNum); err != nil {
-			s.log.Warn("Log ingestion failed for chain", "chain_id", v, "error", err)
+		s.log.Info("Ingesting log range", "function", "xsafeIngestLogsTo", "chain_id", v, "start_block", start, "end_block", targetNum)
+		if err := s.ingestRange(ctx, l2, container.logsDB, v, start, targetNum); err != nil {
+			s.log.Warn("Log ingestion failed for chain", "function", "xsafeIngestLogsTo", "chain_id", v, "error", err)
 			l2Cli.Close()
 			ready = false
 			break
 		}
 		if blk, ok := container.logsDB.LatestSealedBlock(); ok {
-			s.log.Info("Chain logs head after ingestion", "chain_id", v, "block_number", blk.Number)
+			s.log.Info("Chain logs head after ingestion", "function", "xsafeIngestLogsTo", "chain_id", v, "block_number", blk.Number)
 		}
 		l2Cli.Close()
 	}
@@ -759,7 +802,7 @@ func (s *Supervisor) xsafeIngestLogsTo(ctx context.Context, activeChains []eth.C
 // getExecutingMessages returns the executing messages per chain at the target block for ts.
 func (s *Supervisor) getExecutingMessages(activeChains []eth.ChainID, ts uint64) map[uint64]map[uint32]*types.ExecutingMessage {
 	out := make(map[uint64]map[uint32]*types.ExecutingMessage, len(activeChains))
-	s.log.Info("Retrieving executing messages", "active_chains", activeChains, "timestamp", ts)
+	s.log.Info("Retrieving executing messages", "function", "getExecutingMessages", "active_chains", activeChains, "timestamp", ts)
 	for _, id := range activeChains {
 		v, ok := id.Uint64()
 		if !ok {
@@ -771,29 +814,29 @@ func (s *Supervisor) getExecutingMessages(activeChains []eth.ChainID, ts uint64)
 		s.mu.Unlock()
 
 		if container == nil || container.virtualCfg == nil || container.virtualCfg.Rcfg == nil || container.logsDB == nil {
-			s.log.Info("Skipping validation for chain (missing config/database)", "chain_id", v)
+			s.log.Info("Skipping validation for chain (missing config/database)", "function", "getExecutingMessages", "chain_id", v)
 			continue
 		}
 		rcfg := container.virtualCfg.Rcfg
 		targetNum, err := rcfg.TargetBlockNumber(ts)
 		if err != nil {
-			s.log.Info("Validation target before genesis", "chain_id", v, "timestamp", ts)
+			s.log.Info("Validation target before genesis", "function", "getExecutingMessages", "chain_id", v, "timestamp", ts)
 			continue
 		}
 		_, logcount, execMsgs, err := container.logsDB.OpenBlock(targetNum)
-		s.log.Info("Retrieved messages for chain", "chain_id", v, "log_count", logcount, "executing_messages", len(execMsgs))
+		s.log.Info("Retrieved messages for chain", "function", "getExecutingMessages", "chain_id", v, "log_count", logcount, "executing_messages", len(execMsgs))
 		if err != nil {
-			s.log.Info("Failed to open block for validation", "chain_id", v, "block_number", targetNum, "error", err)
+			s.log.Info("Failed to open block for validation", "function", "getExecutingMessages", "chain_id", v, "block_number", targetNum, "error", err)
 			continue
 		}
 		if len(execMsgs) == 0 {
-			s.log.Info("No executing messages found", "chain_id", v, "block_number", targetNum)
+			s.log.Info("No executing messages found", "function", "getExecutingMessages", "chain_id", v, "block_number", targetNum)
 		}
 		for logIdx, msg := range execMsgs {
 			if msg == nil {
 				continue
 			}
-			s.log.Info("Found executing message", "chain_id", v, "block_number", targetNum, "log_index", logIdx, "initiating_chain", msg.ChainID, "initiating_block", msg.BlockNum, "timestamp", msg.Timestamp)
+			s.log.Info("Found executing message", "function", "getExecutingMessages", "chain_id", v, "block_number", targetNum, "log_index", logIdx, "initiating_chain", msg.ChainID, "initiating_block", msg.BlockNum, "timestamp", msg.Timestamp)
 		}
 		out[v] = execMsgs
 	}
@@ -824,7 +867,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 				initContainer := s.chains[initCID]
 				s.mu.Unlock()
 				if initContainer == nil || initContainer.logsDB == nil {
-					s.log.Info("Missing initiating logsDB for validation", "initiating_chain", initCID)
+					s.log.Info("Missing initiating logsDB for validation", "function", "validateExecutingMessages", "initiating_chain", initCID)
 					allValid = false
 					invalidCount++
 					continue
@@ -836,7 +879,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 				// Rather than adding cycle detection, we are simply failing the block in these conditions.
 				// Production software will need to support cycle detection.
 				if msg.Timestamp == ts {
-					s.log.Warn("Execution validation failed due to potential cycle", "executing_chain", v, "initiating_chain", initCID, "timestamp", msg.Timestamp)
+					s.log.Warn("Execution validation failed due to potential cycle", "function", "validateExecutingMessages", "executing_chain", v, "initiating_chain", initCID, "timestamp", msg.Timestamp)
 					allValid = false
 					invalidCount++
 					if !rolledBack[v] {
@@ -848,14 +891,14 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
 										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
-										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
+										s.log.Info("Cross-safe denylist add", "function", "validateExecutingMessages", "chain_id", v, "block_hash", ref.Hash, "block_number", targetNum)
 									}
 								}
 							}
 						}
 					}
 				} else if _, err := initContainer.logsDB.Contains(query); err != nil {
-					s.log.Warn("Execution validation failed", "executing_chain", v, "initiating_chain", initCID, "error", err)
+					s.log.Warn("Execution validation failed", "function", "validateExecutingMessages", "executing_chain", v, "initiating_chain", initCID, "error", err)
 					allValid = false
 					invalidCount++
 					// Side-effects: mark denylist and rollback the executing chain before the block at this ts
@@ -868,7 +911,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 								if ref, _, _, oerr := container.logsDB.OpenBlock(targetNum); oerr == nil {
 									if s.denylist != nil {
 										_ = s.denylist.Add(v, ref.Time, ref.Hash.Hex())
-										s.log.Info("xsafe: denylist add", "chain", v, "block", ref.Hash, "num", targetNum)
+										s.log.Info("Cross-safe denylist add", "function", "validateExecutingMessages", "chain_id", v, "block_hash", ref.Hash, "block_number", targetNum)
 									}
 								}
 								to := uint64(0)
@@ -877,9 +920,9 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 								}
 								if s.rollbackFn != nil {
 									if rerr := s.rollbackFn(ctx, v, to); rerr != nil {
-										s.log.Warn("xsafe: rollback failed", "chain", v, "to", to, "err", rerr)
+										s.log.Warn("Cross-safe rollback failed", "function", "validateExecutingMessages", "chain_id", v, "to_block", to, "error", rerr)
 									} else {
-										s.log.Info("Chain rollback executed", "chain_id", v, "target_block", to)
+										s.log.Info("Chain rollback executed", "function", "validateExecutingMessages", "chain_id", v, "target_block", to)
 									}
 								}
 								rolledBack[v] = true
@@ -887,12 +930,12 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 						}
 					}
 				} else {
-					s.log.Info("Execution validation passed", "executing_chain", v, "initiating_chain", initCID)
+					s.log.Info("Execution validation passed", "function", "validateExecutingMessages", "executing_chain", v, "initiating_chain", initCID)
 				}
 			}
 		}
 	}
-	s.log.Info("Execution message validation completed", "total_messages", totalCount, "invalid_messages", invalidCount)
+	s.log.Info("Execution message validation completed", "function", "validateExecutingMessages", "total_messages", totalCount, "invalid_messages", invalidCount)
 	return allValid
 }
 
@@ -904,7 +947,7 @@ func (s *Supervisor) authorizeFinalityUpdate(timestamp uint64) bool {
 
 	// If no cross-safe history exists, deny finality updates
 	if len(s.crossSafeHistory) == 0 {
-		s.log.Info("finality authorization denied: no cross-safe history", "timestamp", timestamp)
+		s.log.Info("Finality authorization denied: no cross-safe history", "function", "authorizeFinalityUpdate", "timestamp", timestamp)
 		return false
 	}
 
@@ -913,12 +956,12 @@ func (s *Supervisor) authorizeFinalityUpdate(timestamp uint64) bool {
 
 	// Check if the timestamp is at or before the latest cross-safe timestamp
 	if timestamp > latest.Timestamp {
-		s.log.Info("finality authorization denied: timestamp too recent",
+		s.log.Info("Finality authorization denied: timestamp too recent", "function", "authorizeFinalityUpdate",
 			"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
 		return false
 	}
 
-	s.log.Info("finality authorization granted",
+	s.log.Info("Finality authorization granted", "function", "authorizeFinalityUpdate",
 		"timestamp", timestamp, "cross_safe_ts", latest.Timestamp)
 	return true
 }
@@ -939,11 +982,11 @@ func (s *Supervisor) SetDataDir(dir string) {
 		return
 	}
 	s.dataDir = dir
-	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"))
+	s.denylist = NewDenylistStore(filepath.Join(s.dataDir, "denylist.json"), s.log)
 	s.crossSafeHistoryFile = filepath.Join(s.dataDir, "crossSafeHistory.json")
 	// load existing cross-safe history from new location if available
 	if err := s.loadCrossSafeHistory(); err != nil {
-		s.log.Warn("failed to load cross-safe history after SetDataDir", "err", err)
+		s.log.Warn("Failed to load cross-safe history after SetDataDir", "function", "SetDataDir", "error", err)
 	}
 }
 

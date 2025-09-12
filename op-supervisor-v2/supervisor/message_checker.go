@@ -27,7 +27,7 @@ import (
 // Returns:
 //   - Error if validation fails or any message is not found
 func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.Hash, minSafety supervisorTypes.SafetyLevel, execDescr supervisorTypes.ExecutingDescriptor) error {
-	s.log.Info("CheckAccessList: starting", "entries", len(inboxEntries), "minSafety", minSafety)
+	s.log.Info("Starting access list validation", "function", "CheckAccessList", "entries", len(inboxEntries), "min_safety", minSafety)
 
 	// Check if access list checking is enabled
 	s.mu.Lock()
@@ -35,7 +35,7 @@ func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.
 	s.mu.Unlock()
 
 	if !enabled {
-		s.log.Info("CheckAccessList: disabled, returning success without validation")
+		s.log.Info("Access list validation disabled, returning success", "function", "CheckAccessList")
 		return nil
 	}
 
@@ -61,7 +61,7 @@ func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.
 		}
 		entries = remaining
 
-		s.log.Info("CheckAccessList: validating access", "chainID", acc.ChainID, "blockNum", acc.BlockNumber, "logIdx", acc.LogIndex, "timestamp", acc.Timestamp)
+		s.log.Info("Validating access entry", "function", "CheckAccessList", "chain_id", acc.ChainID, "block_number", acc.BlockNumber, "log_index", acc.LogIndex, "timestamp", acc.Timestamp)
 
 		// Validate the access entry using our existing CheckMessage functionality
 		err = s.checkAccessEntry(ctx, acc)
@@ -70,7 +70,7 @@ func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.
 		}
 	}
 
-	s.log.Info("CheckAccessList: all entries validated successfully")
+	s.log.Info("All access list entries validated successfully", "function", "CheckAccessList")
 	return nil
 }
 
@@ -84,7 +84,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	s.mu.Unlock()
 
 	if container == nil {
-		s.log.Error("checkAccessEntry: unknown chain ID", "chainID", chainID)
+		s.log.Error("Unknown chain ID", "function", "checkAccessEntry", "chain_id", chainID)
 		return fmt.Errorf("unknown chain ID: %d", chainID)
 	}
 
@@ -99,7 +99,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	container.stateMu.Unlock()
 
 	if l2AuthRPC == "" {
-		s.log.Error("checkAccessEntry: no execution engine RPC configured for chain", "chainID", chainID)
+		s.log.Error("No execution engine RPC configured for chain", "function", "checkAccessEntry", "chain_id", chainID)
 		return fmt.Errorf("no execution engine RPC configured for chain %d", chainID)
 	}
 
@@ -107,7 +107,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	auth := rpc.WithHTTPAuth(gn.NewJWTAuth(jwtSecret))
 	client, err := opclient.NewRPC(ctx, s.log, l2AuthRPC, opclient.WithGethRPCOptions(auth))
 	if err != nil {
-		s.log.Error("checkAccessEntry: failed to connect to execution engine", "chainID", chainID, "error", err)
+		s.log.Error("Failed to connect to execution engine", "function", "checkAccessEntry", "chain_id", chainID, "error", err)
 		return fmt.Errorf("failed to connect to execution engine: %w", err)
 	}
 	defer client.Close()
@@ -115,27 +115,27 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	// Create L2 client
 	execClient, err := sources.NewL2Client(client, s.log, nil, sources.L2ClientDefaultConfig(container.virtualCfg.Rcfg, false))
 	if err != nil {
-		s.log.Error("checkAccessEntry: failed to create L2 client", "chainID", chainID, "error", err)
+		s.log.Error("Failed to create L2 client", "function", "checkAccessEntry", "chain_id", chainID, "error", err)
 		return fmt.Errorf("failed to create L2 client: %w", err)
 	}
 
 	// Get block by number
 	blockRef, err := execClient.L2BlockRefByNumber(ctx, acc.BlockNumber)
 	if err != nil {
-		s.log.Error("checkAccessEntry: failed to get block by number", "chainID", chainID, "blockNum", acc.BlockNumber, "error", err)
+		s.log.Error("Failed to get block by number", "function", "checkAccessEntry", "chain_id", chainID, "block_number", acc.BlockNumber, "error", err)
 		return fmt.Errorf("failed to get block %d: %w", acc.BlockNumber, err)
 	}
 
 	// Verify timestamp matches
 	if blockRef.Time != acc.Timestamp {
-		s.log.Error("checkAccessEntry: timestamp mismatch", "chainID", chainID, "expected", acc.Timestamp, "got", blockRef.Time)
+		s.log.Error("Timestamp mismatch", "function", "checkAccessEntry", "chain_id", chainID, "expected", acc.Timestamp, "got", blockRef.Time)
 		return fmt.Errorf("timestamp mismatch: expected %d, got %d", acc.Timestamp, blockRef.Time)
 	}
 
 	// Get block receipts
 	_, receipts, err := execClient.FetchReceipts(ctx, blockRef.Hash)
 	if err != nil {
-		s.log.Error("checkAccessEntry: failed to fetch receipts", "chainID", chainID, "blockHash", blockRef.Hash, "error", err)
+		s.log.Error("Failed to fetch receipts", "function", "checkAccessEntry", "chain_id", chainID, "block_hash", blockRef.Hash, "error", err)
 		return fmt.Errorf("failed to fetch receipts for block %s: %w", blockRef.Hash, err)
 	}
 
@@ -157,7 +157,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	}
 
 	if targetLog == nil {
-		s.log.Error("checkAccessEntry: log index not found", "chainID", chainID, "logIdx", acc.LogIndex, "blockNum", acc.BlockNumber)
+		s.log.Error("Log index not found", "function", "checkAccessEntry", "chain_id", chainID, "log_index", acc.LogIndex, "block_number", acc.BlockNumber)
 		return fmt.Errorf("log index %d not found in block %d", acc.LogIndex, acc.BlockNumber)
 	}
 
@@ -176,17 +176,17 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	actualChecksum := checksumArgs.Checksum()
 
 	// Log both checksums for debugging
-	s.log.Debug("checkAccessEntry: checksum comparison",
+	s.log.Debug("Checksum comparison", "function", "checkAccessEntry",
 		"expected", common.Hash(acc.Checksum).Hex(),
 		"calculated", common.Hash(actualChecksum).Hex(),
-		"chainID", chainID, "blockNum", acc.BlockNumber, "logIdx", acc.LogIndex)
+		"chain_id", chainID, "block_number", acc.BlockNumber, "log_index", acc.LogIndex)
 
 	// Verify checksum matches
 	if actualChecksum != acc.Checksum {
-		s.log.Error("checkAccessEntry: checksum mismatch", "chainID", chainID, "expected", acc.Checksum, "got", actualChecksum)
+		s.log.Error("Checksum mismatch", "function", "checkAccessEntry", "chain_id", chainID, "expected", acc.Checksum, "got", actualChecksum)
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", common.Hash(acc.Checksum).Hex(), common.Hash(actualChecksum).Hex())
 	}
 
-	s.log.Debug("checkAccessEntry: checksum matches", "chainID", chainID, "checksum", actualChecksum)
+	s.log.Debug("Checksum matches", "function", "checkAccessEntry", "chain_id", chainID, "checksum", actualChecksum)
 	return nil
 }

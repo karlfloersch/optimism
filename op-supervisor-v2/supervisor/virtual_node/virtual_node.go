@@ -2,6 +2,7 @@ package virtual_node
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"time"
@@ -50,12 +51,34 @@ type VirtualNodeConfig struct {
 	DisableP2P    bool
 }
 
+// generateVirtualNodeID generates a 4-character UUID for virtual node identification
+func generateVirtualNodeID() string {
+	bytes := make([]byte, 2)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to a simple counter-based approach if crypto/rand fails
+		return fmt.Sprintf("%04x", time.Now().UnixNano()&0xFFFF)
+	}
+	return fmt.Sprintf("%04x", uint16(bytes[0])<<8|uint16(bytes[1]))
+}
+
 // StartVirtualNode starts a virtual op-node in-process with minimal configuration and returns the user-RPC URL
 // and a function to stop the virtual op-node. The node is configured as a sequencer with local RPCs and no external P2P.
 func StartVirtualNode(
 	cfg *VirtualNodeConfig,
 	logger log.Logger,
 ) (string, func(context.Context) error, error) {
+	// Generate a unique 4-character ID for this virtual node
+	vnid := generateVirtualNodeID()
+
+	// Create structured logger with virtual node context
+	var chainID uint64
+	if cfg.Rcfg != nil && cfg.Rcfg.L2ChainID != nil {
+		chainID = cfg.Rcfg.L2ChainID.Uint64()
+	}
+	vnLogger := logger.New("service", "virtual_node", "chain", chainID, "vnid", vnid)
+
+	vnLogger.Info("Starting virtual node", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid)
+
 	// Minimal P2P config (memory-only, local addresses)
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	// Always register P2P flags so we can explicitly disable P2P when requested
@@ -102,12 +125,12 @@ func StartVirtualNode(
 		}
 		_ = fs.Set(opNodeFlags.DiscoveryPathName, discoveryPath)
 		if peerstorePath == "memory" {
-			logger.Warn("op-node peerstore is in-memory; use unique sv2_data_dir to persist per-node state")
+			vnLogger.Warn("Op-node peerstore is in-memory; use unique sv2_data_dir to persist per-node state", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid)
 		}
 		if discoveryPath == "memory" {
-			logger.Warn("op-node discovery DB is in-memory; use unique sv2_data_dir to persist per-node state")
+			vnLogger.Warn("Op-node discovery DB is in-memory; use unique sv2_data_dir to persist per-node state", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid)
 		}
-		logger.Info("configured op-node p2p storage", "key", keyPath, "peerstore", peerstorePath, "discovery", discoveryPath)
+		vnLogger.Info("Configured op-node p2p storage", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid, "key", keyPath, "peerstore", peerstorePath, "discovery", discoveryPath)
 		// Bootnodes / static peers: remain isolated unless configured
 		if len(cfg.Bootnodes) > 0 {
 			_ = fs.Set(opNodeFlags.BootnodesName, strings.Join(cfg.Bootnodes, ","))
@@ -118,12 +141,12 @@ func StartVirtualNode(
 			_ = fs.Set(opNodeFlags.StaticPeersName, strings.Join(cfg.StaticPeers, ","))
 		}
 	} else {
-		logger.Info("P2P networking disabled for virtual op-node")
+		vnLogger.Info("P2P networking disabled for virtual op-node", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid)
 	}
 	cliCtx := cli.NewContext(&cli.App{}, fs, nil)
 	p2pConfig, err := p2pcli.NewConfig(cliCtx, cfg.Rcfg.BlockTime)
 	if err != nil {
-		logger.Warn("failed to create P2P config, disabling P2P", "err", err)
+		vnLogger.Warn("Failed to create P2P config, disabling P2P", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid, "error", err)
 		p2pConfig = &opnodep2p.Config{DisableP2P: true}
 	}
 
@@ -177,9 +200,9 @@ func StartVirtualNode(
 		ExperimentalOPStackAPI:          true,
 	}
 
-	opNode, err := e2eopnode.NewOpnode(logger, nodeCfg, func(err error) {
+	opNode, err := e2eopnode.NewOpnode(vnLogger, nodeCfg, func(err error) {
 		if err != nil {
-			logger.Error("virtual op-node error", "err", err)
+			vnLogger.Error("Virtual op-node error", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid, "error", err)
 		}
 	})
 	if err != nil {
@@ -187,5 +210,7 @@ func StartVirtualNode(
 	}
 
 	stopFn := func(ctx context.Context) error { return opNode.Stop(ctx) }
-	return opNode.UserRPC().RPC(), stopFn, nil
+	userRPC := opNode.UserRPC().RPC()
+	vnLogger.Info("Virtual node started successfully", "function", "StartVirtualNode", "chain_id", chainID, "vnid", vnid, "user_rpc", userRPC)
+	return userRPC, stopFn, nil
 }
