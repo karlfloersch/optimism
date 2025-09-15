@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -22,6 +23,16 @@ import (
 // HTTPHandler returns the main HTTP handler for the supervisor
 func (s *Supervisor) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Create RPC server for JSON-RPC requests at root path
+	rpcServer := rpc.NewServer()
+	rpcAPI := &SupervisorRPCAPI{supervisor: s}
+	if err := rpcServer.RegisterName("supervisor", rpcAPI); err != nil {
+		s.log.Error("Failed to register RPC API", "error", err)
+	}
+
+	// Handle JSON-RPC requests at root path
+	mux.Handle("/", rpcServer)
 
 	// Register all endpoints
 	mux.HandleFunc("/healthz", s.handleHealthz)
