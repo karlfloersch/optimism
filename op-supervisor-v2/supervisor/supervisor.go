@@ -299,7 +299,7 @@ func (s *Supervisor) pruneContainersToTimestamp(ctx context.Context, activeChain
 
 func (s *Supervisor) ProgressCrossSafe() {
 	// configure loop tick duration
-	tick := 500 * time.Millisecond
+	tick := 50 * time.Millisecond
 	for {
 		s.log.Info("Cross-safe processing cycle started", "function", "ProgressCrossSafe")
 		ctx := context.Background()
