@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
+
 	"crypto/ecdsa"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -46,10 +48,83 @@ type blockID struct {
 	Number uint64 `json:"number"`
 }
 
+// RelayArgsFile describes the inputs required to call CrossL2Inbox.validateMessage
+// It intentionally contains only what the second transaction needs: destination RPC,
+// the Identifier tuple, and the msgHash.
+type RelayArgsFile struct {
+	DstRPC     string          `json:"dst_rpc"`
+	Identifier RelayIdentifier `json:"identifier"`
+	MsgHash    string          `json:"msg_hash"` // 0x-hex
+}
+
+type RelayIdentifier struct {
+	Origin      string `json:"origin"`      // 0x-addr
+	BlockNumber string `json:"blockNumber"` // decimal string
+	LogIndex    string `json:"logIndex"`    // decimal string
+	Timestamp   string `json:"timestamp"`   // decimal string
+	ChainID     string `json:"chainId"`     // decimal string (source chain id)
+}
+
+func writeRelayArgsFile(path string, dstRPC string, id [5]*big.Int, msgHash common.Hash) error {
+	// Convert to user-friendly JSON
+	out := RelayArgsFile{
+		DstRPC: dstRPC,
+		Identifier: RelayIdentifier{
+			Origin:      common.BytesToAddress(id[0].Bytes()).Hex(),
+			BlockNumber: id[1].String(),
+			LogIndex:    id[2].String(),
+			Timestamp:   id[3].String(),
+			ChainID:     id[4].String(),
+		},
+		MsgHash: msgHash.Hex(),
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+func readRelayArgsFile(path string) (string, [5]*big.Int, common.Hash, error) {
+	var zero [5]*big.Int
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", zero, common.Hash{}, err
+	}
+	var in RelayArgsFile
+	if err := json.Unmarshal(b, &in); err != nil {
+		return "", zero, common.Hash{}, err
+	}
+	// Parse identifier
+	id := [5]*big.Int{new(big.Int), new(big.Int), new(big.Int), new(big.Int), new(big.Int)}
+	id[0].SetBytes(common.HexToAddress(in.Identifier.Origin).Bytes())
+	if _, ok := id[1].SetString(strings.TrimSpace(in.Identifier.BlockNumber), 10); !ok {
+		return "", zero, common.Hash{}, fmt.Errorf("invalid blockNumber")
+	}
+	if _, ok := id[2].SetString(strings.TrimSpace(in.Identifier.LogIndex), 10); !ok {
+		return "", zero, common.Hash{}, fmt.Errorf("invalid logIndex")
+	}
+	if _, ok := id[3].SetString(strings.TrimSpace(in.Identifier.Timestamp), 10); !ok {
+		return "", zero, common.Hash{}, fmt.Errorf("invalid timestamp")
+	}
+	if _, ok := id[4].SetString(strings.TrimSpace(in.Identifier.ChainID), 10); !ok {
+		return "", zero, common.Hash{}, fmt.Errorf("invalid chainId")
+	}
+	var mh common.Hash
+	if len(in.MsgHash) > 0 {
+		mh = common.HexToHash(in.MsgHash)
+	}
+	return strings.TrimSpace(in.DstRPC), id, mh, nil
+}
+
 func main() {
 	var (
 		envFile      = flag.String("env-file", "op-up/external-l1.env", "Path to Sepolia external L1 env file")
-		mode         = flag.String("mode", "tx", "Run mode: tx|valid-msg|invalid-msg|heads (aliases: valid->tx, invalid->invalid-msg, both->tx+invalid-msg)")
+		mode         = flag.String("mode", "tx", "Run mode: tx|valid-msg|invalid-msg|heads|relay-file (aliases: valid->tx, invalid->invalid-msg, both->tx+invalid-msg)")
 		timeout      = flag.Duration("timeout", 10*time.Minute, "Overall timeout")
 		pollInterval = flag.Duration("poll-interval", 250*time.Millisecond, "Polling interval")
 		logFile      = flag.String("log-file", "", "Optional log output file (append)")
@@ -60,8 +135,26 @@ func main() {
 		privKeyFlag  = flag.String("priv-key", "", "Private key for sending txs (0x...) - optional if present in env file as FAUCET_PK")
 		fromChain    = flag.String("from", "901", "Source chain for L2->L2 message (901 or 902); destination is the other chain")
 		targetFlag   = flag.String("target", "", "Optional target address for L2->L2 message (default: EOA self for valid-msg; CrossL2Inbox for invalid-msg)")
+		// Simple tx batching (tx mode only)
+		// (removed) repeat/repat flags
+		// New flags for load testing
+		saveArgsFile = flag.String("save-args-file", "", "If set, save CrossL2Inbox relay args (dst rpc, identifier, msgHash) to this JSON file and exit (valid-msg only)")
+		argsFile     = flag.String("args-file", "", "Path to JSON file with CrossL2Inbox relay args (for mode=relay-file)")
+		mutateChk    = flag.Bool("mutate-checksum", false, "If set in relay-file mode, mutate checksum inputs (logIndex) before sending")
+		multFlag     = flag.Int("mult", 1, "If >1 and <=10, relay-file will submit that many identical txs with ascending nonces as a batch")
 	)
 	flag.Parse()
+
+	// (removed) repeat normalization
+
+	// Normalize mult for relay-file
+	mult := *multFlag
+	if mult < 1 {
+		mult = 1
+	}
+	if mult > 10 {
+		mult = 10
+	}
 
 	if *logFile != "" {
 		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -168,6 +261,16 @@ func main() {
 			fmt.Printf("ERROR: build relay payload: %v\n", err)
 			os.Exit(1)
 		}
+		// Optionally save args for second tx and exit
+		if strings.TrimSpace(*saveArgsFile) != "" {
+			msgHash := crypto.Keccak256Hash(sentPayload)
+			if err := writeRelayArgsFile(*saveArgsFile, dstRPCRelay, id, msgHash); err != nil {
+				fmt.Printf("ERROR: save args file: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Saved relay args to %s (dst=%s)\n", *saveArgsFile, dstRPCRelay)
+			return
+		}
 		recRelay, err := relayMessage(dstRPCRelay, privKey, id, sentPayload)
 		if err != nil {
 			fmt.Printf("ERROR: relayMessage: %v\n", err)
@@ -189,6 +292,35 @@ func main() {
 		}
 		cancel()
 		fmt.Printf("Valid Message: ok (block %d, timestamp %d)\n", recRelay.BlockNumber.Uint64(), blockTimestamp)
+	case "relay-file":
+		// Replay CrossL2Inbox.validateMessage from a saved args file
+		if strings.TrimSpace(*argsFile) == "" {
+			fmt.Println("ERROR: --args-file is required for mode=relay-file")
+			os.Exit(1)
+		}
+		dstRPC, id, msgHash, err := readRelayArgsFile(*argsFile)
+		if err != nil {
+			fmt.Printf("ERROR: read args file: %v\n", err)
+			os.Exit(1)
+		}
+		if *mutateChk {
+			msgHash = common.HexToHash("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+		}
+		if mult <= 1 {
+			recRelay, err := relayMessageHash(dstRPC, privKey, id, msgHash)
+			if err != nil {
+				fmt.Printf("❌ (%v)\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("✅ (block %d)\n", recRelay.BlockNumber.Uint64())
+			break
+		}
+		// Batch submit 'mult' identical relay txs with ascending nonces
+		if err := relayMessageHashBatch(dstRPC, privKey, id, msgHash, mult); err != nil {
+			fmt.Printf("❌ (%v)\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ batch %d submitted\n", mult)
 	case "invalid-msg":
 		srcRPC, dstChain := pickSrcDst(*fromChain, *rpc901, *rpc902)
 		// Determine destination RPC
@@ -541,6 +673,186 @@ func relayMessage(dstRPC string, privKey string, id [5]*big.Int, sentMessage []b
 	return r, nil
 }
 
+// relayMessageHash is like relayMessage, but uses a precomputed msgHash instead of the full sentMessage bytes.
+func relayMessageHash(dstRPC string, privKey string, id [5]*big.Int, msgHash common.Hash) (*types.Receipt, error) {
+	rpc := dstRPC
+	ctx, cancel := contextWithTimeout(90 * time.Second)
+	defer cancel()
+	pk, err := parseECDSA(privKey)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := ethclient.DialContext(ctx, rpc)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
+	chainID, err := cli.ChainID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("relayMessageHash: dialing dstRPC=%s chainID=%s\n", rpc, chainID.String())
+	auth, err := bind.NewKeyedTransactorWithChainID(pk, chainID)
+	if err != nil {
+		return nil, err
+	}
+	tip, err := cli.SuggestGasTipCap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hdr, err := cli.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	base := hdr.BaseFee
+	if base == nil {
+		base = big.NewInt(0)
+	}
+	auth.GasTipCap = tip
+	auth.GasFeeCap = new(big.Int).Add(new(big.Int).Mul(base, big.NewInt(2)), tip)
+	auth.GasLimit = 1_500_000
+	auth.Context = ctx
+	inboxAddr := common.HexToAddress("0x4200000000000000000000000000000000000022")
+	// Build Identifier and access list from provided id
+	originAddr := common.BytesToAddress(id[0].Bytes())
+	ibID := inboxbinding.Identifier{Origin: originAddr, BlockNumber: id[1], LogIndex: id[2], Timestamp: id[3], ChainId: id[4]}
+	supID := suptypes.Identifier{Origin: ibID.Origin, BlockNumber: ibID.BlockNumber.Uint64(), LogIndex: uint32(ibID.LogIndex.Uint64()), Timestamp: ibID.Timestamp.Uint64(), ChainID: opeth.ChainIDFromUInt64(ibID.ChainId.Uint64())}
+	access := supID.ChecksumArgs(msgHash).Access()
+	al := types.AccessList{{Address: inboxAddr, StorageKeys: suptypes.EncodeAccessList([]suptypes.Access{access})}}
+	auth.AccessList = al
+	ib, err := inboxbinding.NewInbox(inboxAddr, cli)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := ib.ValidateMessage(auth, ibID, msgHash)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("relay tx: %s\n", tx.Hash().Hex())
+	r, err := bind.WaitMined(ctx, cli, tx)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status != types.ReceiptStatusSuccessful {
+		return r, fmt.Errorf("relay failed, status=%d", r.Status)
+	}
+	return r, nil
+}
+
+// relayMessageHashBatch submits multiple identical CrossL2Inbox.validateMessage txs with ascending nonces as a JSON-RPC batch.
+func relayMessageHashBatch(dstRPC string, privKey string, id [5]*big.Int, msgHash common.Hash, mult int) error {
+	if mult <= 1 {
+		_, err := relayMessageHash(dstRPC, privKey, id, msgHash)
+		return err
+	}
+	ctx, cancel := contextWithTimeout(90 * time.Second)
+	defer cancel()
+
+	pk, err := parseECDSA(privKey)
+	if err != nil {
+		return err
+	}
+	cli, err := ethclient.DialContext(ctx, dstRPC)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	chainID, err := cli.ChainID(ctx)
+	if err != nil {
+		return err
+	}
+	tip, err := cli.SuggestGasTipCap(ctx)
+	if err != nil {
+		return err
+	}
+	hdr, err := cli.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return err
+	}
+	base := hdr.BaseFee
+	if base == nil {
+		base = big.NewInt(0)
+	}
+	gasTip := tip
+	gasFee := new(big.Int).Add(new(big.Int).Mul(base, big.NewInt(2)), tip)
+
+	// From address
+	from := crypto.PubkeyToAddress(pk.PublicKey)
+
+	// Build calldata for validateMessage(Identifier, bytes32)
+	inboxAddr := common.HexToAddress("0x4200000000000000000000000000000000000022")
+	// ABI encode call
+	ibabi, err := abi.JSON(strings.NewReader(inboxbinding.InboxMetaData.ABI))
+	if err != nil {
+		return err
+	}
+	originAddr := common.BytesToAddress(id[0].Bytes())
+	ibID := inboxbinding.Identifier{Origin: originAddr, BlockNumber: id[1], LogIndex: id[2], Timestamp: id[3], ChainId: id[4]}
+	data, err := ibabi.Pack("validateMessage", ibID, msgHash)
+	if err != nil {
+		return err
+	}
+
+	// Access list
+	supID := suptypes.Identifier{Origin: ibID.Origin, BlockNumber: ibID.BlockNumber.Uint64(), LogIndex: uint32(ibID.LogIndex.Uint64()), Timestamp: ibID.Timestamp.Uint64(), ChainID: opeth.ChainIDFromUInt64(ibID.ChainId.Uint64())}
+	access := supID.ChecksumArgs(msgHash).Access()
+	al := types.AccessList{{Address: inboxAddr, StorageKeys: suptypes.EncodeAccessList([]suptypes.Access{access})}}
+
+	// Fetch base nonce
+	baseNonce, err := cli.PendingNonceAt(ctx, from)
+	if err != nil {
+		return err
+	}
+
+	// Build and sign mult txs
+	txs := make([]*types.Transaction, 0, mult)
+	for i := 0; i < mult; i++ {
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:    chainID,
+			Nonce:      baseNonce + uint64(i),
+			GasTipCap:  gasTip,
+			GasFeeCap:  gasFee,
+			Gas:        1_500_000,
+			To:         &inboxAddr,
+			Value:      big.NewInt(0),
+			Data:       data,
+			AccessList: al,
+		})
+		stx, err := types.SignTx(tx, types.NewLondonSigner(chainID), pk)
+		if err != nil {
+			return err
+		}
+		txs = append(txs, stx)
+	}
+
+	// Batch send
+	rpcClient, err := rpc.DialContext(ctx, dstRPC)
+	if err != nil {
+		return err
+	}
+	defer rpcClient.Close()
+	results := make([]string, len(txs))
+	elems := make([]rpc.BatchElem, 0, len(txs))
+	for i, tx := range txs {
+		raw, err := tx.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		elems = append(elems, rpc.BatchElem{Method: "eth_sendRawTransaction", Args: []interface{}{"0x" + common.Bytes2Hex(raw)}, Result: &results[i]})
+	}
+	if err := rpcClient.BatchCallContext(ctx, elems); err != nil {
+		return err
+	}
+	for i, el := range elems {
+		if el.Error != nil {
+			fmt.Printf("batch[%d] error: %v\n", i, el.Error)
+		} else if results[i] != "" {
+			fmt.Printf("batch[%d] tx: %s\n", i, results[i])
+		}
+	}
+	return nil
+}
+
 // waitSV2CrossPast waits until the CrossSafe head for a chain surpasses the given block number.
 func waitSV2CrossPast(sv2URL string, chainID string, rpcURL string, minBlock uint64, deadline time.Time, interval time.Duration) error {
 	client := &http.Client{Timeout: 3 * time.Second}
@@ -674,6 +986,129 @@ func sendSimpleTxBoth(rpcs []string, privKey string, overallTimeout time.Duratio
 		}
 		if err := sendSimpleTx(url, privKey, overallTimeout); err != nil {
 			return fmt.Errorf("rpc %s: %w", url, err)
+		}
+	}
+	return nil
+}
+
+// (removed old simple-tx batch helpers)
+func sendBatchToRPC(rpcURL, privKey string, repeat int, overallTimeout time.Duration) error {
+	ctx, cancel := contextWithTimeout(overallTimeout)
+	defer cancel()
+
+	cli, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+
+	// Parse key
+	var pkObj *ecdsa.PrivateKey
+	if privKey != "" {
+		sk := strings.TrimPrefix(privKey, "0x")
+		if pk, err := crypto.HexToECDSA(sk); err == nil {
+			pkObj = pk
+		} else {
+			return fmt.Errorf("parse key: %w", err)
+		}
+	} else {
+		tmp, err := crypto.GenerateKey()
+		if err != nil {
+			return err
+		}
+		pkObj = tmp
+	}
+
+	from := crypto.PubkeyToAddress(pkObj.PublicKey)
+	to := from
+	chainID, err := cli.ChainID(ctx)
+	if err != nil {
+		return err
+	}
+	baseNonce, err := cli.PendingNonceAt(ctx, from)
+	if err != nil {
+		return err
+	}
+	tipCap, err := cli.SuggestGasTipCap(ctx)
+	if err != nil {
+		return err
+	}
+	header, err := cli.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return err
+	}
+	base := header.BaseFee
+	if base == nil {
+		base = big.NewInt(0)
+	}
+	feeCap := new(big.Int).Add(new(big.Int).Mul(base, big.NewInt(2)), tipCap)
+
+	// Build and sign transactions with ascending nonce
+	txs := make([]*types.Transaction, 0, repeat)
+	for i := 0; i < repeat; i++ {
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:   chainID,
+			Nonce:     baseNonce + uint64(i),
+			GasTipCap: tipCap,
+			GasFeeCap: feeCap,
+			Gas:       21000,
+			To:        &to,
+			Value:     big.NewInt(0),
+			Data:      nil,
+		})
+		stx, err := types.SignTx(tx, types.NewLondonSigner(chainID), pkObj)
+		if err != nil {
+			return err
+		}
+		txs = append(txs, stx)
+	}
+
+	// Prepare batch of eth_sendRawTransaction calls
+	type req struct {
+		Method  string        `json:"method"`
+		Params  []interface{} `json:"params"`
+		ID      int           `json:"id"`
+		JSONRPC string        `json:"jsonrpc"`
+	}
+	calls := make([]req, 0, len(txs))
+	for i, tx := range txs {
+		raw, err := tx.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		calls = append(calls, req{Method: "eth_sendRawTransaction", Params: []interface{}{"0x" + common.Bytes2Hex(raw)}, ID: i + 1, JSONRPC: "2.0"})
+	}
+
+	// Use low-level RPC client for batch
+	rpcClient, err := rpc.DialContext(ctx, rpcURL)
+	if err != nil {
+		return err
+	}
+	defer rpcClient.Close()
+
+	// Prepare batch elems
+	results := make([]string, len(calls))
+	elems := make([]rpc.BatchElem, 0, len(calls))
+	for i := range calls {
+		elems = append(elems, rpc.BatchElem{
+			Method: "eth_sendRawTransaction",
+			Args:   calls[i].Params,
+			Result: &results[i],
+		})
+	}
+	// Execute batch
+	if err := rpcClient.BatchCallContext(ctx, elems); err != nil {
+		return err
+	}
+
+	// Print tx hashes for visibility
+	for i, el := range elems {
+		if el.Error != nil {
+			fmt.Printf("batch[%d] error: %v\n", i, el.Error)
+			continue
+		}
+		if results[i] != "" {
+			fmt.Printf("batch[%d] tx: %s\n", i, results[i])
 		}
 	}
 	return nil

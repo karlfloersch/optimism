@@ -15,6 +15,21 @@ import (
 	supervisorTypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
+type checkAccessListCache map[string]bool
+
+func (c *checkAccessListCache) Add(k supervisorTypes.Access, v bool) {
+	enc := supervisorTypes.EncodeAccessList([]supervisorTypes.Access{k})[0]
+	key := fmt.Sprintf("%s-%s", enc.Hex(), k.Checksum.String())
+	(*c)[key] = v
+}
+
+func (c checkAccessListCache) Get(k supervisorTypes.Access) (bool, bool) {
+	enc := supervisorTypes.EncodeAccessList([]supervisorTypes.Access{k})[0]
+	key := fmt.Sprintf("%s-%s", enc.Hex(), k.Checksum.String())
+	v, ok := c[key]
+	return v, ok
+}
+
 // CheckAccessList validates an access list of messages, parsing each entry and checking if the referenced logs exist.
 // This method provides the same functionality as the CheckAccessList function in the original supervisor.
 //
@@ -37,14 +52,6 @@ func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.
 	if !enabled {
 		s.log.Info("Access list validation disabled, returning success", "function", "CheckAccessList")
 		return nil
-	}
-
-	// Validate safety level
-	switch minSafety {
-	case supervisorTypes.LocalUnsafe, supervisorTypes.CrossUnsafe, supervisorTypes.LocalSafe, supervisorTypes.CrossSafe, supervisorTypes.Finalized:
-		// valid safety level
-	default:
-		return fmt.Errorf("unexpected minSafety level: %v", minSafety)
 	}
 
 	// Parse and validate each access entry
@@ -77,6 +84,19 @@ func (s *Supervisor) CheckAccessList(ctx context.Context, inboxEntries []common.
 // checkAccessEntry validates a single access entry by checking if the referenced log exists and matches the checksum
 func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.Access) error {
 	chainID, _ := acc.ChainID.Uint64()
+
+	v, ok := s.checkAccessListCache.Get(acc)
+	if ok {
+		// cached response: valid
+		if v {
+			s.log.Info("CheckAccessList: cached response: valid", "function", "checkAccessEntry", "chain_id", chainID, "block_number", acc.BlockNumber, "log_index", acc.LogIndex, "timestamp", acc.Timestamp, "checksum", acc.Checksum)
+			return nil
+		}
+		// cached response: invalid
+		s.log.Info("CheckAccessList: cached response: invalid", "function", "checkAccessEntry", "chain_id", chainID, "block_number", acc.BlockNumber, "log_index", acc.LogIndex, "timestamp", acc.Timestamp, "checksum", acc.Checksum)
+		return fmt.Errorf("cached response: invalid")
+	}
+	s.log.Info("CheckAccessList: cached response: not cached", "function", "checkAccessEntry", "chain_id", chainID, "block_number", acc.BlockNumber, "log_index", acc.LogIndex, "timestamp", acc.Timestamp, "checksum", acc.Checksum)
 
 	// Get the chain container for the specified chain ID
 	s.mu.Lock()
@@ -116,6 +136,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	execClient, err := sources.NewL2Client(client, s.log, nil, sources.L2ClientDefaultConfig(container.virtualCfg.Rcfg, false))
 	if err != nil {
 		s.log.Error("Failed to create L2 client", "function", "checkAccessEntry", "chain_id", chainID, "error", err)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("failed to create L2 client: %w", err)
 	}
 
@@ -123,12 +144,14 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	blockRef, err := execClient.L2BlockRefByNumber(ctx, acc.BlockNumber)
 	if err != nil {
 		s.log.Error("Failed to get block by number", "function", "checkAccessEntry", "chain_id", chainID, "block_number", acc.BlockNumber, "error", err)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("failed to get block %d: %w", acc.BlockNumber, err)
 	}
 
 	// Verify timestamp matches
 	if blockRef.Time != acc.Timestamp {
 		s.log.Error("Timestamp mismatch", "function", "checkAccessEntry", "chain_id", chainID, "expected", acc.Timestamp, "got", blockRef.Time)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("timestamp mismatch: expected %d, got %d", acc.Timestamp, blockRef.Time)
 	}
 
@@ -136,6 +159,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	_, receipts, err := execClient.FetchReceipts(ctx, blockRef.Hash)
 	if err != nil {
 		s.log.Error("Failed to fetch receipts", "function", "checkAccessEntry", "chain_id", chainID, "block_hash", blockRef.Hash, "error", err)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("failed to fetch receipts for block %s: %w", blockRef.Hash, err)
 	}
 
@@ -158,6 +182,7 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 
 	if targetLog == nil {
 		s.log.Error("Log index not found", "function", "checkAccessEntry", "chain_id", chainID, "log_index", acc.LogIndex, "block_number", acc.BlockNumber)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("log index %d not found in block %d", acc.LogIndex, acc.BlockNumber)
 	}
 
@@ -184,9 +209,11 @@ func (s *Supervisor) checkAccessEntry(ctx context.Context, acc supervisorTypes.A
 	// Verify checksum matches
 	if actualChecksum != acc.Checksum {
 		s.log.Error("Checksum mismatch", "function", "checkAccessEntry", "chain_id", chainID, "expected", acc.Checksum, "got", actualChecksum)
+		s.checkAccessListCache.Add(acc, false)
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", common.Hash(acc.Checksum).Hex(), common.Hash(actualChecksum).Hex())
 	}
 
 	s.log.Debug("Checksum matches", "function", "checkAccessEntry", "chain_id", chainID, "checksum", actualChecksum)
+	s.checkAccessListCache.Add(acc, true)
 	return nil
 }

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: load-test <funded-keys-file> <num-actors> [args-out-file]
+# - Sources variables.sh to discover Docker ports
+# - Generates relay args via msgcheck valid-msg and saves to args-out-file (default demo/loadtest/relay-args.json)
+# - Spawns N actors (run-load) each with a different private key
+# - Kills all actors on exit
+
+if [[ $# -lt 2 ]]; then
+  echo "usage: $(basename "$0") <funded-keys-file> <num-actors> [args-out-file]" >&2
+  exit 1
+fi
+
+KEYS_FILE="$1"
+NUM_ACTORS="$2"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEMO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$DEMO_DIR/../.." && pwd)"
+ARGS_FILE="${3:-"$SCRIPT_DIR/relay-args.json"}"
+
+# Source helper variables for Docker discovery
+. "$DEMO_DIR/variables.sh"
+
+# Decide RPCs from variables if available
+RPC901="${CHAIN_2151908_RPC:-http://127.0.0.1:9545}"
+RPC902="${CHAIN_2151909_RPC:-http://127.0.0.1:9546}"
+
+RUN_LOAD="$SCRIPT_DIR/run-load"
+
+# Start a 1s ticker to print a timestamped separator for QPS sense
+ticker_pid=""
+( while true; do echo "----------$(date +%s)-------"; sleep 1; done ) &
+ticker_pid=$!
+
+# Generate relay args once for all actors
+mkdir -p "$SCRIPT_DIR"
+echo "Generating relay args to $ARGS_FILE using RPC901=$RPC901 RPC902=$RPC902..."
+(cd "$REPO_ROOT" && go run ./op-up/cmd/msgcheck --rpc-901="$RPC901" --rpc-902="$RPC902" --mode=valid-msg --priv-key="${DEFAULT_PRIV_KEY}" --save-args-file="$ARGS_FILE")
+
+# Start actors
+pids=()
+count=0
+while IFS=, read -r priv addr; do
+  [[ -z "$priv" ]] && continue
+  [[ "$priv" =~ ^# ]] && continue
+  priv="$(echo "$priv" | xargs)"
+  if [[ -n "$priv" ]]; then
+    "$RUN_LOAD" "$count" "$priv" "$ARGS_FILE" &
+    pid=$!
+    pids+=("$pid")
+    count=$((count+1))
+    echo "Started actor $count PID=$pid"
+    [[ "$count" -ge "$NUM_ACTORS" ]] && break
+  fi
+done < "$KEYS_FILE"
+
+if [[ "$count" -lt "$NUM_ACTORS" ]]; then
+  echo "Warning: only $count keys found, fewer actors started" >&2
+fi
+
+cleanup() {
+  echo "Cleaning up ${#pids[@]} actors..."
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" || true
+    fi
+  done
+  if [[ -n "${ticker_pid:-}" ]] && kill -0 "$ticker_pid" 2>/dev/null; then
+    kill "$ticker_pid" || true
+  fi
+  wait || true
+}
+trap cleanup INT TERM EXIT
+
+wait

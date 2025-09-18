@@ -1,0 +1,1 @@
+for pid in $(pgrep -f 'op-supervisor-v2/demo/loadtest/(run-load|load-test)|op-up/cmd/msgcheck'); do kill -9 "$pid"; done

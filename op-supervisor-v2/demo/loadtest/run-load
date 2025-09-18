@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: run-load <worker-number> <private-key> <args-file> [rand-size]
+# Loops forever relaying CrossL2Inbox.validateMessage using msgcheck relay-file.
+# 50/50 chance to mutate logIndex (checksum arg) on each iteration.
+
+if [[ $# -lt 3 ]]; then
+  echo "usage: $(basename "$0") <worker-number> <private-key> <args-file> [rand-size]" >&2
+  exit 1
+fi
+
+WORKER="$1"
+PRIV_KEY="$2"
+ARGS_FILE="$3"
+RANDSIZE="${4:-10}"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEMO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$DEMO_DIR/../.." && pwd)"
+# Colors for label output (use $'..' to interpret escapes at assignment time)
+GREEN=$'\033[32m'
+RED=$'\033[31m'
+RESET=$'\033[0m'
+while true; do
+  RAND=$(( RANDOM % RANDSIZE ))
+  if [ "$RAND" -eq 0 ]; then
+    MUTATE="--mutate-checksum=true"
+    LABEL="Invalid"
+  else
+    MUTATE="--mutate-checksum=false"
+    LABEL="Valid"
+  fi
+  set +e
+  out=$( (cd "$REPO_ROOT" && go run ./op-up/cmd/msgcheck --mode=relay-file --priv-key="$PRIV_KEY" --args-file="$ARGS_FILE" $MUTATE --mult=10) 2>&1 )
+  status=$?
+  set -e
+  # Drop trailing "exit status N" lines to surface the real error/info line
+  filtered=$(printf "%s\n" "$out" | sed 's/\r$//' | sed '/^exit status [0-9][0-9]*$/d')
+  last=$(echo "$filtered" | awk 'NF{last=$0} END{print last}')
+  if [[ -z "$last" && $status -eq 0 ]]; then
+    last="ok"
+  elif [[ -z "$last" ]]; then
+    last="error"
+  fi
+  # Colorize label and compute warning if outcome mismatches expectation
+  if [[ "$LABEL" == "Valid" ]]; then
+    colored="${GREEN}[Valid]${RESET}:"
+  else
+    colored="${RED}[Invalid]${RESET}:"
+  fi
+  printf "%-10s %-12s %s%s\n" "$WORKER:" "$colored" "$last"
+  sleep "0.$(( (RANDOM % 5) + 1 ))"
+done

@@ -1,0 +1,11 @@
+{
+  "dst_rpc": "http://127.0.0.1:57149",
+  "identifier": {
+    "origin": "0x4200000000000000000000000000000000000023",
+    "blockNumber": "391",
+    "logIndex": "0",
+    "timestamp": "1758166772",
+    "chainId": "2151908"
+  },
+  "msg_hash": "0x43c2c22c485f4c2658375eafda5068b7654b238d721c5ceeccbf1e6f36b76f40"
+}

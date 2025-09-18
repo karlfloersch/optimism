@@ -56,6 +56,10 @@ type Supervisor struct {
 	// testability hooks
 	fetchSyncStatus func(ctx context.Context, rpc string) (*eth.SyncStatus, error)
 	rollbackFn      func(ctx context.Context, chainID uint64, toBlock uint64) error
+
+	// cache to avoid excessive access to Execution Engines
+	// this would not be in production, a block builder would have a better, dedicated cache
+	checkAccessListCache checkAccessListCache
 }
 
 // crossSafeMD contains metadata for a cross-safe timestamp entry
@@ -88,6 +92,7 @@ func NewSupervisor(l log.Logger) *Supervisor {
 	// initialize shared linker state
 	s.l1ScopeLabel = defaultScopeLabel()
 	s.checkAccessListEnabled = true
+	s.checkAccessListCache = make(checkAccessListCache)
 
 	// default fetcher dials the op-node and returns SyncStatus
 	s.fetchSyncStatus = func(ctx context.Context, rpc string) (*eth.SyncStatus, error) {
@@ -935,7 +940,7 @@ func (s *Supervisor) validateExecutingMessages(ctx context.Context, activeChains
 			}
 		}
 	}
-	s.log.Info("Execution message validation completed", "function", "validateExecutingMessages", "total_messages", totalCount, "invalid_messages", invalidCount)
+	s.log.Info("Execution message validation completed", "function", "validateExecutingMessages", "total_messages", totalCount, "invalid_messages", invalidCount, "timestamp", ts)
 	return allValid
 }
 
