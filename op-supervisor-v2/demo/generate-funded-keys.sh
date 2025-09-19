@@ -28,7 +28,7 @@ echo "  Output File: $KEYS_FILE"
 echo ""
 
 # Change to op-up directory to access Go modules
-cd "$SCRIPT_DIR/../../../karls-op/op-up" || {
+cd "$SCRIPT_DIR/../../op-up" || {
     echo "ERROR: Could not find op-up directory" >&2
     exit 1
 }

@@ -2,7 +2,7 @@ set shell := ["/bin/bash", "-cu"]
 
 # Usage: just -f op-up/justfile deploy chain_id=901
 deploy chain_id:
-op-up/main.go    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && {{justfile_directory()}}/deploy-sepolia.sh {{chain_id}}
+    set -euo pipefail; . {{justfile_directory()}}/external-l1.env && {{justfile_directory()}}/deploy-sepolia.sh {{chain_id}}
 
 # Usage: just -f op-up/justfile deploy2 chain_id_a=901 chain_id_b=902
 deploy2 chain_id_a chain_id_b:

@@ -14,8 +14,8 @@ if [ -z "${CHAIN_2151908_RPC:-}" ] || [ -z "${CHAIN_2151909_RPC:-}" ] || [ -z "$
 fi
 
 # Change to op-up directory to run msgcheck
-cd "$SCRIPT_DIR/../../../karls-op/op-up" || {
-    echo "ERROR: Could not find op-up directory at $SCRIPT_DIR/../../../karls-op/op-up" >&2
+cd "$SCRIPT_DIR/../../op-up" || {
+    echo "ERROR: Could not find op-up directory at $SCRIPT_DIR/../../op-up" >&2
     exit 1
 }
 
