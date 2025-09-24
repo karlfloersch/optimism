@@ -13,6 +13,11 @@ This document describes enabling op-node to source safe and finalized L2 heads f
 - Minimize diffs: handful of if-guards + a small poller + flags/wiring.
 
 ### 2) Flags and config
+- Added to op-node CLI flags (implemented):
+  - --safe-blocks-rpc (string; stubbed; logs and exits)
+  - Env: OP_NODE_SAFE_BLOCKS_RPC (for in-process tests)
+- Pending (not yet implemented):
+  - --safe-blocks-rpc-poll-interval (duration; default 2s)
 - Add to op-node CLI flags:
   - `--safe-blocks-rpc` (string; if set, enables external safe/finalized sourcing)
   - `--safe-blocks-rpc-poll-interval` (duration; default 2s)
@@ -355,7 +360,8 @@ Outcome
 - [x] Milestone 1: Baseline Sepolia sync
   - Run a test that proves we can sync Sepolia
   - SOLVED: ./op-acceptance-tests/tests/sync_tester/sync_tester_ext_el and sync_tester_ext_el_tip can be run to prove safe head progression.
-- [ ] Milestone 2: Introduce minimal guards (no behavior change yet)
+- [x] Milestone 2: Introduce minimal guards (no behavior change yet)
+  - Implemented --safe-blocks-rpc (default off). When set, op-node logs and exits (stub). Baseline passes when unset.
   - Add inert feature-flag plumbing; ensure baseline still passes when off and `--safe-blocks-rpc` is unset.
 - [ ] Milestone 3: Enable safe-blocks RPC, preserve baseline behavior
   - Start with `--safe-blocks-rpc` and re-run block 20 parity check.
