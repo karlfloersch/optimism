@@ -188,7 +188,7 @@ func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64) (*sysgo.
 	l.Info("L2_CL_SYNCMODE", "value", L2CLSyncMode)
 
 	// Setup orchestrator
-	logger := testlog.Logger(gt, log.LevelInfo)
+	logger := testlog.Logger(gt, log.LevelDebug)
 	onFail := func(now bool) {
 		if now {
 			gt.FailNow()
