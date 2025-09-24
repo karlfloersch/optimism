@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -295,6 +296,12 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 			AltDA:                           altda.CLIConfig{},
 			IgnoreMissingPectraBlobSchedule: false,
 			ExperimentalOPStackAPI:          true,
+		}
+		// Minimal plumbing for experimental safe-blocks RPC flag in tests:
+		// allow configuring via OP_NODE_SAFE_BLOCKS_RPC env var to simulate CLI flag.
+		if v := os.Getenv("OP_NODE_SAFE_BLOCKS_RPC"); v != "" {
+			nodeCfg.SafeBlocksRPC = v
+			logger.Info("SAFE_BLOCKS_RPC test env detected; enabling stub", "endpoint", v)
 		}
 		if cfg.SafeDBPath != "" {
 			nodeCfg.SafeDBPath = cfg.SafeDBPath
