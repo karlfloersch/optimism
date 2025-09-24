@@ -305,6 +305,13 @@ var (
 		EnvVars:  prefixEnvVars("SAFEDB_PATH"),
 		Category: OperationsCategory,
 	}
+	// Experimental: Safe-blocks RPC feature flag (minimal plumbing)
+	SafeBlocksRPC = &cli.StringFlag{
+		Name:     "safe-blocks-rpc",
+		Usage:    "External L2 RPC endpoint to query safe/finalized heads from (experimental)",
+		EnvVars:  prefixEnvVars("SAFE_BLOCKS_RPC"),
+		Category: RollupCategory,
+	}
 	/* Deprecated Flags */
 	L2EngineSyncEnabled = &cli.BoolFlag{
 		Name:    "l2.engine-sync",
@@ -456,6 +463,7 @@ var optionalFlags = []cli.Flag{
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,
 	SafeDBPath,
+	SafeBlocksRPC,
 	L2EngineKind,
 	L2EngineRpcTimeout,
 	InteropRPCAddr,

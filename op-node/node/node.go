@@ -134,6 +134,10 @@ func New(ctx context.Context, cfg *config.Config, log log.Logger, appVersion str
 
 func (n *OpNode) init(ctx context.Context, cfg *config.Config) error {
 	n.log.Info("Initializing rollup node", "version", n.appVersion)
+    if cfg.SafeBlocksRPC != "" {
+        n.log.Info("SAFE_BLOCKS_RPC feature flag set", "endpoint", cfg.SafeBlocksRPC)
+        return fmt.Errorf("SAFE_BLOCKS_RPC flag enabled: exiting early (stub)")
+    }
 	n.initEventSystem()
 	if err := n.initL1BeaconAPI(ctx, cfg); err != nil {
 		return err
