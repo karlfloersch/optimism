@@ -134,10 +134,6 @@ func New(ctx context.Context, cfg *config.Config, log log.Logger, appVersion str
 
 func (n *OpNode) init(ctx context.Context, cfg *config.Config) error {
 	n.log.Info("Initializing rollup node", "version", n.appVersion)
-    if cfg.SafeBlocksRPC != "" {
-        n.log.Info("SAFE_BLOCKS_RPC feature flag set", "endpoint", cfg.SafeBlocksRPC)
-        return fmt.Errorf("SAFE_BLOCKS_RPC flag enabled: exiting early (stub)")
-    }
 	n.initEventSystem()
 	if err := n.initL1BeaconAPI(ctx, cfg); err != nil {
 		return err
@@ -226,7 +222,9 @@ func (n *OpNode) initL1Handlers(cfg *config.Config) error {
 		// TODO(#16917) Remove Event System Refactor Comments
 		//  FinalizeL1Event fan out is updated to procedural method calls
 		n.l2Driver.StatusTracker.OnL1Finalized(sig)
-		n.l2Driver.Finalizer.OnL1Finalized(sig)
+		if n.l2Driver.Finalizer != nil {
+			n.l2Driver.Finalizer.OnL1Finalized(sig)
+		}
 		n.l2Driver.SyncDeriver.OnL1Finalized(ctx)
 	}
 

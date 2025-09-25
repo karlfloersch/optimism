@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/status"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
+	"github.com/ethereum-optimism/optimism/op-node/safeblocks"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/event"
 )
@@ -59,6 +60,8 @@ func NewDriver(
 	verifConfDepth := confdepth.NewConfDepth(driverCfg.VerifierConfDepth, statusTracker.L1Head, l1)
 
 	ec := engine.NewEngineController(driverCtx, l2, log, metrics, cfg, syncCfg, sys.Register("engine-controller", nil))
+	// Enable external safe-blocks sourcing if configured
+	ec.SetSafeBlocksRPCEnabled(driverCfg.SafeBlocksRPC != "")
 	// TODO(#17115): Refactor dependency cycles
 	ec.SetCrossUpdateHandler(statusTracker)
 
@@ -70,12 +73,27 @@ func NewDriver(
 	sys.Register("cl-sync", clSync)
 
 	var finalizer Finalizer
-	if cfg.AltDAEnabled() {
-		finalizer = finality.NewAltDAFinalizer(driverCtx, log, cfg, l1, altDA, ec)
+	if !ec.SafeBlocksRPCEnabled() {
+		if cfg.AltDAEnabled() {
+			finalizer = finality.NewAltDAFinalizer(driverCtx, log, cfg, l1, altDA, ec)
+		} else {
+			finalizer = finality.NewFinalizer(driverCtx, log, cfg, l1, ec)
+		}
+		sys.Register("finalizer", finalizer)
 	} else {
-		finalizer = finality.NewFinalizer(driverCtx, log, cfg, l1, ec)
+		log.Info("Safe-blocks RPC enabled: skipping local finalizer wiring")
 	}
-	sys.Register("finalizer", finalizer)
+
+	// If enabled, set up safe-blocks poller
+	if ec.SafeBlocksRPCEnabled() {
+		sbCfg := safeblocks.Config{RPC: driverCfg.SafeBlocksRPC, Interval: driverCfg.SafeBlocksRPCPollInterval}
+		poller := safeblocks.New(sbCfg, log, ec, l2)
+		sys.Register("safeblocks", event.DeriverFunc(func(evCtx context.Context, ev event.Event) bool { return false }))
+		// Start poller after driver start
+		go func() {
+			_ = poller.Start(driverCtx)
+		}()
+	}
 
 	attrHandler := attributes.NewAttributesHandler(log, cfg, driverCtx, l2, ec)
 	sys.Register("attributes-handler", attrHandler)

@@ -1,5 +1,7 @@
 package driver
 
+import "time"
+
 type Config struct {
 	// VerifierConfDepth is the distance to keep from the L1 head when reading L1 data for L2 derivation.
 	VerifierConfDepth uint64 `json:"verifier_conf_depth"`
@@ -24,4 +26,9 @@ type Config struct {
 	// RecoverMode forces the sequencer to select the next L1 Origin exactly, and create an empty block,
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
+
+	// Experimental: External safe/finalized sourcing via RPC
+	SafeBlocksRPC string `json:"safe_blocks_rpc"`
+	// Poll interval for external safe/finalized updates
+	SafeBlocksRPCPollInterval time.Duration `json:"safe_blocks_rpc_poll_interval"`
 }

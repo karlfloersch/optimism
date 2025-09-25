@@ -129,6 +129,10 @@ type EngineController struct {
 
 	// Handler for cross-unsafe and cross-safe updates
 	crossUpdateHandler CrossUpdateHandler
+
+	// When enabled, safe/finalization updates are sourced externally and these
+	// local derivation promotion paths should be inert.
+	safeBlocksRPCEnabled bool
 }
 
 func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger, m opmetrics.Metricer,
@@ -152,6 +156,12 @@ func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger,
 		emitter:    emitter,
 	}
 }
+
+// SafeBlocksRPCEnabled returns whether external safe-blocks sourcing is enabled.
+func (e *EngineController) SafeBlocksRPCEnabled() bool { return e.safeBlocksRPCEnabled }
+
+// SetSafeBlocksRPCEnabled toggles external safe-blocks sourcing behavior.
+func (e *EngineController) SetSafeBlocksRPCEnabled(enabled bool) { e.safeBlocksRPCEnabled = enabled }
 
 // State Getters
 
@@ -204,6 +214,7 @@ func (e *EngineController) IsEngineSyncing() bool {
 
 // SetFinalizedHead implements LocalEngineControl.
 func (e *EngineController) SetFinalizedHead(r eth.L2BlockRef) {
+	e.log.Info("Set finalized head", "hash", r.Hash, "num", r.Number)
 	e.metrics.RecordL2Ref("l2_finalized", r)
 	e.finalizedHead = r
 	e.needFCUCall = true
@@ -217,12 +228,14 @@ func (e *EngineController) SetPendingSafeL2Head(r eth.L2BlockRef) {
 
 // SetLocalSafeHead sets the local-safe head.
 func (e *EngineController) SetLocalSafeHead(r eth.L2BlockRef) {
+	e.log.Info("Set local safe head", "hash", r.Hash, "num", r.Number)
 	e.metrics.RecordL2Ref("l2_local_safe", r)
 	e.localSafeHead = r
 }
 
 // SetSafeHead sets the cross-safe head.
 func (e *EngineController) SetSafeHead(r eth.L2BlockRef) {
+	e.log.Info("Set safe head", "hash", r.Hash, "num", r.Number)
 	e.metrics.RecordL2Ref("l2_safe", r)
 	e.safeHead = r
 	e.needFCUCall = true
@@ -733,6 +746,9 @@ func (d *EngineController) RequestPendingSafeUpdate(ctx context.Context) {
 
 // TryUpdatePendingSafe updates the pending safe head if the new reference is newer
 func (e *EngineController) TryUpdatePendingSafe(ctx context.Context, ref eth.L2BlockRef, concluding bool, source eth.L1BlockRef) {
+	if e.safeBlocksRPCEnabled {
+		return
+	}
 	// Only promote if not already stale.
 	// Resets/overwrites happen through engine-resets, not through promotion.
 	if ref.Number > e.PendingSafeL2Head().Number {
@@ -747,6 +763,9 @@ func (e *EngineController) TryUpdatePendingSafe(ctx context.Context, ref eth.L2B
 
 // TryUpdateLocalSafe updates the local safe head if the new reference is newer and concluding
 func (e *EngineController) TryUpdateLocalSafe(ctx context.Context, ref eth.L2BlockRef, concluding bool, source eth.L1BlockRef) {
+	if e.safeBlocksRPCEnabled {
+		return
+	}
 	if concluding && ref.Number > e.LocalSafeL2Head().Number {
 		// Promote to local safe
 		e.log.Debug("Updating local safe", "local_safe", ref, "safe", e.SafeL2Head(), "unsafe", e.UnsafeL2Head())
@@ -766,6 +785,9 @@ func (e *EngineController) TryUpdateUnsafe(ctx context.Context, ref eth.L2BlockR
 }
 
 func (e *EngineController) PromoteSafe(ctx context.Context, ref eth.L2BlockRef, source eth.L1BlockRef) {
+	if e.safeBlocksRPCEnabled {
+		return
+	}
 	e.log.Debug("Updating safe", "safe", ref, "unsafe", e.UnsafeL2Head())
 	e.SetSafeHead(ref)
 	// Finalizer can pick up this safe cross-block now
@@ -781,6 +803,9 @@ func (e *EngineController) PromoteSafe(ctx context.Context, ref eth.L2BlockRef, 
 }
 
 func (e *EngineController) PromoteFinalized(ctx context.Context, ref eth.L2BlockRef) {
+	if e.safeBlocksRPCEnabled {
+		return
+	}
 	if ref.Number < e.Finalized().Number {
 		e.log.Error("Cannot rewind finality,", "ref", ref, "finalized", e.Finalized())
 		return
