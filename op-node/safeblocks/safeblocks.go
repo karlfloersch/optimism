@@ -102,35 +102,13 @@ func (c *Client) tick(ctx context.Context) {
 	// Fetch targets first
 	safeNum, hasSafe := c.fetch.SafeHeadNumber(ctx)
 	finNum, hasFin := c.fetch.FinalizedHeadNumber(ctx)
-	// Apply finalized conservatively to avoid invalid forkchoice state
+	// Step finalized by at most one, only when present locally and not beyond safe
 	if hasFin {
-		capNum := finNum
-		if hasSafe && capNum > safeNum {
-			capNum = safeNum
-		}
-		if u := c.eng.UnsafeL2Head(); capNum > u.Number {
-			capNum = u.Number
-		}
-		if s := c.eng.SafeL2Head(); capNum > s.Number {
-			capNum = s.Number
-		}
-		if capNum > 0 {
-			c.applyFinalizedByNumber(ctx, capNum)
-		}
+		c.stepFinalizedOne(ctx, finNum)
 	}
+	// Step safe by at most one: find common ancestor, then ingest next block
 	if hasSafe {
-		// Do not jump more than a small batch per tick; stay close to local safe
-		localSafe := c.eng.SafeL2Head()
-		target := safeNum
-		const maxAdvancePerTick = uint64(32)
-		if target > localSafe.Number+maxAdvancePerTick {
-			target = localSafe.Number + maxAdvancePerTick
-		}
-		// Provide a bounded P2P target near where we're actually advancing
-		if b, ok := c.fetch.BlockByNumber(ctx, target); ok {
-			c.eng.SetCrossUnsafeHead(b)
-		}
-		c.advanceSafeTo(ctx, target)
+		c.stepSafeOne(ctx, safeNum)
 	}
 }
 
@@ -195,6 +173,59 @@ func (c *Client) applyFinalizedByNumber(ctx context.Context, num uint64) {
 	}
 	if b, ok := c.fetch.BlockByNumber(ctx, num); ok {
 		c.applyFinalized(ctx, b)
+	}
+}
+
+// stepFinalizedOne advances finalized by at most one block towards targetFinNum.
+// It never moves beyond the local safe head, and only labels blocks present locally.
+func (c *Client) stepFinalizedOne(ctx context.Context, targetFinNum uint64) {
+	if targetFinNum == 0 {
+		return
+	}
+	// Do not finalize beyond safe or unsafe
+	if u := c.eng.UnsafeL2Head(); targetFinNum > u.Number {
+		targetFinNum = u.Number
+	}
+	if s := c.eng.SafeL2Head(); targetFinNum > s.Number {
+		targetFinNum = s.Number
+	}
+	localFin := c.eng.Finalized()
+	if localFin.Number >= targetFinNum {
+		return
+	}
+	// Walk back from localFin towards a matching remote ancestor if needed
+	anchor := localFin
+	// if local finalized is zero, try to anchor at current safe head number
+	if anchor.Number == 0 {
+		anchor = c.eng.SafeL2Head()
+	}
+	// Find first height <= anchor that matches remote
+	for {
+		if rb, ok := c.fetch.BlockByNumber(ctx, anchor.Number); ok {
+			if rb.Hash == anchor.Hash {
+				break
+			}
+		} else {
+			return
+		}
+		if anchor.Number == 0 {
+			return
+		}
+		anchor.Number--
+		// refresh anchor hash from local if available
+		if lr, err := c.l2.L2BlockRefByHash(ctx, anchor.Hash); err == nil {
+			anchor = lr
+		}
+	}
+	nextNum := anchor.Number + 1
+	if nextNum > targetFinNum {
+		return
+	}
+	// Only set finalized if the next block exists locally (safe loop will ingest it)
+	if rb, ok := c.fetch.BlockByNumber(ctx, nextNum); ok {
+		if _, err := c.l2.L2BlockRefByHash(ctx, rb.Hash); err == nil {
+			c.applyFinalized(ctx, rb)
+		}
 	}
 }
 
@@ -267,6 +298,67 @@ func (c *Client) advanceSafeTo(ctx context.Context, targetSafeNum uint64) {
 		c.applySafe(ctx, b)
 		local = b
 	}
+}
+
+// stepSafeOne advances safe by at most one block toward targetSafeNum.
+// It finds a common ancestor with the remote and commits exactly the next block.
+func (c *Client) stepSafeOne(ctx context.Context, targetSafeNum uint64) {
+	local := c.eng.SafeL2Head()
+	if local.Number >= targetSafeNum {
+		return
+	}
+	// Find common ancestor by comparing hashes at the same height, walking back
+	anchor := local
+	for {
+		// Remote block at current anchor height
+		rb, ok := c.fetch.BlockByNumber(ctx, anchor.Number)
+		if !ok {
+			return
+		}
+		if rb.Hash == anchor.Hash {
+			break
+		}
+		if anchor.Number == 0 {
+			return
+		}
+		// step back one height locally
+		anchor.Number--
+		// best-effort refresh of local anchor hash if available
+		if lr, err := c.l2.L2BlockRefByHash(ctx, anchor.Hash); err == nil {
+			anchor = lr
+		}
+	}
+	// Propose the next block after the matching anchor
+	nextNum := anchor.Number + 1
+	if nextNum > targetSafeNum {
+		return
+	}
+	nb, ok := c.fetch.BlockByNumber(ctx, nextNum)
+	if !ok {
+		return
+	}
+	if nb.ParentHash != anchor.Hash {
+		return
+	}
+	// Ensure present locally; if not, commit its payload
+	if _, err := c.l2.L2BlockRefByHash(ctx, nb.Hash); err != nil {
+		build := c.buildEnvelopeFn
+		if build == nil {
+			build = c.buildEnvelopeByNumber
+		}
+		if env, ok := build(ctx, nextNum); ok {
+			signed := &opsigner.SignedExecutionPayloadEnvelope{Envelope: env}
+			if err := c.eng.CommitBlock(ctx, signed); err != nil {
+				c.log.Warn("CommitBlock failed (single-step)", "num", nextNum, "err", err)
+				return
+			}
+		} else {
+			c.log.Warn("Failed to build payload envelope (single-step)", "num", nextNum)
+			return
+		}
+	}
+	c.log.Info("Applying safe block", "num", nb.Number, "hash", nb.Hash)
+	c.applySafe(ctx, nb)
 }
 
 // buildEnvelopeByNumber reconstructs an ExecutionPayloadEnvelope from JSON-RPC for the given block number.

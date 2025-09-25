@@ -4,6 +4,50 @@
 
 This document describes enabling op-node to source safe and finalized L2 heads from an external RPC by configuring a new CLI option. This is not a new "mode"; the behavior is enabled implicitly when the external safe-blocks RPC is configured.
 
+### Implementation update (current)
+- Single-block advancement per tick for both safe and finalized to favor simplicity and correctness.
+- Commit-based ingestion: when a needed block is not present locally, build an `eth.ExecutionPayloadEnvelope` from RPC using `op-service/sources.RPCBlock.ExecutionPayloadEnvelope(false)` and ingest it with `Engine.CommitBlock` before applying labels.
+- Common-ancestor reconciliation: start from the local safe tip, walk back comparing remote hashes at the same height to find a common ancestor, then only ingest/apply the next block (`ancestor.Number + 1`).
+- Finalized advances conservatively: never beyond local unsafe or local safe and only when the block exists locally.
+- EngineController guards: derivation-based promotions for safe/finalized are inert while SAFE_BLOCKS_RPC is enabled; unsafe remains unchanged. Head-setting methods log changes and trigger FCU via `TryUpdateEngine`.
+
+### Usage
+Run unit tests for safeblocks:
+```bash
+cd /Users/karl/workspace/optimism-1/op-node/safeblocks
+go test -v -count=1
+```
+
+Run the acceptance test (external EL):
+```bash
+cd /Users/karl/workspace/optimism-1/op-acceptance-tests/tests/sync_tester/sync_tester_ext_el
+OP_NODE_SAFE_BLOCKS_RPC=xxx \
+  CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH=true \
+  TAILSCALE_NETWORKING=true \
+  NETWORK_PRESET=op-sepolia \
+  GOMAXPROCS=5 \
+  go test -run '^TestSyncTesterExtEL$' -v -count=1 | tee test_safe_blocks.log | cat
+```
+
+Sync-to-tip variant:
+```bash
+cd /Users/karl/workspace/optimism-1/op-acceptance-tests/tests/sync_tester/sync_tester_ext_el_tip
+OP_NODE_SAFE_BLOCKS_RPC=xxx \
+  CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH=true \
+  TAILSCALE_NETWORKING=true \
+  NETWORK_PRESET=op-sepolia \
+  GOMAXPROCS=5 \
+  go test -run '^TestSyncTesterExtELTip$' -v -count=1 | tee test_safe_blocks_tip.log | cat
+```
+
+Quick verification greps:
+```bash
+grep -n "SAFE_BLOCKS_RPC test env detected\|Safe-blocks RPC enabled: skipping local finalizer wiring" test_safe_blocks*.log | head -n 20 | cat
+grep -n "Applying safe block" test_safe_blocks*.log | head -n 20 | cat
+grep -n "Set finalized head\|Set safe head\|Set local safe head" test_safe_blocks*.log | head -n 20 | cat
+grep -n "NewPayloadV[0-9]\|ForkchoiceUpdatedV[0-9]" test_safe_blocks*.log | head -n 20 | cat
+```
+
 ### 1) Goals and constraints
 - Disable existing safe derivation and finality logic when an external safe-blocks RPC is configured.
 - Do not touch unsafe logic/paths.
@@ -367,5 +411,6 @@ Outcome
   - Start with `--safe-blocks-rpc` and re-run block 20 parity check.
 - [ ] Milestone 4: Full sync-to-tip with P2P
   - Enable P2P and verify sustained sync to tip, including unsafe gossip.
+
 
 
