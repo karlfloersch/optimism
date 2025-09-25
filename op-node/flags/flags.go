@@ -312,6 +312,13 @@ var (
 		EnvVars:  prefixEnvVars("SAFE_BLOCKS_RPC"),
 		Category: RollupCategory,
 	}
+	SafeBlocksRPCPollInterval = &cli.DurationFlag{
+		Name:     "safe-blocks-rpc-poll-interval",
+		Usage:    "Polling interval for external safe-blocks RPC updates",
+		EnvVars:  prefixEnvVars("SAFE_BLOCKS_RPC_POLL_INTERVAL"),
+		Value:    time.Second * 2,
+		Category: RollupCategory,
+	}
 	/* Deprecated Flags */
 	L2EngineSyncEnabled = &cli.BoolFlag{
 		Name:    "l2.engine-sync",
@@ -464,6 +471,7 @@ var optionalFlags = []cli.Flag{
 	ConductorRpcTimeoutFlag,
 	SafeDBPath,
 	SafeBlocksRPC,
+	SafeBlocksRPCPollInterval,
 	L2EngineKind,
 	L2EngineRpcTimeout,
 	InteropRPCAddr,

@@ -88,8 +88,10 @@ type Config struct {
 	// Experimental. Enables new opstack RPC namespace. Used by op-test-sequencer.
 	ExperimentalOPStackAPI bool
 
-	// Experimental: If non-empty, enables external safe/finalized sourcing via RPC (plumbing only for now)
+	// Experimental: If non-empty, enables external safe/finalized sourcing via RPC
 	SafeBlocksRPC string
+	// Poll interval for external safe/finalized updates
+	SafeBlocksRPCPollInterval time.Duration
 }
 
 // ConductorRPCFunc retrieves the endpoint. The RPC may not immediately be available.

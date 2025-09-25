@@ -55,6 +55,9 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 	configPersistence := NewConfigPersistence(ctx)
 
 	driverConfig := NewDriverConfig(ctx)
+	// Thread safe-blocks RPC config into driver
+	driverConfig.SafeBlocksRPC = ctx.String(flags.SafeBlocksRPC.Name)
+	driverConfig.SafeBlocksRPCPollInterval = ctx.Duration(flags.SafeBlocksRPCPollInterval.Name)
 
 	p2pSignerSetup, err := p2pcli.LoadSignerSetup(ctx, log)
 	if err != nil {
@@ -120,8 +123,16 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 		IgnoreMissingPectraBlobSchedule: ctx.Bool(flags.IgnoreMissingPectraBlobSchedule.Name),
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
-		ExperimentalOPStackAPI: ctx.Bool(flags.ExperimentalOPStackAPI.Name),
-		SafeBlocksRPC:          ctx.String(flags.SafeBlocksRPC.Name),
+		ExperimentalOPStackAPI:    ctx.Bool(flags.ExperimentalOPStackAPI.Name),
+		SafeBlocksRPC:             ctx.String(flags.SafeBlocksRPC.Name),
+		SafeBlocksRPCPollInterval: ctx.Duration(flags.SafeBlocksRPCPollInterval.Name),
+	}
+
+	// Enforce: safe-blocks RPC cannot be used with interop/indexing
+	if cfg.SafeBlocksRPC != "" {
+		if ctx.String(flags.InteropRPCAddr.Name) != "" {
+			return nil, fmt.Errorf("safe-blocks RPC cannot run with interop/indexing enabled")
+		}
 	}
 
 	if err := cfg.LoadPersisted(log); err != nil {

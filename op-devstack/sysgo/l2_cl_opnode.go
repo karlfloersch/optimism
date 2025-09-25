@@ -301,7 +301,12 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 		// allow configuring via OP_NODE_SAFE_BLOCKS_RPC env var to simulate CLI flag.
 		if v := os.Getenv("OP_NODE_SAFE_BLOCKS_RPC"); v != "" {
 			nodeCfg.SafeBlocksRPC = v
-			logger.Info("SAFE_BLOCKS_RPC test env detected; enabling stub", "endpoint", v)
+			// Also wire through driver for guards/poller
+			nodeCfg.Driver.SafeBlocksRPC = v
+			if nodeCfg.Driver.SafeBlocksRPCPollInterval == 0 {
+				nodeCfg.Driver.SafeBlocksRPCPollInterval = time.Second * 2
+			}
+			logger.Info("SAFE_BLOCKS_RPC test env detected; enabling external safe/finalized sourcing", "endpoint", v)
 		}
 		if cfg.SafeDBPath != "" {
 			nodeCfg.SafeDBPath = cfg.SafeDBPath
