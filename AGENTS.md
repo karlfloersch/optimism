@@ -34,8 +34,6 @@ chain. Expect both L1 and L2 URLs to be available (for example, variables such a
 `L1_RPC_URL` and `L2_RPC_URL` when working against Sepolia). Use these exported
 values directly rather than hard-coding endpoints when running tools or scripts.
 
----
-
 ## Host Prerequisites
 
 - A pool of dedicated users: `agent-0`, `agent-1`, `agent-2`, and `agent-3` (expandable if needed).
