@@ -27,7 +27,12 @@ ssh "$REMOTE" "cd $TARGET_REPO && ./bin/agent user:claim --ref '$GIT_REF' --bran
 ./bin/agent finalize --ref "$GIT_REF" --remote "$REMOTE" --branch "$BRANCH"
 ```
 
----
+### Runtime Environment Variables
+
+The orchestration scripts export RPC endpoint environment variables for the active
+chain. Expect both L1 and L2 URLs to be available (for example, variables such as
+`L1_RPC_URL` and `L2_RPC_URL` when working against Sepolia). Use these exported
+values directly rather than hard-coding endpoints when running tools or scripts.
 
 ## Host Prerequisites
 
