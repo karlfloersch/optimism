@@ -32,6 +32,7 @@ type Engine interface {
 
 type L2 interface {
 	L2BlockRefByHash(ctx context.Context, hash common.Hash) (eth.L2BlockRef, error)
+	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
 }
 
 type Config struct {
@@ -339,6 +340,16 @@ func (c *Client) stepSafeOne(ctx context.Context, targetSafeNum uint64) {
 	}
 	if nb.ParentHash != anchor.Hash {
 		return
+	}
+	// Compare against local EL canonical block at the same height. If the local canonical
+	// does not match the remote block, reorg unsafe back to the local canonical block
+	// and try again on the next tick.
+	if localAtNext, err := c.l2.L2BlockRefByNumber(ctx, nextNum); err == nil {
+		if localAtNext.Hash != nb.Hash {
+			c.eng.SetUnsafeHead(localAtNext)
+			c.eng.TryUpdateEngine(ctx)
+			return
+		}
 	}
 	// Ensure present locally; if not, commit its payload
 	if _, err := c.l2.L2BlockRefByHash(ctx, nb.Hash); err != nil {

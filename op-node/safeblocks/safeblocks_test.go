@@ -47,6 +47,17 @@ func (f *fakeL2) L2BlockRefByHash(ctx context.Context, h common.Hash) (eth.L2Blo
 	return eth.L2BlockRef{}, context.DeadlineExceeded
 }
 
+func (f *fakeL2) L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error) {
+	// Create a synthetic hash from the number for tests that call by number.
+	// Tests that require specific hashes will ensure presence via markPresent.
+	b := []byte{byte(num)}
+	h := common.BytesToHash(b)
+	if f.present != nil && f.present[h] {
+		return eth.L2BlockRef{Hash: h, Number: num}, nil
+	}
+	return eth.L2BlockRef{}, context.DeadlineExceeded
+}
+
 func (f *fakeL2) markPresent(h common.Hash) {
 	if f.present == nil {
 		f.present = make(map[common.Hash]bool)
