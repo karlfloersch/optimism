@@ -305,17 +305,17 @@ var (
 		EnvVars:  prefixEnvVars("SAFEDB_PATH"),
 		Category: OperationsCategory,
 	}
-	// Experimental: Safe-blocks RPC feature flag (minimal plumbing)
-	SafeBlocksRPC = &cli.StringFlag{
-		Name:     "safe-blocks-rpc",
-		Usage:    "External L2 RPC endpoint to query safe/finalized heads from (experimental)",
-		EnvVars:  prefixEnvVars("SAFE_BLOCKS_RPC"),
+	// Experimental: Lite mode RPC feature flag (minimal plumbing)
+	LiteModeRPC = &cli.StringFlag{
+		Name:     "lite-mode-rpc",
+		Usage:    "External L2 RPC endpoint to source lite-mode heads (experimental)",
+		EnvVars:  prefixEnvVars("LITE_MODE_RPC"),
 		Category: RollupCategory,
 	}
-	SafeBlocksRPCPollInterval = &cli.DurationFlag{
-		Name:     "safe-blocks-rpc-poll-interval",
-		Usage:    "Polling interval for external safe-blocks RPC updates",
-		EnvVars:  prefixEnvVars("SAFE_BLOCKS_RPC_POLL_INTERVAL"),
+	LiteModePollInterval = &cli.DurationFlag{
+		Name:     "lite-mode-poll-interval",
+		Usage:    "Polling interval for external lite-mode RPC updates",
+		EnvVars:  prefixEnvVars("LITE_MODE_POLL_INTERVAL"),
 		Value:    time.Second * 2,
 		Category: RollupCategory,
 	}
@@ -470,8 +470,8 @@ var optionalFlags = []cli.Flag{
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,
 	SafeDBPath,
-	SafeBlocksRPC,
-	SafeBlocksRPCPollInterval,
+	LiteModeRPC,
+	LiteModePollInterval,
 	L2EngineKind,
 	L2EngineRpcTimeout,
 	InteropRPCAddr,

@@ -1,10 +1,10 @@
-## Safe-Blocks Poller Main Loop (Design)
+## Lite Mode Poller Main Loop (Design)
 
 This component advances the local safe/finalized labels from an external L2 RPC.
 
 Inputs:
-- Endpoint: `--safe-blocks-rpc` (also `OP_NODE_SAFE_BLOCKS_RPC`)
-- Poll interval: `--safe-blocks-rpc-poll-interval`
+- Endpoint: `--lite-mode-rpc` (also `OP_NODE_LITE_MODE_RPC`)
+- Poll interval: `--lite-mode-poll-interval`
 
 Responsibilities:
 - Read external safe/finalized heads periodically

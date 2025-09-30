@@ -55,9 +55,9 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 	configPersistence := NewConfigPersistence(ctx)
 
 	driverConfig := NewDriverConfig(ctx)
-	// Thread safe-blocks RPC config into driver
-	driverConfig.SafeBlocksRPC = ctx.String(flags.SafeBlocksRPC.Name)
-	driverConfig.SafeBlocksRPCPollInterval = ctx.Duration(flags.SafeBlocksRPCPollInterval.Name)
+	// Thread lite mode RPC config into driver
+	driverConfig.LiteModeRPC = ctx.String(flags.LiteModeRPC.Name)
+	driverConfig.LiteModePollInterval = ctx.Duration(flags.LiteModePollInterval.Name)
 
 	p2pSignerSetup, err := p2pcli.LoadSignerSetup(ctx, log)
 	if err != nil {
@@ -123,15 +123,15 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*config.Config, error) {
 		IgnoreMissingPectraBlobSchedule: ctx.Bool(flags.IgnoreMissingPectraBlobSchedule.Name),
 		FetchWithdrawalRootFromState:    ctx.Bool(flags.FetchWithdrawalRootFromState.Name),
 
-		ExperimentalOPStackAPI:    ctx.Bool(flags.ExperimentalOPStackAPI.Name),
-		SafeBlocksRPC:             ctx.String(flags.SafeBlocksRPC.Name),
-		SafeBlocksRPCPollInterval: ctx.Duration(flags.SafeBlocksRPCPollInterval.Name),
+		ExperimentalOPStackAPI: ctx.Bool(flags.ExperimentalOPStackAPI.Name),
+		LiteModeRPC:            ctx.String(flags.LiteModeRPC.Name),
+		LiteModePollInterval:   ctx.Duration(flags.LiteModePollInterval.Name),
 	}
 
-	// Enforce: safe-blocks RPC cannot be used with interop/indexing
-	if cfg.SafeBlocksRPC != "" {
+	// Enforce: lite mode RPC cannot be used with interop/indexing
+	if cfg.LiteModeRPC != "" {
 		if ctx.String(flags.InteropRPCAddr.Name) != "" {
-			return nil, fmt.Errorf("safe-blocks RPC cannot run with interop/indexing enabled")
+			return nil, fmt.Errorf("lite mode RPC cannot run with interop/indexing enabled")
 		}
 	}
 

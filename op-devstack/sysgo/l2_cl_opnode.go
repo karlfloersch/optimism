@@ -297,16 +297,16 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 			IgnoreMissingPectraBlobSchedule: false,
 			ExperimentalOPStackAPI:          true,
 		}
-		// Minimal plumbing for experimental safe-blocks RPC flag in tests:
-		// allow configuring via OP_NODE_SAFE_BLOCKS_RPC env var to simulate CLI flag.
-		if v := os.Getenv("OP_NODE_SAFE_BLOCKS_RPC"); v != "" {
-			nodeCfg.SafeBlocksRPC = v
+		// Minimal plumbing for experimental lite mode RPC flag in tests:
+		// allow configuring via OP_NODE_LITE_MODE_RPC env var to simulate CLI flag.
+		if v := os.Getenv("OP_NODE_LITE_MODE_RPC"); v != "" {
+			nodeCfg.LiteModeRPC = v
 			// Also wire through driver for guards/poller
-			nodeCfg.Driver.SafeBlocksRPC = v
-			if nodeCfg.Driver.SafeBlocksRPCPollInterval == 0 {
-				nodeCfg.Driver.SafeBlocksRPCPollInterval = time.Second * 2
+			nodeCfg.Driver.LiteModeRPC = v
+			if nodeCfg.Driver.LiteModePollInterval == 0 {
+				nodeCfg.Driver.LiteModePollInterval = time.Second * 2
 			}
-			logger.Info("SAFE_BLOCKS_RPC test env detected; enabling external safe/finalized sourcing", "endpoint", v)
+			logger.Info("LITE_MODE_RPC test env detected; enabling lite mode", "endpoint", v)
 		}
 		if cfg.SafeDBPath != "" {
 			nodeCfg.SafeDBPath = cfg.SafeDBPath

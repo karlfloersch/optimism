@@ -10,6 +10,7 @@ import (
 
 	gosync "sync"
 
+	"github.com/ethereum-optimism/optimism/op-node/litemode"
 	"github.com/ethereum-optimism/optimism/op-node/metrics/metered"
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/async"
@@ -23,7 +24,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/status"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
-	"github.com/ethereum-optimism/optimism/op-node/safeblocks"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/event"
 )
@@ -60,8 +60,8 @@ func NewDriver(
 	verifConfDepth := confdepth.NewConfDepth(driverCfg.VerifierConfDepth, statusTracker.L1Head, l1)
 
 	ec := engine.NewEngineController(driverCtx, l2, log, metrics, cfg, syncCfg, sys.Register("engine-controller", nil))
-	// Enable external safe-blocks sourcing if configured
-	ec.SetSafeBlocksRPCEnabled(driverCfg.SafeBlocksRPC != "")
+	// Enable external lite mode sourcing if configured
+	ec.SetLiteModeEnabled(driverCfg.LiteModeRPC != "")
 	// TODO(#17115): Refactor dependency cycles
 	ec.SetCrossUpdateHandler(statusTracker)
 
@@ -73,7 +73,7 @@ func NewDriver(
 	sys.Register("cl-sync", clSync)
 
 	var finalizer Finalizer
-	if !ec.SafeBlocksRPCEnabled() {
+	if !ec.LiteModeEnabled() {
 		if cfg.AltDAEnabled() {
 			finalizer = finality.NewAltDAFinalizer(driverCtx, log, cfg, l1, altDA, ec)
 		} else {
@@ -81,14 +81,14 @@ func NewDriver(
 		}
 		sys.Register("finalizer", finalizer)
 	} else {
-		log.Info("Safe-blocks RPC enabled: skipping local finalizer wiring")
+		log.Info("Lite mode RPC enabled: skipping local finalizer wiring")
 	}
 
-	// If enabled, set up safe-blocks poller
-	if ec.SafeBlocksRPCEnabled() {
-		sbCfg := safeblocks.Config{RPC: driverCfg.SafeBlocksRPC, Interval: driverCfg.SafeBlocksRPCPollInterval}
-		poller := safeblocks.New(sbCfg, log, ec, l2)
-		sys.Register("safeblocks", event.DeriverFunc(func(evCtx context.Context, ev event.Event) bool { return false }))
+	// If enabled, set up lite mode poller
+	if ec.LiteModeEnabled() {
+		sbCfg := litemode.Config{RPC: driverCfg.LiteModeRPC, Interval: driverCfg.LiteModePollInterval}
+		poller := litemode.New(sbCfg, log, ec, l2)
+		sys.Register("lite-mode", event.DeriverFunc(func(evCtx context.Context, ev event.Event) bool { return false }))
 		// Start poller after driver start
 		go func() {
 			_ = poller.Start(driverCtx)

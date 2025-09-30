@@ -130,9 +130,9 @@ type EngineController struct {
 	// Handler for cross-unsafe and cross-safe updates
 	crossUpdateHandler CrossUpdateHandler
 
-	// When enabled, safe/finalization updates are sourced externally and these
+	// When lite mode is enabled, safe/finalization updates are sourced externally and these
 	// local derivation promotion paths should be inert.
-	safeBlocksRPCEnabled bool
+	liteModeEnabled bool
 }
 
 func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger, m opmetrics.Metricer,
@@ -157,11 +157,11 @@ func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger,
 	}
 }
 
-// SafeBlocksRPCEnabled returns whether external safe-blocks sourcing is enabled.
-func (e *EngineController) SafeBlocksRPCEnabled() bool { return e.safeBlocksRPCEnabled }
+// LiteModeEnabled returns whether external lite mode sourcing is enabled.
+func (e *EngineController) LiteModeEnabled() bool { return e.liteModeEnabled }
 
-// SetSafeBlocksRPCEnabled toggles external safe-blocks sourcing behavior.
-func (e *EngineController) SetSafeBlocksRPCEnabled(enabled bool) { e.safeBlocksRPCEnabled = enabled }
+// SetLiteModeEnabled toggles external lite mode sourcing behavior.
+func (e *EngineController) SetLiteModeEnabled(enabled bool) { e.liteModeEnabled = enabled }
 
 // State Getters
 
@@ -746,7 +746,7 @@ func (d *EngineController) RequestPendingSafeUpdate(ctx context.Context) {
 
 // TryUpdatePendingSafe updates the pending safe head if the new reference is newer
 func (e *EngineController) TryUpdatePendingSafe(ctx context.Context, ref eth.L2BlockRef, concluding bool, source eth.L1BlockRef) {
-	if e.safeBlocksRPCEnabled {
+	if e.liteModeEnabled {
 		return
 	}
 	// Only promote if not already stale.
@@ -763,7 +763,7 @@ func (e *EngineController) TryUpdatePendingSafe(ctx context.Context, ref eth.L2B
 
 // TryUpdateLocalSafe updates the local safe head if the new reference is newer and concluding
 func (e *EngineController) TryUpdateLocalSafe(ctx context.Context, ref eth.L2BlockRef, concluding bool, source eth.L1BlockRef) {
-	if e.safeBlocksRPCEnabled {
+	if e.liteModeEnabled {
 		return
 	}
 	if concluding && ref.Number > e.LocalSafeL2Head().Number {
@@ -785,7 +785,7 @@ func (e *EngineController) TryUpdateUnsafe(ctx context.Context, ref eth.L2BlockR
 }
 
 func (e *EngineController) PromoteSafe(ctx context.Context, ref eth.L2BlockRef, source eth.L1BlockRef) {
-	if e.safeBlocksRPCEnabled {
+	if e.liteModeEnabled {
 		return
 	}
 	e.log.Debug("Updating safe", "safe", ref, "unsafe", e.UnsafeL2Head())
@@ -803,7 +803,7 @@ func (e *EngineController) PromoteSafe(ctx context.Context, ref eth.L2BlockRef, 
 }
 
 func (e *EngineController) PromoteFinalized(ctx context.Context, ref eth.L2BlockRef) {
-	if e.safeBlocksRPCEnabled {
+	if e.liteModeEnabled {
 		return
 	}
 	if ref.Number < e.Finalized().Number {

@@ -27,8 +27,8 @@ type Config struct {
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
 
-	// Experimental: External safe/finalized sourcing via RPC
-	SafeBlocksRPC string `json:"safe_blocks_rpc"`
-	// Poll interval for external safe/finalized updates
-	SafeBlocksRPCPollInterval time.Duration `json:"safe_blocks_rpc_poll_interval"`
+	// Experimental: External lite mode sourcing via RPC
+	LiteModeRPC string `json:"lite_mode_rpc"`
+	// Poll interval for external lite mode updates
+	LiteModePollInterval time.Duration `json:"lite_mode_poll_interval"`
 }

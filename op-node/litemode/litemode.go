@@ -1,4 +1,4 @@
-package safeblocks
+package litemode
 
 import (
 	"context"
@@ -53,7 +53,7 @@ type Client struct {
 }
 
 func New(cfg Config, log log.Logger, eng Engine, l2 L2) *Client {
-	c := &Client{cfg: cfg, log: log.New("module", "safeblocks"), eng: eng, l2: l2}
+	c := &Client{cfg: cfg, log: log.New("module", "lite-mode"), eng: eng, l2: l2}
 	c.buildEnvelopeFn = c.buildEnvelopeByNumber
 	return c
 }

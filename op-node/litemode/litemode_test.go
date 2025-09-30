@@ -1,4 +1,4 @@
-package safeblocks
+package litemode
 
 import (
 	"context"
