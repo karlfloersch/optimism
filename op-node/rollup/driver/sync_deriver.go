@@ -235,6 +235,12 @@ func (s *SyncDeriver) SyncStep() {
 		return
 	}
 
+	if s.SyncCfg.LiteModeEnabled {
+		// In lite mode, safe head progression comes from LiteModeSync polling a remote RPC,
+		// not from L1 derivation. Skip requesting derivation pipeline to generate attributes.
+		return
+	}
+
 	// Any now processed forkchoice updates will trigger CL-sync payload processing, if any payload is queued up.
 
 	// Since we don't force attributes to be processed at this point,

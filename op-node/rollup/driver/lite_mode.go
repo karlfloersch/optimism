@@ -197,11 +197,21 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 			return nil
 		}
 
-		// Fetch local parent block (at currentNum - 1)
-		localParent, err := lm.localEL.L2BlockRefByNumber(lm.ctx, currentNum-1)
-		if err != nil {
-			// This should never happen - indicates corrupted local state
-			return fmt.Errorf("local block missing at height %d (should exist): %w", currentNum-1, err)
+		// Determine the expected parent block
+		// First check if the parent is one of our known engine heads
+		var localParent eth.L2BlockRef
+		if currentNum-1 == localSafe.Number {
+			localParent = localSafe
+		} else if currentNum-1 == localFinalized.Number {
+			localParent = localFinalized
+		} else {
+			// Parent is not a current head - fetch from local EL
+			// This happens when walking back during reorg detection
+			localParentFromEL, err := lm.localEL.L2BlockRefByNumber(lm.ctx, currentNum-1)
+			if err != nil {
+				return fmt.Errorf("local block %d not available for verification", currentNum-1)
+			}
+			localParent = localParentFromEL
 		}
 
 		// Check if parent hashes match
