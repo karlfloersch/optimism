@@ -281,6 +281,13 @@ func (s *Driver) eventLoop() {
 
 	defer s.driverCancel()
 
+	// In lite mode, emit a reset event at startup to properly initialize forkchoice state.
+	// This triggers FindL2Heads which handles the case where unsafe < finalized.
+	if s.liteModeSync != nil {
+		s.log.Info("Lite mode: requesting initial engine reset to establish forkchoice state")
+		s.emitter.Emit(s.driverCtx, engine.ResetEngineRequestEvent{})
+	}
+
 	// reqStep requests a derivation step nicely, with a delay if this is a reattempt, or not at all if we already scheduled a reattempt.
 	reqStep := func() {
 		s.sched.RequestStep(s.driverCtx, false)
