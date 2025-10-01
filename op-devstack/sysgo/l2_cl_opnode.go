@@ -241,6 +241,19 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 		// Get the L2 engine address from the EL node (which can be a regular EL node or a SyncTesterEL)
 		l2EngineAddr := l2EL.EngineRPC()
 
+		// Check for lite mode environment variables
+		liteModeEnabled := false
+		liteModeRPC := ""
+		liteModePollInterval := time.Second
+		if os.Getenv("OP_NODE_ROLLUP_LITE_MODE") == "true" {
+			liteModeEnabled = true
+			liteModeRPC = os.Getenv("OP_NODE_ROLLUP_LITE_MODE_RPC")
+			if liteModeRPC == "" {
+				p.Require().FailNow("OP_NODE_ROLLUP_LITE_MODE enabled but OP_NODE_ROLLUP_LITE_MODE_RPC not set")
+			}
+			logger.Info("Lite mode enabled for op-node", "remote_rpc", liteModeRPC, "poll_interval", liteModePollInterval)
+		}
+
 		nodeCfg := &config.Config{
 			L1: &config.L1EndpointConfig{
 				L1NodeAddr:       l1EL.userRPC,
@@ -260,8 +273,11 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				BeaconAddr: l1CL.beaconHTTPAddr,
 			},
 			Driver: driver.Config{
-				SequencerEnabled:   cfg.IsSequencer,
-				SequencerConfDepth: 2,
+				SequencerEnabled:     cfg.IsSequencer,
+				SequencerConfDepth:   2,
+				LiteModeEnabled:      liteModeEnabled,
+				LiteModeRPC:          liteModeRPC,
+				LiteModePollInterval: liteModePollInterval,
 			},
 			Rollup:        *l2Net.rollupCfg,
 			DependencySet: depSet,
@@ -282,6 +298,7 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				SyncMode:                       syncMode,
 				SkipSyncStartCheck:             false,
 				SupportsPostFinalizationELSync: false,
+				LiteModeEnabled:                liteModeEnabled,
 			},
 			ConfigPersistence:               config.DisabledConfigPersistence{},
 			Metrics:                         opmetrics.CLIConfig{},
