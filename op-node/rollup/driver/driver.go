@@ -152,10 +152,19 @@ func NewDriver(
 		}
 
 		// Create L2 client for the remote endpoint
+		// Use nil metrics since we don't need caching metrics for remote client
 		remoteClientCfg := sources.L2ClientDefaultConfig(cfg, true)
-		remoteL2Client, err := sources.NewL2Client(remoteRPC, log, metrics, remoteClientCfg)
+		remoteL2Client, err := sources.NewL2Client(remoteRPC, log, nil, remoteClientCfg)
 		if err != nil {
 			log.Crit("Failed to create remote L2 client for lite mode", "err", err)
+		}
+
+		// Get local RPC client - need to cast l2 to *sources.EngineClient to access RPC
+		var localRPC RPCClient
+		if engineClient, ok := l2.(*sources.EngineClient); ok {
+			localRPC = engineClient.RPC
+		} else {
+			log.Crit("Local L2 client is not an EngineClient, cannot access RPC for lite mode")
 		}
 
 		liteModeSync = NewLiteModeSync(
@@ -165,7 +174,7 @@ func NewDriver(
 			remoteL2Client, // remoteEL
 			remoteRPC,      // remoteRPC
 			l2,             // localEL
-			l2.RPC,         // localRPC
+			localRPC,       // localRPC
 			ec,             // engine
 			driverCfg.LiteModePollInterval,
 		)

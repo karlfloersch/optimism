@@ -27,10 +27,10 @@ type RPCClient interface {
 // EngineCtrl provides methods to insert blocks and update heads
 type EngineCtrl interface {
 	InsertUnsafePayload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
-	PromoteSafe(ctx context.Context, ref eth.L2BlockRef, l1Origin eth.L1BlockRef) error
-	PromoteFinalized(ctx context.Context, ref eth.L2BlockRef) error
+	PromoteSafe(ctx context.Context, ref eth.L2BlockRef, l1Origin eth.L1BlockRef)
+	PromoteFinalized(ctx context.Context, ref eth.L2BlockRef)
 	SafeL2Head() eth.L2BlockRef
-	FinalizedL2Head() eth.L2BlockRef
+	Finalized() eth.L2BlockRef
 }
 
 // LiteModeSync handles safe/finalized head progression by polling an external RPC
@@ -198,11 +198,9 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 		return fmt.Errorf("failed to insert unsafe payload for block %d: %w", blockNum, err)
 	}
 
-	// Promote to safe with dummy L1 origin
+	// Promote to safe with dummy L1 origin (no error return)
 	dummyL1Origin := eth.L1BlockRef{}
-	if err := lm.engine.PromoteSafe(lm.ctx, blockRef, dummyL1Origin); err != nil {
-		return fmt.Errorf("failed to promote safe for block %d: %w", blockNum, err)
-	}
+	lm.engine.PromoteSafe(lm.ctx, blockRef, dummyL1Origin)
 
 	lm.log.Info("Lite mode: imported and promoted block to safe",
 		"number", blockRef.Number,
@@ -220,7 +218,7 @@ func (lm *LiteModeSync) updateFinalized() error {
 		return fmt.Errorf("failed to fetch remote finalized head: %w", err)
 	}
 
-	localFin := lm.engine.FinalizedL2Head()
+	localFin := lm.engine.Finalized()
 
 	// Only update if remote is ahead
 	if remoteFin.Number <= localFin.Number {
@@ -245,10 +243,8 @@ func (lm *LiteModeSync) updateFinalized() error {
 		return nil
 	}
 
-	// Promote to finalized
-	if err := lm.engine.PromoteFinalized(lm.ctx, remoteFin); err != nil {
-		return fmt.Errorf("failed to promote finalized for block %d: %w", remoteFin.Number, err)
-	}
+	// Promote to finalized (no error return)
+	lm.engine.PromoteFinalized(lm.ctx, remoteFin)
 
 	lm.log.Info("Lite mode: promoted block to finalized",
 		"number", remoteFin.Number,
