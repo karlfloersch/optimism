@@ -135,7 +135,10 @@ func (lm *LiteModeSync) isELSyncing() (bool, error) {
 	var result interface{}
 	err := lm.localRPC.CallContext(lm.ctx, &result, "eth_syncing")
 	if err != nil {
-		return false, err
+		// If eth_syncing is not available, assume not syncing and continue
+		// This is common for engine APIs that don't expose eth_syncing
+		lm.log.Debug("eth_syncing not available, assuming not syncing", "err", err)
+		return false, nil
 	}
 	// eth_syncing returns false when not syncing, or a sync status object when syncing
 	if result == nil || result == false {
