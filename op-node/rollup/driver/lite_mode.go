@@ -113,25 +113,10 @@ func (lm *LiteModeSync) syncStep() error {
 		return fmt.Errorf("failed to import next safe block: %w", err)
 	}
 
-	// Step 3: Update unsafe head from remote
-	if err := lm.updateUnsafe(); err != nil {
-		return fmt.Errorf("failed to update unsafe head: %w", err)
-	}
+	// Note: Unsafe head is managed by CL sync (P2P gossip) and safe head promotion
 
 	return nil
 }
-
-
-// updateUnsafe is a no-op in lite mode - we don't actively pull unsafe blocks
-// Instead, unsafe blocks come from CL sync (P2P gossip) or are promoted from safe
-func (lm *LiteModeSync) updateUnsafe() error {
-	// In lite mode, we focus on safe/finalized head progression
-	// The unsafe head will be managed by:
-	// 1. CL sync (if enabled) receiving unsafe blocks via P2P
-	// 2. Safe head promotion automatically updating unsafe head
-	return nil
-}
-
 // findAndImportNextSafe walks backward from remote safe to find where it connects to our chain
 func (lm *LiteModeSync) findAndImportNextSafe() error {
 	localSafe := lm.engine.SafeL2Head()
@@ -153,21 +138,19 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		return nil
 	}
 
-	// Optimization: For forward progress (common case), try the next block first
-	// This avoids walking backward through hundreds of blocks
-	startNum := localSafe.Number + 1
+	// Determine starting point for backward walk
+	var startNum uint64
 	if remoteSafe.Number < localSafe.Number {
-		// Reorg case: start from remoteSafe and walk backward
+		// Reorg case: remote is behind, start from remoteSafe
 		startNum = remoteSafe.Number
+	} else {
+		// Forward progress: remote is ahead, start from next block
+		// This avoids walking backward through hundreds of blocks
+		startNum = localSafe.Number + 1
 	}
 
 	// Walk backward from startNum until we find where it connects to our chain
 	for currentNum := startNum; currentNum > localFinalized.Number; currentNum-- {
-		// Don't try to import beyond what remote considers safe
-		if currentNum > remoteSafe.Number {
-			continue
-		}
-
 		// Fetch the remote block at this height
 		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
 		if err != nil {
