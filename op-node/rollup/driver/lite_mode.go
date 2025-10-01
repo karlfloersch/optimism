@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
@@ -15,6 +16,7 @@ import (
 type L2Source interface {
 	L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error)
 	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
+	L2BlockRefByNumberHeaderOnly(ctx context.Context, num uint64) (eth.L2BlockRef, error)
 	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
 }
 
@@ -151,8 +153,8 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 
 	// Walk backward from startNum until we find where it connects to our chain
 	for currentNum := startNum; currentNum > localFinalized.Number; currentNum-- {
-		// Fetch the remote block at this height
-		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
+		// Fetch the remote block header (optimization: no full transaction data)
+		remoteBlock, err := lm.remoteEL.L2BlockRefByNumberHeaderOnly(lm.ctx, currentNum)
 		if err != nil {
 			continue // Remote block unavailable, keep walking back
 		}
@@ -163,20 +165,20 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 			return fmt.Errorf("remote safe chain diverged below finalized (at block %d)", currentNum)
 		}
 
-		// Try to get the local parent block
-		var localParent eth.L2BlockRef
+		// Try to get the local parent hash
+		var localParentHash common.Hash
 		var haveParent bool
 		if parentNum == localSafe.Number {
-			localParent = localSafe
+			localParentHash = localSafe.Hash
 			haveParent = true
 		} else if parentNum == localFinalized.Number {
-			localParent = localFinalized
+			localParentHash = localFinalized.Hash
 			haveParent = true
 		} else {
-			// Parent is between finalized and safe - try to fetch from local EL
-			localParentFromEL, err := lm.localEL.L2BlockRefByNumber(lm.ctx, parentNum)
+			// Parent is between finalized and safe - try to fetch from local EL (header only)
+			localParentBlock, err := lm.localEL.L2BlockRefByNumberHeaderOnly(lm.ctx, parentNum)
 			if err == nil {
-				localParent = localParentFromEL
+				localParentHash = localParentBlock.Hash
 				haveParent = true
 			}
 			// If we don't have it locally, keep walking back
@@ -187,9 +189,13 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		}
 
 		// Check if this remote block builds on our local parent
-		if remoteBlock.ParentHash == localParent.Hash {
-			// Found the connection point! Insert this block and promote to safe
-			return lm.insertAndPromoteBlock(currentNum, remoteBlock)
+		if remoteBlock.ParentHash == localParentHash {
+			// Found the connection point! Now fetch full block data and insert
+			remoteBlockRef, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
+			if err != nil {
+				return fmt.Errorf("failed to fetch full block data for insertion: %w", err)
+			}
+			return lm.insertAndPromoteBlock(currentNum, remoteBlockRef)
 		}
 		// Hash mismatch - keep walking back
 	}

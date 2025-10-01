@@ -135,6 +135,31 @@ func (s *L2Client) L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2Bl
 	return ref, nil
 }
 
+// L2BlockRefByNumberHeaderOnly returns the [eth.L2BlockRef] for the given block number,
+// fetching only the block header (without full transaction data) for efficiency.
+// This is useful for verification where only hash/parentHash/number are needed.
+// Note: This returns a partial L2BlockRef with empty L1Origin and SequenceNumber fields.
+func (s *L2Client) L2BlockRefByNumberHeaderOnly(ctx context.Context, num uint64) (eth.L2BlockRef, error) {
+	// Fetch block info (header) without full transaction data
+	info, err := s.InfoByNumber(ctx, num)
+	if err != nil {
+		return eth.L2BlockRef{}, fmt.Errorf("failed to fetch block header at height %v: %w", num, err)
+	}
+
+	// Construct a minimal L2BlockRef with only hash/parentHash/number
+	// L1Origin and SequenceNumber are left as zero values since we don't have tx data
+	ref := eth.L2BlockRef{
+		Hash:       info.Hash(),
+		Number:     info.NumberU64(),
+		ParentHash: info.ParentHash(),
+		Time:       info.Time(),
+		// L1Origin and SequenceNumber require parsing the first transaction
+		// which is not available in header-only mode
+	}
+
+	return ref, nil
+}
+
 // L2BlockRefByHash returns the [eth.L2BlockRef] for the given block hash.
 // The returned BlockRef may not be in the canonical chain.
 func (s *L2Client) L2BlockRefByHash(ctx context.Context, hash common.Hash) (eth.L2BlockRef, error) {
