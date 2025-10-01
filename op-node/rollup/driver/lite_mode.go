@@ -9,7 +9,9 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/event"
 )
 
 // L2Source is the interface for querying L2 blocks and payloads from remote/local EL
@@ -20,10 +22,8 @@ type L2Source interface {
 	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
 }
 
-// EngineCtrl provides methods to insert blocks and update heads
+// EngineCtrl provides methods to update heads
 type EngineCtrl interface {
-	InsertUnsafePayload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
-	PromoteSafe(ctx context.Context, ref eth.L2BlockRef, l1Origin eth.L1BlockRef)
 	PromoteFinalized(ctx context.Context, ref eth.L2BlockRef)
 	SafeL2Head() eth.L2BlockRef
 	Finalized() eth.L2BlockRef
@@ -36,6 +36,7 @@ type LiteModeSync struct {
 	remoteEL     L2Source
 	localEL      L2Source
 	engine       EngineCtrl
+	emitter      event.Emitter
 	cfg          *rollup.Config
 	pollInterval time.Duration
 	closeCh      chan struct{}
@@ -48,7 +49,8 @@ func NewLiteModeSync(
 	cfg *rollup.Config,
 	remoteEL L2Source,
 	localEL L2Source,
-	engine EngineCtrl,
+	eng EngineCtrl,
+	emitter event.Emitter,
 	pollInterval time.Duration,
 ) *LiteModeSync {
 	return &LiteModeSync{
@@ -56,7 +58,8 @@ func NewLiteModeSync(
 		ctx:          ctx,
 		remoteEL:     remoteEL,
 		localEL:      localEL,
-		engine:       engine,
+		engine:       eng,
+		emitter:      emitter,
 		cfg:          cfg,
 		pollInterval: pollInterval,
 		closeCh:      make(chan struct{}),
@@ -204,7 +207,8 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 	return fmt.Errorf("remote safe chain diverged from local chain above finalized")
 }
 
-// insertAndPromoteBlock fetches the payload, inserts as unsafe, and promotes to safe
+// insertAndPromoteBlock fetches the payload and emits an event to process it
+// This follows the same pattern as normal derivation - emit PayloadProcessEvent
 func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2BlockRef) error {
 	// Fetch the full payload from remote
 	payload, err := lm.remoteEL.PayloadByNumber(lm.ctx, blockNum)
@@ -212,16 +216,18 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 		return fmt.Errorf("failed to fetch payload for block %d: %w", blockNum, err)
 	}
 
-	// Insert as unsafe
-	if err := lm.engine.InsertUnsafePayload(lm.ctx, payload, blockRef); err != nil {
-		return fmt.Errorf("failed to insert unsafe payload for block %d: %w", blockNum, err)
-	}
+	// Emit PayloadProcessEvent with Concluding=true to promote it to safe
+	// The EngineController will handle inserting via NewPayload and promoting to safe
+	// This is the same pattern used by normal derivation
+	lm.emitter.Emit(lm.ctx, engine.PayloadProcessEvent{
+		Concluding:   true, // This block should become safe
+		DerivedFrom:  eth.L1BlockRef{}, // Dummy L1 origin for lite mode
+		BuildStarted: time.Now(),
+		Envelope:     payload,
+		Ref:          blockRef,
+	})
 
-	// Promote to safe with dummy L1 origin (no error return)
-	dummyL1Origin := eth.L1BlockRef{}
-	lm.engine.PromoteSafe(lm.ctx, blockRef, dummyL1Origin)
-
-	lm.log.Info("Lite mode: imported and promoted block to safe",
+	lm.log.Info("Lite mode: emitted payload for processing",
 		"number", blockRef.Number,
 		"hash", blockRef.Hash,
 	)
@@ -278,8 +284,12 @@ func (lm *LiteModeSync) updateFinalized() error {
 		lm.log.Info("Lite mode: catching up safe head to finalized",
 			"old_safe", localSafe.Number,
 			"finalized", remoteFin.Number)
-		dummyL1Origin := eth.L1BlockRef{}
-		lm.engine.PromoteSafe(lm.ctx, remoteFin, dummyL1Origin)
+		// Emit LocalSafeUpdateEvent to promote safe to finalized
+		// This triggers the same flow as normal derivation
+		lm.emitter.Emit(lm.ctx, engine.LocalSafeUpdateEvent{
+			Ref:    remoteFin,
+			Source: eth.L1BlockRef{}, // Dummy L1 origin for lite mode
+		})
 	}
 
 	return nil

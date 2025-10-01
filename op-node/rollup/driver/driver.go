@@ -159,6 +159,9 @@ func NewDriver(
 			log.Crit("Failed to create remote L2 client for lite mode", "err", err)
 		}
 
+		// Create emitter for lite mode sync to emit events
+		liteModeEmitter := sys.Register("lite-mode-sync", nil)
+
 		liteModeSync = NewLiteModeSync(
 			driverCtx,
 			log,
@@ -166,6 +169,7 @@ func NewDriver(
 			remoteL2Client, // remoteEL
 			l2,             // localEL
 			ec,             // engine
+			liteModeEmitter,
 			driverCfg.LiteModePollInterval,
 		)
 	}
