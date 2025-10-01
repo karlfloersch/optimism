@@ -65,6 +65,8 @@ func NewLiteModeSync(
 // Start begins the sync loop
 func (lm *LiteModeSync) Start() {
 	lm.log.Info("Starting lite mode sync", "poll_interval", lm.pollInterval)
+	//  Note: Initial sync is handled in the sync loop itself to ensure
+	// it happens after the engine controller has loaded the finalized head
 	go lm.syncLoop()
 }
 
@@ -102,12 +104,17 @@ func (lm *LiteModeSync) syncLoop() {
 
 // syncStep performs one iteration of the sync loop
 func (lm *LiteModeSync) syncStep() error {
-	// Step 1: Find and import next safe block
+	// Step 1: Update unsafe head from remote
+	if err := lm.updateUnsafe(); err != nil {
+		return fmt.Errorf("failed to update unsafe head: %w", err)
+	}
+
+	// Step 2: Find and import next safe block
 	if err := lm.findAndImportNextSafe(); err != nil {
 		return fmt.Errorf("failed to import next safe block: %w", err)
 	}
 
-	// Step 2: Update finalized head
+	// Step 3: Update finalized head
 	if err := lm.updateFinalized(); err != nil {
 		return fmt.Errorf("failed to update finalized head: %w", err)
 	}
@@ -116,9 +123,33 @@ func (lm *LiteModeSync) syncStep() error {
 }
 
 
+// updateUnsafe is a no-op in lite mode - we don't actively pull unsafe blocks
+// Instead, unsafe blocks come from CL sync (P2P gossip) or are promoted from safe
+func (lm *LiteModeSync) updateUnsafe() error {
+	// In lite mode, we focus on safe/finalized head progression
+	// The unsafe head will be managed by:
+	// 1. CL sync (if enabled) receiving unsafe blocks via P2P
+	// 2. Safe head promotion automatically updating unsafe head
+	return nil
+}
+
 // findAndImportNextSafe walks back both chains to find common ancestor and imports next block
 func (lm *LiteModeSync) findAndImportNextSafe() error {
 	localSafe := lm.engine.SafeL2Head()
+	localFinalized := lm.engine.Finalized()
+
+	// If safe head is behind finalized, first promote safe to finalized
+	if localSafe.Number < localFinalized.Number {
+		lm.log.Info("Lite mode: promoting safe head to match finalized",
+			"old_safe", localSafe.Number,
+			"finalized", localFinalized.Number)
+		dummyL1Origin := eth.L1BlockRef{}
+		lm.engine.PromoteSafe(lm.ctx, localFinalized, dummyL1Origin)
+		// Update localSafe to the new value
+		localSafe = lm.engine.SafeL2Head()
+	}
+
+	// Now advance from the current safe head
 	currentNum := localSafe.Number + 1
 
 	for {

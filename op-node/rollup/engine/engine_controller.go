@@ -362,6 +362,15 @@ func (e *EngineController) initializeUnknowns(ctx context.Context) error {
 		}
 		e.SetFinalizedHead(finalizedRef)
 		e.log.Info("Loaded initial finalized block ref", "finalized", finalizedRef)
+
+		// If unsafe head is behind finalized, update it to match finalized
+		// This can happen when starting from a snapshot with a high finalized head
+		if e.unsafeHead.Number < finalizedRef.Number {
+			e.log.Warn("Initial unsafe head is behind finalized, updating to finalized",
+				"old_unsafe", e.unsafeHead.Number,
+				"finalized", finalizedRef.Number)
+			e.SetUnsafeHead(finalizedRef)
+		}
 	}
 	if e.safeHead == (eth.L2BlockRef{}) {
 		ref, err := e.engine.L2BlockRefByLabel(ctx, eth.Safe)
