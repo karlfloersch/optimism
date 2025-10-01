@@ -299,6 +299,27 @@ var (
 		EnvVars:  prefixEnvVars("ROLLUP_LOAD_PROTOCOL_VERSIONS"),
 		Category: RollupCategory,
 	}
+	/* Lite Mode Flags */
+	LiteModeEnabled = &cli.BoolFlag{
+		Name:     "rollup.lite-mode",
+		Usage:    "Enable lite mode: disables L1 derivation and sources safe/finalized heads from external RPC",
+		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE"),
+		Value:    false,
+		Category: RollupCategory,
+	}
+	LiteModeRPC = &cli.StringFlag{
+		Name:     "rollup.lite-mode-rpc",
+		Usage:    "External L2 RPC endpoint to query for safe/finalized heads in lite mode (required if lite-mode is enabled)",
+		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE_RPC"),
+		Category: RollupCategory,
+	}
+	LiteModePollInterval = &cli.DurationFlag{
+		Name:     "rollup.lite-mode-poll-interval",
+		Usage:    "Polling interval for querying safe/finalized heads from external RPC in lite mode",
+		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE_POLL_INTERVAL"),
+		Value:    time.Second * 1,
+		Category: RollupCategory,
+	}
 	SafeDBPath = &cli.StringFlag{
 		Name:     "safedb.path",
 		Usage:    "File path used to persist safe head update data. Disabled if not set.",
@@ -452,6 +473,9 @@ var optionalFlags = []cli.Flag{
 	HeartbeatURLFlag,
 	RollupHalt,
 	RollupLoadProtocolVersions,
+	LiteModeEnabled,
+	LiteModeRPC,
+	LiteModePollInterval,
 	ConductorEnabledFlag,
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,
