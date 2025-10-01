@@ -370,7 +370,8 @@ lm.engine.PromoteSafe(ctx, blockRef, eth.L1BlockRef{})
 ./op-acceptance-tests/tests/sync_tester/sync_tester_ext_el/run_test.sh
 
 # Lite mode (RPC-based sync)
-OP_NODE_LITE_MODE_RPC=https://ci-sepolia-l2.optimism.io \
+OP_NODE_ROLLUP_LITE_MODE=true \
+  OP_NODE_ROLLUP_LITE_MODE_RPC=https://ci-sepolia-l2.optimism.io \
   ./op-acceptance-tests/tests/sync_tester/sync_tester_ext_el/run_test.sh
 ```
 
@@ -387,7 +388,8 @@ CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH=true \
   TAILSCALE_NETWORKING=true \
   NETWORK_PRESET=op-sepolia \
   GOMAXPROCS=5 \
-  OP_NODE_LITE_MODE_RPC=<remote-rpc-url> \
+  OP_NODE_ROLLUP_LITE_MODE=true \
+  OP_NODE_ROLLUP_LITE_MODE_RPC=<remote-rpc-url> \
   go test -run '^TestSyncTesterExtEL$' -v -count=1
 ```
 
