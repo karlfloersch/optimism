@@ -72,4 +72,7 @@ type Config struct {
 	SkipSyncStartCheck bool `json:"skip_sync_start_check"`
 
 	SupportsPostFinalizationELSync bool `json:"supports_post_finalization_elsync"`
+
+	// LiteModeEnabled disables derivation and sources safe/finalized heads from an external RPC.
+	LiteModeEnabled bool `json:"lite_mode_enabled"`
 }

@@ -725,6 +725,10 @@ func (d *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
 }
 
 func (d *EngineController) RequestPendingSafeUpdate(ctx context.Context) {
+	// In lite mode, derivation is disabled
+	if d.syncCfg.LiteModeEnabled {
+		return
+	}
 	d.emitter.Emit(ctx, PendingSafeUpdateEvent{
 		PendingSafe: d.PendingSafeL2Head(),
 		Unsafe:      d.UnsafeL2Head(),
