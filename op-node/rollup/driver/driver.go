@@ -159,22 +159,12 @@ func NewDriver(
 			log.Crit("Failed to create remote L2 client for lite mode", "err", err)
 		}
 
-		// Get local RPC client - need to cast l2 to *sources.EngineClient to access RPC
-		var localRPC RPCClient
-		if engineClient, ok := l2.(*sources.EngineClient); ok {
-			localRPC = engineClient.RPC
-		} else {
-			log.Crit("Local L2 client is not an EngineClient, cannot access RPC for lite mode")
-		}
-
 		liteModeSync = NewLiteModeSync(
 			driverCtx,
 			log,
 			cfg,
 			remoteL2Client, // remoteEL
-			remoteRPC,      // remoteRPC
 			l2,             // localEL
-			localRPC,       // localRPC
 			ec,             // engine
 			driverCfg.LiteModePollInterval,
 		)

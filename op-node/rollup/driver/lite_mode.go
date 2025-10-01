@@ -19,11 +19,6 @@ type L2Source interface {
 	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
 }
 
-// RPCClient provides access to the underlying RPC client for custom calls
-type RPCClient interface {
-	CallContext(ctx context.Context, result interface{}, method string, args ...interface{}) error
-}
-
 // EngineCtrl provides methods to insert blocks and update heads
 type EngineCtrl interface {
 	InsertUnsafePayload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
@@ -38,9 +33,7 @@ type LiteModeSync struct {
 	log          log.Logger
 	ctx          context.Context
 	remoteEL     L2Source
-	remoteRPC    RPCClient
 	localEL      L2Source
-	localRPC     RPCClient
 	engine       EngineCtrl
 	cfg          *rollup.Config
 	pollInterval time.Duration
@@ -53,9 +46,7 @@ func NewLiteModeSync(
 	log log.Logger,
 	cfg *rollup.Config,
 	remoteEL L2Source,
-	remoteRPC RPCClient,
 	localEL L2Source,
-	localRPC RPCClient,
 	engine EngineCtrl,
 	pollInterval time.Duration,
 ) *LiteModeSync {
@@ -63,9 +54,7 @@ func NewLiteModeSync(
 		log:          log,
 		ctx:          ctx,
 		remoteEL:     remoteEL,
-		remoteRPC:    remoteRPC,
 		localEL:      localEL,
-		localRPC:     localRPC,
 		engine:       engine,
 		cfg:          cfg,
 		pollInterval: pollInterval,
@@ -81,7 +70,13 @@ func (lm *LiteModeSync) Start() {
 
 // Close stops the sync loop
 func (lm *LiteModeSync) Close() {
-	close(lm.closeCh)
+	select {
+	case <-lm.closeCh:
+		// Already closed
+		return
+	default:
+		close(lm.closeCh)
+	}
 }
 
 // syncLoop is the main sync loop that runs on a timer
@@ -107,22 +102,12 @@ func (lm *LiteModeSync) syncLoop() {
 
 // syncStep performs one iteration of the sync loop
 func (lm *LiteModeSync) syncStep() error {
-	// Step 1: Check if local EL is syncing
-	syncing, err := lm.isELSyncing()
-	if err != nil {
-		return fmt.Errorf("failed to check EL sync status: %w", err)
-	}
-	if syncing {
-		lm.log.Debug("Skipping lite mode sync - local EL is syncing")
-		return nil
-	}
-
-	// Step 2: Find and import next safe block
+	// Step 1: Find and import next safe block
 	if err := lm.findAndImportNextSafe(); err != nil {
 		return fmt.Errorf("failed to import next safe block: %w", err)
 	}
 
-	// Step 3: Update finalized head
+	// Step 2: Update finalized head
 	if err := lm.updateFinalized(); err != nil {
 		return fmt.Errorf("failed to update finalized head: %w", err)
 	}
@@ -130,22 +115,6 @@ func (lm *LiteModeSync) syncStep() error {
 	return nil
 }
 
-// isELSyncing checks if the local execution layer is syncing
-func (lm *LiteModeSync) isELSyncing() (bool, error) {
-	var result interface{}
-	err := lm.localRPC.CallContext(lm.ctx, &result, "eth_syncing")
-	if err != nil {
-		// If eth_syncing is not available, assume not syncing and continue
-		// This is common for engine APIs that don't expose eth_syncing
-		lm.log.Debug("eth_syncing not available, assuming not syncing", "err", err)
-		return false, nil
-	}
-	// eth_syncing returns false when not syncing, or a sync status object when syncing
-	if result == nil || result == false {
-		return false, nil
-	}
-	return true, nil
-}
 
 // findAndImportNextSafe walks back both chains to find common ancestor and imports next block
 func (lm *LiteModeSync) findAndImportNextSafe() error {
