@@ -72,17 +72,10 @@ var (
 			L1ELEndpoint:       "https://ci-mainnet-l1.optimism.io",
 		},
 	}
-	L2CLSyncMode = getSyncMode("L2_CL_SYNCMODE")
 )
 
-func getSyncMode(envVar string) sync.Mode {
-	if value := os.Getenv(envVar); value == sync.ELSyncString {
-		return sync.ELSync
-	}
-	return sync.CLSync
-}
-
-func TestSyncTesterExtEL(gt *testing.T) {
+// runSyncTest contains the shared test logic for all sync modes
+func runSyncTest(gt *testing.T, syncMode sync.Mode, liteModeRPC string) {
 	t := devtest.SerialT(gt)
 
 	if os.Getenv("CIRCLECI_PIPELINE_SCHEDULE_NAME") != "build_daily" && os.Getenv("CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH") != "true" {
@@ -92,10 +85,10 @@ func TestSyncTesterExtEL(gt *testing.T) {
 	l := t.Logger()
 	require := t.Require()
 	blocksToSync := uint64(20)
-	sys, target := setupSystem(gt, t, blocksToSync)
+	sys, target := setupSystem(gt, t, blocksToSync, syncMode, liteModeRPC)
 
 	attempts := 500
-	if L2CLSyncMode == sync.ELSync {
+	if syncMode == sync.ELSync {
 		// After EL Sync is finished, the FCU state will advance to target immediately so less attempts
 		attempts = 5
 		// Signal L2CL for triggering EL Sync
@@ -125,10 +118,28 @@ func TestSyncTesterExtEL(gt *testing.T) {
 	l.Info("SyncTester ExtEL test completed successfully", "l2cl_chain_id", sys.L2CL.ID().ChainID(), "l2cl_sync_status", l2CLSyncStatus)
 }
 
+// TestSyncTesterExtEL tests op-node syncing in CL or EL sync mode
+func TestSyncTesterExtEL(gt *testing.T) {
+	syncMode := sync.CLSync
+	if value := os.Getenv("L2_CL_SYNCMODE"); value == sync.ELSyncString {
+		syncMode = sync.ELSync
+	}
+	runSyncTest(gt, syncMode, "")
+}
+
+// TestSyncTesterExtELLiteMode tests op-node syncing in lite mode (RPC-based sync)
+func TestSyncTesterExtELLiteMode(gt *testing.T) {
+	liteModeRPC := os.Getenv("OP_NODE_ROLLUP_LITE_MODE_RPC")
+	if liteModeRPC == "" {
+		gt.Skip("OP_NODE_ROLLUP_LITE_MODE_RPC not set, skipping lite mode test")
+	}
+	runSyncTest(gt, sync.CLSync, liteModeRPC)
+}
+
 // setupSystem initializes the system for the test and returns the system and the target block number of the session
-func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64) (*presets.MinimalExternalEL, uint64) {
+func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, liteModeRPC string) (*presets.MinimalExternalEL, uint64) {
 	// Initialize orchestrator
-	orch, target := setupOrchestrator(gt, t, blocksToSync)
+	orch, target := setupOrchestrator(gt, t, blocksToSync, syncMode, liteModeRPC)
 	system := shim.NewSystem(t)
 	orch.Hydrate(system)
 
@@ -154,7 +165,7 @@ func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64) (*presets.Mini
 }
 
 // setupOrchestrator initializes and configures the orchestrator for the test and returns the orchestrator and the target block number of the session
-func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64) (*sysgo.Orchestrator, uint64) {
+func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, liteModeRPC string) (*sysgo.Orchestrator, uint64) {
 	l := t.Logger()
 	ctx := t.Ctx()
 	require := t.Require()
@@ -185,7 +196,8 @@ func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64) (*sysgo.
 	l.Info("L1_CL_BEACON_ENDPOINT", "value", config.L1CLBeaconEndpoint)
 	l.Info("L1_EL_ENDPOINT", "value", config.L1ELEndpoint)
 	l.Info("TAILSCALE_NETWORKING", "value", os.Getenv("TAILSCALE_NETWORKING"))
-	l.Info("L2_CL_SYNCMODE", "value", L2CLSyncMode)
+	l.Info("L2_CL_SYNCMODE", "value", syncMode)
+	l.Info("LITE_MODE_RPC", "value", liteModeRPC)
 
 	// Setup orchestrator
 	logger := testlog.Logger(gt, log.LevelInfo)
@@ -212,8 +224,16 @@ func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64) (*sysgo.
 	target := initial + blocksToSync
 	l.Info("LATEST_BLOCK", "latest_block", latestBlock.NumberU64(), "session_initial_block", initial, "target_block", target)
 
+	// Set lite mode environment variable if provided
+	// The op-node will automatically pick this up during initialization
+	if liteModeRPC != "" {
+		os.Setenv("OP_NODE_ROLLUP_LITE_MODE", "true")
+		os.Setenv("OP_NODE_ROLLUP_LITE_MODE_RPC", liteModeRPC)
+	}
+
 	opt := presets.WithExternalELWithSuperchainRegistry(config)
-	if L2CLSyncMode == sync.ELSync {
+
+	if syncMode == sync.ELSync {
 		chainCfg := chaincfg.ChainByName(config.L2NetworkName)
 		if chainCfg == nil {
 			panic(fmt.Sprintf("network %s not found in superchain registry", config.L2NetworkName))
