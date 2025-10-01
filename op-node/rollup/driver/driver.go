@@ -23,8 +23,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/status"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
+	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/event"
+	"github.com/ethereum-optimism/optimism/op-service/sources"
 )
 
 // NewDriver composes an events handler that tracks L1 state, triggers L2 Derivation, and optionally sequences new L2 blocks.
@@ -132,6 +134,43 @@ func NewDriver(
 		sequencer = sequencing.DisabledSequencer{}
 	}
 
+	// Initialize lite mode sync if enabled
+	var liteModeSync *LiteModeSync
+	if syncCfg.LiteModeEnabled {
+		if driverCfg.LiteModeRPC == "" {
+			log.Crit("Lite mode enabled but no remote RPC endpoint configured")
+		}
+
+		log.Info("Initializing lite mode sync",
+			"remote_rpc", driverCfg.LiteModeRPC,
+			"poll_interval", driverCfg.LiteModePollInterval)
+
+		// Create remote L2 client (no JWT needed for external RPCs)
+		remoteRPC, err := client.NewRPC(driverCtx, log, driverCfg.LiteModeRPC)
+		if err != nil {
+			log.Crit("Failed to create remote RPC client for lite mode", "err", err)
+		}
+
+		// Create L2 client for the remote endpoint
+		remoteClientCfg := sources.L2ClientDefaultConfig(cfg, true)
+		remoteL2Client, err := sources.NewL2Client(remoteRPC, log, metrics, remoteClientCfg)
+		if err != nil {
+			log.Crit("Failed to create remote L2 client for lite mode", "err", err)
+		}
+
+		liteModeSync = NewLiteModeSync(
+			driverCtx,
+			log,
+			cfg,
+			remoteL2Client, // remoteEL
+			remoteRPC,      // remoteRPC
+			l2,             // localEL
+			l2.RPC,         // localRPC
+			ec,             // engine
+			driverCfg.LiteModePollInterval,
+		)
+	}
+
 	driverEmitter := sys.Register("driver", nil)
 	driver := &Driver{
 		StatusTracker: statusTracker,
@@ -149,6 +188,7 @@ func NewDriver(
 		sequencer:     sequencer,
 		metrics:       metrics,
 		altSync:       altSync,
+		liteModeSync:  liteModeSync,
 	}
 
 	return driver
@@ -181,6 +221,9 @@ type Driver struct {
 
 	sequencer sequencing.SequencerIface
 
+	// Lite mode sync component (nil if not in lite mode)
+	liteModeSync *LiteModeSync
+
 	metrics Metrics
 	log     log.Logger
 
@@ -195,6 +238,12 @@ type Driver struct {
 func (s *Driver) Start() error {
 	log.Info("Starting driver", "sequencerEnabled", s.driverConfig.SequencerEnabled,
 		"sequencerStopped", s.driverConfig.SequencerStopped, "recoverMode", s.driverConfig.RecoverMode)
+
+	// Start lite mode sync if enabled
+	if s.liteModeSync != nil {
+		s.liteModeSync.Start()
+	}
+
 	if s.driverConfig.SequencerEnabled {
 		if s.driverConfig.RecoverMode {
 			log.Warn("sequencer is in recover mode")
@@ -218,6 +267,10 @@ func (s *Driver) Close() error {
 	s.driverCancel()
 	s.wg.Wait()
 	s.sequencer.Close()
+	// Close lite mode sync if enabled
+	if s.liteModeSync != nil {
+		s.liteModeSync.Close()
+	}
 	return nil
 }
 

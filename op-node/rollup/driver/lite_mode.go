@@ -12,17 +12,20 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
-// L2Chain is the interface for querying L2 blocks and payloads
-type L2Chain interface {
+// L2Source is the interface for querying L2 blocks and payloads from remote/local EL
+type L2Source interface {
 	L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error)
 	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
 	PayloadByNumber(ctx context.Context, number uint64) (*eth.ExecutionPayloadEnvelope, error)
-	// eth_syncing returns false (nil) when not syncing, or sync status when syncing
-	SyncStatus(ctx context.Context) (*eth.SyncStatus, error)
 }
 
-// EngineController provides methods to insert blocks and update heads
-type EngineController interface {
+// RPCClient provides access to the underlying RPC client for custom calls
+type RPCClient interface {
+	CallContext(ctx context.Context, result interface{}, method string, args ...interface{}) error
+}
+
+// EngineCtrl provides methods to insert blocks and update heads
+type EngineCtrl interface {
 	InsertUnsafePayload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
 	PromoteSafe(ctx context.Context, ref eth.L2BlockRef, l1Origin eth.L1BlockRef) error
 	PromoteFinalized(ctx context.Context, ref eth.L2BlockRef) error
@@ -34,9 +37,11 @@ type EngineController interface {
 type LiteModeSync struct {
 	log          log.Logger
 	ctx          context.Context
-	remoteEL     L2Chain
-	localEL      L2Chain
-	engine       EngineController
+	remoteEL     L2Source
+	remoteRPC    RPCClient
+	localEL      L2Source
+	localRPC     RPCClient
+	engine       EngineCtrl
 	cfg          *rollup.Config
 	pollInterval time.Duration
 	closeCh      chan struct{}
@@ -47,16 +52,20 @@ func NewLiteModeSync(
 	ctx context.Context,
 	log log.Logger,
 	cfg *rollup.Config,
-	remoteEL L2Chain,
-	localEL L2Chain,
-	engine EngineController,
+	remoteEL L2Source,
+	remoteRPC RPCClient,
+	localEL L2Source,
+	localRPC RPCClient,
+	engine EngineCtrl,
 	pollInterval time.Duration,
 ) *LiteModeSync {
 	return &LiteModeSync{
 		log:          log,
 		ctx:          ctx,
 		remoteEL:     remoteEL,
+		remoteRPC:    remoteRPC,
 		localEL:      localEL,
+		localRPC:     localRPC,
 		engine:       engine,
 		cfg:          cfg,
 		pollInterval: pollInterval,
@@ -123,12 +132,16 @@ func (lm *LiteModeSync) syncStep() error {
 
 // isELSyncing checks if the local execution layer is syncing
 func (lm *LiteModeSync) isELSyncing() (bool, error) {
-	status, err := lm.localEL.SyncStatus(lm.ctx)
+	var result interface{}
+	err := lm.localRPC.CallContext(lm.ctx, &result, "eth_syncing")
 	if err != nil {
 		return false, err
 	}
-	// SyncStatus returns nil when not syncing
-	return status != nil, nil
+	// eth_syncing returns false when not syncing, or a sync status object when syncing
+	if result == nil || result == false {
+		return false, nil
+	}
+	return true, nil
 }
 
 // findAndImportNextSafe walks back both chains to find common ancestor and imports next block
