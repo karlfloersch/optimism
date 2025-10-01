@@ -104,9 +104,9 @@ func (lm *LiteModeSync) syncLoop() {
 
 // syncStep performs one iteration of the sync loop
 func (lm *LiteModeSync) syncStep() error {
-	// Step 1: Update unsafe head from remote
-	if err := lm.updateUnsafe(); err != nil {
-		return fmt.Errorf("failed to update unsafe head: %w", err)
+	// Step 1: Update finalized head (may also catch up safe head)
+	if err := lm.updateFinalized(); err != nil {
+		return fmt.Errorf("failed to update finalized head: %w", err)
 	}
 
 	// Step 2: Find and import next safe block
@@ -114,9 +114,9 @@ func (lm *LiteModeSync) syncStep() error {
 		return fmt.Errorf("failed to import next safe block: %w", err)
 	}
 
-	// Step 3: Update finalized head
-	if err := lm.updateFinalized(); err != nil {
-		return fmt.Errorf("failed to update finalized head: %w", err)
+	// Step 3: Update unsafe head from remote
+	if err := lm.updateUnsafe(); err != nil {
+		return fmt.Errorf("failed to update unsafe head: %w", err)
 	}
 
 	return nil
@@ -145,29 +145,19 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 	}
 
 	// If we're already at or ahead of remote safe, nothing to do
+	// NOTE: This behavior of only advancing when remote is ahead (and not reorging when
+	// local is ahead) may be overly conservative. Ideally we should follow remote safe
+	// unconditionally, but for now we take the safer approach of only moving forward.
+	// TODO: Consider implementing proper reorg handling for safe head
 	if localSafe.Number >= remoteSafe.Number {
 		return nil
 	}
 
-	// If safe head is behind finalized, first promote safe to finalized
-	if localSafe.Number < localFinalized.Number {
-		lm.log.Info("Lite mode: promoting safe head to match finalized",
-			"old_safe", localSafe.Number,
-			"finalized", localFinalized.Number)
-		dummyL1Origin := eth.L1BlockRef{}
-		lm.engine.PromoteSafe(lm.ctx, localFinalized, dummyL1Origin)
-		// Update localSafe to the new value
-		localSafe = lm.engine.SafeL2Head()
-	}
-
-	// Now advance from the current safe head, but only up to remote safe
+	// Now advance from the current safe head up to remote safe
+	// Note: Safe head catch-up (when safe < finalized) is handled in updateFinalized
 	currentNum := localSafe.Number + 1
 
-	for {
-		// Don't try to import beyond what remote considers safe
-		if currentNum > remoteSafe.Number {
-			return nil
-		}
+	for currentNum <= remoteSafe.Number {
 
 		// Try to fetch the remote block at currentNum
 		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
@@ -226,6 +216,10 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		}
 		currentNum--
 	}
+
+	// Loop completed without finding a block to import
+	// This shouldn't happen in normal operation
+	return nil
 }
 
 // insertAndPromoteBlock fetches the payload, inserts as unsafe, and promotes to safe
@@ -293,6 +287,18 @@ func (lm *LiteModeSync) updateFinalized() error {
 		"number", remoteFin.Number,
 		"hash", remoteFin.Hash,
 	)
+
+	// If safe head is behind finalized after this update, catch it up
+	// This can happen when finalized jumps ahead (e.g., epoch boundary)
+	// while safe is still progressing block-by-block
+	localSafe := lm.engine.SafeL2Head()
+	if localSafe.Number < remoteFin.Number {
+		lm.log.Info("Lite mode: catching up safe head to finalized",
+			"old_safe", localSafe.Number,
+			"finalized", remoteFin.Number)
+		dummyL1Origin := eth.L1BlockRef{}
+		lm.engine.PromoteSafe(lm.ctx, remoteFin, dummyL1Origin)
+	}
 
 	return nil
 }
