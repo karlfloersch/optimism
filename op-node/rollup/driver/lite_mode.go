@@ -2,7 +2,6 @@ package driver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -133,93 +132,87 @@ func (lm *LiteModeSync) updateUnsafe() error {
 	return nil
 }
 
-// findAndImportNextSafe walks back both chains to find common ancestor and imports next block
+// findAndImportNextSafe walks backward from remote safe to find where it connects to our chain
 func (lm *LiteModeSync) findAndImportNextSafe() error {
 	localSafe := lm.engine.SafeL2Head()
 	localFinalized := lm.engine.Finalized()
 
-	// First, check what the remote considers safe
+	// Fetch what the remote considers safe
 	remoteSafe, err := lm.remoteEL.L2BlockRefByLabel(lm.ctx, eth.Safe)
 	if err != nil {
 		return fmt.Errorf("failed to fetch remote safe head: %w", err)
 	}
 
-	// If we're already at or ahead of remote safe, nothing to do
-	// NOTE: This behavior of only advancing when remote is ahead (and not reorging when
-	// local is ahead) may be overly conservative. Ideally we should follow remote safe
-	// unconditionally, but for now we take the safer approach of only moving forward.
-	// TODO: Consider implementing proper reorg handling for safe head
-	if localSafe.Number >= remoteSafe.Number {
+	// Don't move safe below finalized
+	if remoteSafe.Number < localFinalized.Number {
 		return nil
 	}
 
-	// Now advance from the current safe head up to remote safe
-	// Note: Safe head catch-up (when safe < finalized) is handled in updateFinalized
-	currentNum := localSafe.Number + 1
+	// If we're already at the target, nothing to do
+	if localSafe.Number == remoteSafe.Number && localSafe.Hash == remoteSafe.Hash {
+		return nil
+	}
 
-	for currentNum <= remoteSafe.Number {
+	// Optimization: For forward progress (common case), try the next block first
+	// This avoids walking backward through hundreds of blocks
+	startNum := localSafe.Number + 1
+	if remoteSafe.Number < localSafe.Number {
+		// Reorg case: start from remoteSafe and walk backward
+		startNum = remoteSafe.Number
+	}
 
-		// Try to fetch the remote block at currentNum
-		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
-		if err != nil {
-			// If remote block doesn't exist, walk back
-			if currentNum == 0 {
-				// We're at genesis and remote doesn't have any blocks ahead yet
-				// This is expected at startup - just wait for next poll cycle
-				return nil
-			}
-			currentNum--
+	// Walk backward from startNum until we find where it connects to our chain
+	for currentNum := startNum; currentNum > localFinalized.Number; currentNum-- {
+		// Don't try to import beyond what remote considers safe
+		if currentNum > remoteSafe.Number {
 			continue
 		}
 
-		// Special case for genesis block
-		if currentNum == 0 {
-			// Verify genesis blocks match
-			localGenesis, err := lm.localEL.L2BlockRefByNumber(lm.ctx, 0)
-			if err != nil {
-				return fmt.Errorf("failed to get local genesis: %w", err)
-			}
-			if remoteBlock.Hash != localGenesis.Hash {
-				return errors.New("genesis blocks do not match between local and remote")
-			}
-			// Genesis matches but we're already at genesis, nothing to import
-			// Wait for remote to produce block 1
-			return nil
+		// Fetch the remote block at this height
+		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
+		if err != nil {
+			continue // Remote block unavailable, keep walking back
 		}
 
-		// Determine the expected parent block
-		// First check if the parent is one of our known engine heads
+		// Get the parent block number
+		parentNum := currentNum - 1
+		if parentNum < localFinalized.Number {
+			return fmt.Errorf("remote safe chain diverged below finalized (at block %d)", currentNum)
+		}
+
+		// Try to get the local parent block
 		var localParent eth.L2BlockRef
-		if currentNum-1 == localSafe.Number {
+		var haveParent bool
+		if parentNum == localSafe.Number {
 			localParent = localSafe
-		} else if currentNum-1 == localFinalized.Number {
+			haveParent = true
+		} else if parentNum == localFinalized.Number {
 			localParent = localFinalized
+			haveParent = true
 		} else {
-			// Parent is not a current head - fetch from local EL
-			// This happens when walking back during reorg detection
-			localParentFromEL, err := lm.localEL.L2BlockRefByNumber(lm.ctx, currentNum-1)
-			if err != nil {
-				return fmt.Errorf("local block %d not available for verification", currentNum-1)
+			// Parent is between finalized and safe - try to fetch from local EL
+			localParentFromEL, err := lm.localEL.L2BlockRefByNumber(lm.ctx, parentNum)
+			if err == nil {
+				localParent = localParentFromEL
+				haveParent = true
 			}
-			localParent = localParentFromEL
+			// If we don't have it locally, keep walking back
 		}
 
-		// Check if parent hashes match
+		if !haveParent {
+			continue
+		}
+
+		// Check if this remote block builds on our local parent
 		if remoteBlock.ParentHash == localParent.Hash {
-			// Found common ancestor! Import this block and promote to safe
+			// Found the connection point! Insert this block and promote to safe
 			return lm.insertAndPromoteBlock(currentNum, remoteBlock)
 		}
-
-		// Hash mismatch - walk back both chains
-		if currentNum == 0 {
-			return errors.New("genesis blocks do not match - reorg at genesis")
-		}
-		currentNum--
+		// Hash mismatch - keep walking back
 	}
 
-	// Loop completed without finding a block to import
-	// This shouldn't happen in normal operation
-	return nil
+	// Walked all the way back to finalized without finding connection
+	return fmt.Errorf("remote safe chain diverged from local chain above finalized")
 }
 
 // insertAndPromoteBlock fetches the payload, inserts as unsafe, and promotes to safe
