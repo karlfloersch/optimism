@@ -242,15 +242,20 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 		// Get the L2 engine address from the EL node (which can be a regular EL node or a SyncTesterEL)
 		l2EngineAddr := l2EL.EngineRPC()
 
-		// Check for lite mode environment variables
-		liteModeEnabled := false
-		liteModeRPC := ""
+		// Check for lite mode configuration (from L2CLConfig or environment variables for backward compatibility)
+		liteModeEnabled := cfg.LiteModeEnabled
+		liteModeRPC := cfg.LiteModeRemoteRPC
 		liteModePollInterval := time.Second
-		if os.Getenv("OP_NODE_ROLLUP_LITE_MODE") == "true" {
+
+		// Fall back to environment variables if not configured via L2CLConfig
+		if !liteModeEnabled && os.Getenv("OP_NODE_ROLLUP_LITE_MODE") == "true" {
 			liteModeEnabled = true
 			liteModeRPC = os.Getenv("OP_NODE_ROLLUP_LITE_MODE_RPC")
+		}
+
+		if liteModeEnabled {
 			if liteModeRPC == "" {
-				p.Require().FailNow("OP_NODE_ROLLUP_LITE_MODE enabled but OP_NODE_ROLLUP_LITE_MODE_RPC not set")
+				p.Require().FailNow("Lite mode enabled but LiteModeRemoteRPC not set")
 			}
 			logger.Info("Lite mode enabled for op-node", "remote_rpc", liteModeRPC, "poll_interval", liteModePollInterval)
 		}

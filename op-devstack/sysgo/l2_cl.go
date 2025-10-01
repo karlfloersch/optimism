@@ -27,6 +27,11 @@ type L2CLConfig struct {
 
 	IsSequencer  bool
 	IndexingMode bool
+
+	// LiteModeEnabled disables L1 derivation and sources safe/finalized heads from an external RPC
+	LiteModeEnabled bool
+	// LiteModeRemoteRPC is the RPC endpoint to source safe/finalized heads from when LiteModeEnabled is true
+	LiteModeRemoteRPC string
 }
 
 func L2CLSequencer() L2CLOption {

@@ -138,6 +138,17 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 	localSafe := lm.engine.SafeL2Head()
 	localFinalized := lm.engine.Finalized()
 
+	// First, check what the remote considers safe
+	remoteSafe, err := lm.remoteEL.L2BlockRefByLabel(lm.ctx, eth.Safe)
+	if err != nil {
+		return fmt.Errorf("failed to fetch remote safe head: %w", err)
+	}
+
+	// If we're already at or ahead of remote safe, nothing to do
+	if localSafe.Number >= remoteSafe.Number {
+		return nil
+	}
+
 	// If safe head is behind finalized, first promote safe to finalized
 	if localSafe.Number < localFinalized.Number {
 		lm.log.Info("Lite mode: promoting safe head to match finalized",
@@ -149,25 +160,44 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		localSafe = lm.engine.SafeL2Head()
 	}
 
-	// Now advance from the current safe head
+	// Now advance from the current safe head, but only up to remote safe
 	currentNum := localSafe.Number + 1
 
 	for {
+		// Don't try to import beyond what remote considers safe
+		if currentNum > remoteSafe.Number {
+			return nil
+		}
+
 		// Try to fetch the remote block at currentNum
 		remoteBlock, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
 		if err != nil {
 			// If remote block doesn't exist, walk back
 			if currentNum == 0 {
-				return errors.New("reached genesis without finding common ancestor")
+				// We're at genesis and remote doesn't have any blocks ahead yet
+				// This is expected at startup - just wait for next poll cycle
+				return nil
 			}
 			currentNum--
 			continue
 		}
 
-		// Fetch local parent block (at currentNum - 1)
+		// Special case for genesis block
 		if currentNum == 0 {
-			return errors.New("cannot fetch parent of genesis block")
+			// Verify genesis blocks match
+			localGenesis, err := lm.localEL.L2BlockRefByNumber(lm.ctx, 0)
+			if err != nil {
+				return fmt.Errorf("failed to get local genesis: %w", err)
+			}
+			if remoteBlock.Hash != localGenesis.Hash {
+				return errors.New("genesis blocks do not match between local and remote")
+			}
+			// Genesis matches but we're already at genesis, nothing to import
+			// Wait for remote to produce block 1
+			return nil
 		}
+
+		// Fetch local parent block (at currentNum - 1)
 		localParent, err := lm.localEL.L2BlockRefByNumber(lm.ctx, currentNum-1)
 		if err != nil {
 			// This should never happen - indicates corrupted local state
@@ -182,7 +212,7 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 
 		// Hash mismatch - walk back both chains
 		if currentNum == 0 {
-			return errors.New("reached genesis without finding common ancestor")
+			return errors.New("genesis blocks do not match - reorg at genesis")
 		}
 		currentNum--
 	}

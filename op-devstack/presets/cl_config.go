@@ -31,3 +31,16 @@ func WithSafeDBEnabled() stack.CommonOption {
 				cfg.SafeDBPath = p.TempDir()
 			})))
 }
+
+// WithLiteMode configures verifier nodes to run in lite mode, sourcing safe/finalized heads from a remote RPC.
+// The remoteRPC parameter should be the RPC endpoint URL to source blocks from (typically the sequencer's RPC).
+// This function should be used with a specific node ID to configure only that node.
+func WithLiteMode(remoteRPC string) sysgo.L2CLOption {
+	return sysgo.L2CLOptionFn(func(p devtest.P, id stack.L2CLNodeID, cfg *sysgo.L2CLConfig) {
+		// Only enable lite mode on verifiers, not sequencers
+		if !cfg.IsSequencer {
+			cfg.LiteModeEnabled = true
+			cfg.LiteModeRemoteRPC = remoteRPC
+		}
+	})
+}
