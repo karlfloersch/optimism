@@ -351,8 +351,141 @@ lm.engine.PromoteSafe(ctx, blockRef, eth.L1BlockRef{})
    - Attacker intercepts RPC calls
    - Mitigation: Use TLS/authenticated RPC endpoints
 
+## Testing Strategy
+
+### Test Infrastructure
+
+**Primary Test:** `TestSyncTesterExtEL`
+- **Location:** `op-acceptance-tests/tests/sync_tester/sync_tester_ext_el/`
+- **Purpose:** Validates node syncing against external execution layer endpoints
+- **Network:** OP Sepolia testnet
+- **Requirements:** Tailscale connection with exit node `oplabs-tools-tailscale-tunnel`
+
+### Running Tests
+
+**Using the Test Runner Script:**
+
+```bash
+# Standard mode (derivation-based sync)
+./op-acceptance-tests/tests/sync_tester/sync_tester_ext_el/run_test.sh
+
+# Lite mode (RPC-based sync)
+OP_NODE_LITE_MODE_RPC=https://ci-sepolia-l2.optimism.io \
+  ./op-acceptance-tests/tests/sync_tester/sync_tester_ext_el/run_test.sh
+```
+
+**Manual Test Execution:**
+
+```bash
+cd op-acceptance-tests/tests/sync_tester/sync_tester_ext_el
+
+# Ensure Tailscale is configured
+tailscale set --exit-node=oplabs-tools-tailscale-tunnel
+
+# Run the test
+CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH=true \
+  TAILSCALE_NETWORKING=true \
+  NETWORK_PRESET=op-sepolia \
+  GOMAXPROCS=5 \
+  OP_NODE_LITE_MODE_RPC=<remote-rpc-url> \
+  go test -run '^TestSyncTesterExtEL$' -v -count=1
+```
+
+### Test Validation Checklist
+
+When validating lite mode implementation, verify:
+
+- [ ] **Test passes** with exit code 0
+- [ ] **Target block reached** (unsafe head matches target)
+- [ ] **Safe head progresses** independently from derivation
+- [ ] **Finalized head progresses** independently from derivation
+- [ ] **No derivation activity** in logs (pipeline should be idle)
+- [ ] **Sync time comparable** to standard mode (or faster)
+- [ ] **No errors** related to missing L1 origin data
+- [ ] **Clean shutdown** with no panics or critical errors
+
+### Expected Test Behavior
+
+**Standard Mode (Baseline):**
+- Derivation pipeline processes L1 data
+- Safe/finalized heads progress via L1 finality signals
+- Logs show "Derived attributes" messages
+- Runtime: ~3-4 minutes for 20 blocks
+
+**Lite Mode (Target):**
+- No derivation pipeline activity
+- Safe/finalized heads polled from remote RPC
+- Logs show "Lite mode" or similar messages
+- Runtime: Should be similar or faster
+
+### Test Monitoring
+
+The test can take 5-15 minutes depending on network conditions. Monitor progress by:
+
+1. **Check sync status** in logs:
+   ```
+   grep "Chain sync status" test_run_*.log | tail -n 10
+   ```
+
+2. **Watch for completion**:
+   ```
+   grep -E "PASS|FAIL" test_run_*.log
+   ```
+
+3. **Check for errors**:
+   ```
+   grep -E "ERROR|FATAL" test_run_*.log
+   ```
+
+### Automated Test Agent
+
+For long-running tests, use the general-purpose agent to:
+- Run test in background
+- Monitor progress every 60 seconds
+- Report final results
+
+**Agent Task Prompt:**
+```
+Run the sync test using run_test.sh script in background.
+Monitor the log file every 60 seconds.
+Report when test completes with PASS/FAIL status.
+Include final block sync status in report.
+```
+
+### Unit Tests
+
+In addition to acceptance tests, create unit tests for:
+
+**LiteModeSync Component:**
+```go
+// op-node/rollup/driver/lite_mode_test.go
+func TestLiteModeSync_FindCommonAncestor(t *testing.T) { /* ... */ }
+func TestLiteModeSync_ImportBlock(t *testing.T) { /* ... */ }
+func TestLiteModeSync_HandleReorg(t *testing.T) { /* ... */ }
+func TestLiteModeSync_ELSyncingCheck(t *testing.T) { /* ... */ }
+func TestLiteModeSync_FinalizedUpdate(t *testing.T) { /* ... */ }
+```
+
+**Mock Setup:**
+- Mock `L2Chain` interface for remote/local EL
+- Mock `EngineController` for head updates
+- Test error conditions (RPC failures, missing blocks, reorgs)
+
+### CI Integration
+
+Tests should run in CI when:
+- PRs are opened against base branch
+- Changes are made to `op-node/rollup/driver/` or `op-node/rollup/engine/`
+- Manual trigger for full test suite
+
+**Environment Requirements:**
+- Tailscale network access
+- Access to CI endpoints (ci-sepolia-l2.optimism.io, etc.)
+- Go 1.21+
+- Sufficient timeout (15+ minutes)
+
 ---
 
 **Document Status:** Design v1.0
-**Last Updated:** 2025-09-30
-**Branch:** feat/thin-mode (renamed to feat/lite-mode)
+**Last Updated:** 2025-10-01
+**Branch:** feat/xxx-node
