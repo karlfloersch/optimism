@@ -181,21 +181,32 @@ func (lm *LiteModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
 
 // insertAndPromoteBlock fetches the payload and inserts it via the engine
 func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2BlockRef) error {
-	// Fetch the full payload from remote
-	payload, err := lm.remoteEL.PayloadByNumber(lm.ctx, blockNum)
-	if err != nil {
-		return fmt.Errorf("failed to fetch payload for block %d: %w", blockNum, err)
-	}
+	// Check if we already have this block locally (via P2P or previous sync)
+	localBlock, err := lm.localEL.L2BlockRefByNumber(lm.ctx, blockNum)
+	needsInsertion := err != nil || localBlock.Hash != blockRef.Hash
 
-	// Insert the payload as unsafe first
-	if err := lm.engine.InsertUnsafePayload(lm.ctx, payload, blockRef); err != nil {
-		return fmt.Errorf("failed to insert payload for block %d: %w", blockNum, err)
-	}
+	if needsInsertion {
+		// Block doesn't exist locally or has wrong hash - fetch and insert it
+		payload, err := lm.remoteEL.PayloadByNumber(lm.ctx, blockNum)
+		if err != nil {
+			return fmt.Errorf("failed to fetch payload for block %d: %w", blockNum, err)
+		}
 
-	lm.log.Info("Lite mode: inserted payload",
-		"number", blockRef.Number,
-		"hash", blockRef.Hash,
-	)
+		// Insert the payload as unsafe first
+		if err := lm.engine.InsertUnsafePayload(lm.ctx, payload, blockRef); err != nil {
+			return fmt.Errorf("failed to insert payload for block %d: %w", blockNum, err)
+		}
+
+		lm.log.Info("Lite mode: inserted payload",
+			"number", blockRef.Number,
+			"hash", blockRef.Hash,
+		)
+	} else {
+		lm.log.Debug("Lite mode: block already exists locally (likely from P2P), skipping insertion",
+			"number", blockRef.Number,
+			"hash", blockRef.Hash,
+		)
+	}
 
 	// Promote to safe (dummy L1 origin for lite mode)
 	lm.engine.PromoteSafe(lm.ctx, blockRef, eth.L1BlockRef{})

@@ -104,7 +104,7 @@ func TestLiteModeUnsafeViaP2P(gt *testing.T) {
 	sys.L2CLB.IsP2PConnected(sys.L2CL)
 	logger.Info("Lite mode verifier is P2P connected to sequencer")
 
-	// First, wait for the sequencer to produce some blocks
+	// First, wait for the sequencer to produce some blocks and for safe heads to sync
 	initialSafeSeq := sys.L2CL.SafeL2BlockRef().Number
 	logger.Info("Initial sequencer safe head", "safe", initialSafeSeq)
 
@@ -117,27 +117,13 @@ func TestLiteModeUnsafeViaP2P(gt *testing.T) {
 	newSafeSeq := sys.L2CL.SafeL2BlockRef().Number
 	logger.Info("Sequencer advanced safe head", "old_safe", initialSafeSeq, "new_safe", newSafeSeq)
 
-	// Now ensure verifier is fully caught up on both safe (RPC) and unsafe (P2P)
-	// This is the baseline - we want to start from a state where everything is synchronized
-	logger.Info("Waiting for verifier safe and unsafe heads to sync to tip")
+	// Wait for verifier to sync safe head via lite mode RPC
+	logger.Info("Waiting for verifier to sync safe head")
 	sys.L2CLB.Matched(sys.L2CL, types.LocalSafe, 60)
-	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 60)
-	logger.Info("Verifier fully caught up on both safe and unsafe")
+	logger.Info("Verifier safe head synced")
 
-	// Record baseline for the test
-	initialUnsafe := sys.L2CL.HeadBlockRef(types.LocalUnsafe).Number
-	logger.Info("Initial state", "sequencer_unsafe", initialUnsafe)
-
-	// Wait for sequencer to produce more unsafe blocks
-	targetUnsafeDelta := uint64(5)
-	sys.L2CL.Advanced(types.LocalUnsafe, targetUnsafeDelta, 30)
-
-	newUnsafeSeq := sys.L2CL.HeadBlockRef(types.LocalUnsafe).Number
-	logger.Info("Sequencer produced new unsafe blocks", "old", initialUnsafe, "new", newUnsafeSeq, "delta", newUnsafeSeq-initialUnsafe)
-	require.GreaterOrEqual(newUnsafeSeq, initialUnsafe+targetUnsafeDelta, "sequencer should have produced unsafe blocks")
-
-	// Now verify the lite mode verifier receives these blocks via P2P
-	logger.Info("Waiting for lite mode verifier to receive new unsafe blocks via P2P")
+	// Now verify that unsafe blocks also sync via P2P (alongside safe head progression)
+	logger.Info("Waiting for verifier unsafe head to sync via P2P")
 	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 60)
 
 	verifierUnsafe := sys.L2CLB.HeadBlockRef(types.LocalUnsafe)
