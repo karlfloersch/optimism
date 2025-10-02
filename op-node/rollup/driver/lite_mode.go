@@ -135,7 +135,8 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 
 	// Don't move safe below finalized
 	if remoteSafe.Number < localFinalized.Number {
-		return nil
+		return fmt.Errorf("remote safe head is behind local finalized head (remote_safe=%d, local_finalized=%d)",
+			remoteSafe.Number, localFinalized.Number)
 	}
 
 	// If we're already at the target, nothing to do
