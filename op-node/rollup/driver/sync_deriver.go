@@ -244,6 +244,11 @@ func (s *SyncDeriver) SyncStep() {
 		if s.LiteModeSync != nil {
 			if err := s.LiteModeSync.SyncStep(); err != nil {
 				s.Log.Error("Lite mode sync step failed", "err", err)
+			} else {
+				// Reset backoff since we're making progress
+				s.StepDeriver.ResetStepBackoff(s.Ctx)
+				// Request another step immediately to continue syncing
+				s.StepDeriver.RequestStep(s.Ctx, true)
 			}
 		}
 		return

@@ -3,15 +3,12 @@ package driver
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
-	"github.com/ethereum-optimism/optimism/op-node/rollup/engine"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/event"
 )
 
 // L2Source is the interface for querying L2 blocks and payloads from remote/local EL
@@ -24,6 +21,8 @@ type L2Source interface {
 
 // EngineCtrl provides methods to update heads
 type EngineCtrl interface {
+	InsertUnsafePayload(ctx context.Context, envelope *eth.ExecutionPayloadEnvelope, ref eth.L2BlockRef) error
+	PromoteSafe(ctx context.Context, ref eth.L2BlockRef, source eth.L1BlockRef)
 	PromoteFinalized(ctx context.Context, ref eth.L2BlockRef)
 	SafeL2Head() eth.L2BlockRef
 	Finalized() eth.L2BlockRef
@@ -36,7 +35,6 @@ type LiteModeSync struct {
 	remoteEL L2Source
 	localEL  L2Source
 	engine   EngineCtrl
-	emitter  event.Emitter
 	cfg      *rollup.Config
 }
 
@@ -48,7 +46,6 @@ func NewLiteModeSync(
 	remoteEL L2Source,
 	localEL L2Source,
 	eng EngineCtrl,
-	emitter event.Emitter,
 ) *LiteModeSync {
 	return &LiteModeSync{
 		log:      log,
@@ -56,7 +53,6 @@ func NewLiteModeSync(
 		remoteEL: remoteEL,
 		localEL:  localEL,
 		engine:   eng,
-		emitter:  emitter,
 		cfg:      cfg,
 	}
 }
@@ -172,8 +168,7 @@ func (lm *LiteModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
 	return common.Hash{}, false
 }
 
-// insertAndPromoteBlock fetches the payload and emits an event to process it
-// This follows the same pattern as normal derivation - emit PayloadProcessEvent
+// insertAndPromoteBlock fetches the payload and inserts it via the engine
 func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2BlockRef) error {
 	// Fetch the full payload from remote
 	payload, err := lm.remoteEL.PayloadByNumber(lm.ctx, blockNum)
@@ -181,18 +176,20 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 		return fmt.Errorf("failed to fetch payload for block %d: %w", blockNum, err)
 	}
 
-	// Emit PayloadProcessEvent with Concluding=true to promote it to safe
-	// The EngineController will handle inserting via NewPayload and promoting to safe
-	// This is the same pattern used by normal derivation
-	lm.emitter.Emit(lm.ctx, engine.PayloadProcessEvent{
-		Concluding:   true, // This block should become safe
-		DerivedFrom:  eth.L1BlockRef{}, // Dummy L1 origin for lite mode
-		BuildStarted: time.Now(),
-		Envelope:     payload,
-		Ref:          blockRef,
-	})
+	// Insert the payload as unsafe first
+	if err := lm.engine.InsertUnsafePayload(lm.ctx, payload, blockRef); err != nil {
+		return fmt.Errorf("failed to insert payload for block %d: %w", blockNum, err)
+	}
 
-	lm.log.Info("Lite mode: emitted payload for processing",
+	lm.log.Info("Lite mode: inserted payload",
+		"number", blockRef.Number,
+		"hash", blockRef.Hash,
+	)
+
+	// Promote to safe (dummy L1 origin for lite mode)
+	lm.engine.PromoteSafe(lm.ctx, blockRef, eth.L1BlockRef{})
+
+	lm.log.Info("Lite mode: promoted block to safe",
 		"number", blockRef.Number,
 		"hash", blockRef.Hash,
 	)
@@ -249,12 +246,12 @@ func (lm *LiteModeSync) updateFinalized() error {
 		lm.log.Info("Lite mode: catching up safe head to finalized",
 			"old_safe", localSafe.Number,
 			"finalized", remoteFin.Number)
-		// Emit LocalSafeUpdateEvent to promote safe to finalized
-		// This triggers the same flow as normal derivation
-		lm.emitter.Emit(lm.ctx, engine.LocalSafeUpdateEvent{
-			Ref:    remoteFin,
-			Source: eth.L1BlockRef{}, // Dummy L1 origin for lite mode
-		})
+
+		// Promote safe to match finalized
+		lm.engine.PromoteSafe(lm.ctx, remoteFin, eth.L1BlockRef{})
+		lm.log.Info("Lite mode: promoted safe head to match finalized",
+			"number", remoteFin.Number,
+			"hash", remoteFin.Hash)
 	}
 
 	return nil
