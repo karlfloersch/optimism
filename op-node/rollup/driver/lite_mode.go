@@ -172,10 +172,6 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		// We should have all blocks between finalized and safe, so if we don't find it, that's an error
 		localParentHash, found := lm.getLocalBlockHash(parentNum)
 		if !found {
-			lm.log.Warn("Missing local block during safe head sync",
-				"block_num", parentNum,
-				"local_safe", localSafe.Number,
-				"local_finalized", localFinalized.Number)
 			return fmt.Errorf("missing local block %d during safe head sync (safe=%d, finalized=%d)",
 				parentNum, localSafe.Number, localFinalized.Number)
 		}
