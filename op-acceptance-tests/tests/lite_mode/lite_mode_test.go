@@ -55,13 +55,25 @@ func TestLiteModeFinalizedSync(gt *testing.T) {
 
 	logger.Info("Starting lite mode finalized sync test")
 
+	// Wait for L1 to produce enough blocks for finalization
+	// L1 needs head > finalizedDistance (20) for any blocks to be finalized
+	logger.Info("Waiting for L1 to produce sufficient blocks for finalization...")
+	for i := 0; i < 30; i++ {
+		l1Head := sys.L1Network.WaitForBlock()
+		logger.Info("L1 block produced", "number", l1Head.Number)
+		if l1Head.Number >= 23 {
+			logger.Info("L1 has sufficient blocks for finalization")
+			break
+		}
+	}
+
 	// Wait for both nodes to advance finalized heads
 	initialFinSeq := sys.L2CL.HeadBlockRef(types.Finalized).Number
 	logger.Info("Initial sequencer finalized", "finalized", initialFinSeq)
 
 	// Wait for sequencer to advance finalized by at least 3 blocks
 	targetDelta := uint64(3)
-	sys.L2CL.Advanced(types.Finalized, targetDelta, 30)
+	sys.L2CL.Advanced(types.Finalized, targetDelta, 50)
 
 	newFinSeq := sys.L2CL.HeadBlockRef(types.Finalized).Number
 	logger.Info("Sequencer finalized advanced", "old_fin", initialFinSeq, "new_fin", newFinSeq)
