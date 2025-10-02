@@ -168,27 +168,16 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 			return fmt.Errorf("remote safe chain diverged below finalized (at block %d)", currentNum)
 		}
 
-		// Try to get the local parent hash
-		var localParentHash common.Hash
-		var haveParent bool
-		if parentNum == localSafe.Number {
-			localParentHash = localSafe.Hash
-			haveParent = true
-		} else if parentNum == localFinalized.Number {
-			localParentHash = localFinalized.Hash
-			haveParent = true
-		} else {
-			// Parent is between finalized and safe - try to fetch from local EL (header only)
-			localParentBlock, err := lm.localEL.L2BlockRefByNumberHeaderOnly(lm.ctx, parentNum)
-			if err == nil {
-				localParentHash = localParentBlock.Hash
-				haveParent = true
-			}
-			// If we don't have it locally, keep walking back
-		}
-
-		if !haveParent {
-			continue
+		// Get the parent block hash from our local chain
+		// We should have all blocks between finalized and safe, so if we don't find it, that's an error
+		localParentHash, found := lm.getLocalBlockHash(parentNum)
+		if !found {
+			lm.log.Warn("Missing local block during safe head sync",
+				"block_num", parentNum,
+				"local_safe", localSafe.Number,
+				"local_finalized", localFinalized.Number)
+			return fmt.Errorf("missing local block %d during safe head sync (safe=%d, finalized=%d)",
+				parentNum, localSafe.Number, localFinalized.Number)
 		}
 
 		// Check if this remote block builds on our local parent
@@ -205,6 +194,30 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 
 	// Walked all the way back to finalized without finding connection
 	return fmt.Errorf("remote safe chain diverged from local chain above finalized")
+}
+
+// getLocalBlockHash returns the hash of a local block by number.
+// It checks in-memory heads first (safe, finalized) before querying the local EL.
+// Returns (hash, true) if found locally, (zero, false) if not found.
+func (lm *LiteModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
+	localSafe := lm.engine.SafeL2Head()
+	localFinalized := lm.engine.Finalized()
+
+	// Fast path: check in-memory heads first
+	if num == localSafe.Number {
+		return localSafe.Hash, true
+	}
+	if num == localFinalized.Number {
+		return localFinalized.Hash, true
+	}
+
+	// Slow path: block is between finalized and safe, fetch from local EL
+	block, err := lm.localEL.L2BlockRefByNumberHeaderOnly(lm.ctx, num)
+	if err == nil {
+		return block.Hash, true
+	}
+
+	return common.Hash{}, false
 }
 
 // insertAndPromoteBlock fetches the payload and emits an event to process it
