@@ -170,8 +170,8 @@ func NewDriver(
 			l2,             // localEL
 			ec,             // engine
 			liteModeEmitter,
-			driverCfg.LiteModePollInterval,
 		)
+		syncDeriver.LiteModeSync = liteModeSync
 	}
 
 	driverEmitter := sys.Register("driver", nil)
@@ -242,11 +242,6 @@ func (s *Driver) Start() error {
 	log.Info("Starting driver", "sequencerEnabled", s.driverConfig.SequencerEnabled,
 		"sequencerStopped", s.driverConfig.SequencerStopped, "recoverMode", s.driverConfig.RecoverMode)
 
-	// Start lite mode sync if enabled
-	if s.liteModeSync != nil {
-		s.liteModeSync.Start()
-	}
-
 	if s.driverConfig.SequencerEnabled {
 		if s.driverConfig.RecoverMode {
 			log.Warn("sequencer is in recover mode")
@@ -270,10 +265,6 @@ func (s *Driver) Close() error {
 	s.driverCancel()
 	s.wg.Wait()
 	s.sequencer.Close()
-	// Close lite mode sync if enabled
-	if s.liteModeSync != nil {
-		s.liteModeSync.Close()
-	}
 	return nil
 }
 

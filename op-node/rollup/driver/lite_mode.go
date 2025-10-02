@@ -31,15 +31,13 @@ type EngineCtrl interface {
 
 // LiteModeSync handles safe/finalized head progression by polling an external RPC
 type LiteModeSync struct {
-	log          log.Logger
-	ctx          context.Context
-	remoteEL     L2Source
-	localEL      L2Source
-	engine       EngineCtrl
-	emitter      event.Emitter
-	cfg          *rollup.Config
-	pollInterval time.Duration
-	closeCh      chan struct{}
+	log      log.Logger
+	ctx      context.Context
+	remoteEL L2Source
+	localEL  L2Source
+	engine   EngineCtrl
+	emitter  event.Emitter
+	cfg      *rollup.Config
 }
 
 // NewLiteModeSync creates a new lite mode sync component
@@ -51,63 +49,20 @@ func NewLiteModeSync(
 	localEL L2Source,
 	eng EngineCtrl,
 	emitter event.Emitter,
-	pollInterval time.Duration,
 ) *LiteModeSync {
 	return &LiteModeSync{
-		log:          log,
-		ctx:          ctx,
-		remoteEL:     remoteEL,
-		localEL:      localEL,
-		engine:       eng,
-		emitter:      emitter,
-		cfg:          cfg,
-		pollInterval: pollInterval,
-		closeCh:      make(chan struct{}),
+		log:      log,
+		ctx:      ctx,
+		remoteEL: remoteEL,
+		localEL:  localEL,
+		engine:   eng,
+		emitter:  emitter,
+		cfg:      cfg,
 	}
 }
 
-// Start begins the sync loop
-func (lm *LiteModeSync) Start() {
-	lm.log.Info("Starting lite mode sync", "poll_interval", lm.pollInterval)
-	//  Note: Initial sync is handled in the sync loop itself to ensure
-	// it happens after the engine controller has loaded the finalized head
-	go lm.syncLoop()
-}
-
-// Close stops the sync loop
-func (lm *LiteModeSync) Close() {
-	select {
-	case <-lm.closeCh:
-		// Already closed
-		return
-	default:
-		close(lm.closeCh)
-	}
-}
-
-// syncLoop is the main sync loop that runs on a timer
-func (lm *LiteModeSync) syncLoop() {
-	ticker := time.NewTicker(lm.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-lm.ctx.Done():
-			lm.log.Info("Lite mode sync loop stopped (context done)")
-			return
-		case <-lm.closeCh:
-			lm.log.Info("Lite mode sync loop stopped (close requested)")
-			return
-		case <-ticker.C:
-			if err := lm.syncStep(); err != nil {
-				lm.log.Error("Lite mode sync step failed", "err", err)
-			}
-		}
-	}
-}
-
-// syncStep performs one iteration of the sync loop
-func (lm *LiteModeSync) syncStep() error {
+// SyncStep performs one iteration of sync by polling the remote RPC for safe/finalized heads
+func (lm *LiteModeSync) SyncStep() error {
 	// Step 1: Update finalized head (may also catch up safe head)
 	if err := lm.updateFinalized(); err != nil {
 		return fmt.Errorf("failed to update finalized head: %w", err)

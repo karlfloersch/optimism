@@ -50,6 +50,9 @@ type SyncDeriver struct {
 	ManagedBySupervisor bool
 
 	StepDeriver StepDeriver
+
+	// LiteModeSync handles safe/finalized head progression in lite mode
+	LiteModeSync *LiteModeSync
 }
 
 func (s *SyncDeriver) AttachEmitter(em event.Emitter) {
@@ -237,7 +240,12 @@ func (s *SyncDeriver) SyncStep() {
 
 	if s.SyncCfg.LiteModeEnabled {
 		// In lite mode, safe head progression comes from LiteModeSync polling a remote RPC,
-		// not from L1 derivation. Skip requesting derivation pipeline to generate attributes.
+		// not from L1 derivation.
+		if s.LiteModeSync != nil {
+			if err := s.LiteModeSync.SyncStep(); err != nil {
+				s.Log.Error("Lite mode sync step failed", "err", err)
+			}
+		}
 		return
 	}
 
