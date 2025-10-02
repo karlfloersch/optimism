@@ -104,28 +104,49 @@ func TestLiteModeUnsafeViaP2P(gt *testing.T) {
 	sys.L2CLB.IsP2PConnected(sys.L2CL)
 	logger.Info("Lite mode verifier is P2P connected to sequencer")
 
-	// The sequencer should produce new unsafe blocks
-	initialUnsafeSeq := sys.L2CL.HeadBlockRef(types.LocalUnsafe).Number
-	logger.Info("Initial sequencer unsafe", "unsafe", initialUnsafeSeq)
+	// First, wait for the sequencer to produce some blocks
+	initialSafeSeq := sys.L2CL.SafeL2BlockRef().Number
+	logger.Info("Initial sequencer safe head", "safe", initialSafeSeq)
+
+	// Wait for sequencer to advance safe head by at least 5 blocks
+	targetDelta := uint64(5)
+	dsl.CheckAll(t,
+		sys.L2CL.AdvancedFn(types.LocalSafe, targetDelta, 30),
+	)
+
+	newSafeSeq := sys.L2CL.SafeL2BlockRef().Number
+	logger.Info("Sequencer advanced safe head", "old_safe", initialSafeSeq, "new_safe", newSafeSeq)
+
+	// Now ensure verifier is fully caught up on both safe (RPC) and unsafe (P2P)
+	// This is the baseline - we want to start from a state where everything is synchronized
+	logger.Info("Waiting for verifier safe and unsafe heads to sync to tip")
+	sys.L2CLB.Matched(sys.L2CL, types.LocalSafe, 60)
+	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 60)
+	logger.Info("Verifier fully caught up on both safe and unsafe")
+
+	// Record baseline for the test
+	initialUnsafe := sys.L2CL.HeadBlockRef(types.LocalUnsafe).Number
+	logger.Info("Initial state", "sequencer_unsafe", initialUnsafe)
 
 	// Wait for sequencer to produce more unsafe blocks
-	targetDelta := uint64(3)
-	sys.L2CL.Advanced(types.LocalUnsafe, targetDelta, 30)
+	targetUnsafeDelta := uint64(5)
+	sys.L2CL.Advanced(types.LocalUnsafe, targetUnsafeDelta, 30)
 
 	newUnsafeSeq := sys.L2CL.HeadBlockRef(types.LocalUnsafe).Number
-	logger.Info("Sequencer produced unsafe blocks", "old_unsafe", initialUnsafeSeq, "new_unsafe", newUnsafeSeq)
-	require.GreaterOrEqual(newUnsafeSeq, initialUnsafeSeq+targetDelta, "sequencer should have produced unsafe blocks")
+	logger.Info("Sequencer produced new unsafe blocks", "old", initialUnsafe, "new", newUnsafeSeq, "delta", newUnsafeSeq-initialUnsafe)
+	require.GreaterOrEqual(newUnsafeSeq, initialUnsafe+targetUnsafeDelta, "sequencer should have produced unsafe blocks")
 
-	// The lite mode verifier should receive unsafe blocks via P2P
-	logger.Info("Waiting for lite mode verifier to receive unsafe blocks via P2P")
+	// Now verify the lite mode verifier receives these blocks via P2P
+	logger.Info("Waiting for lite mode verifier to receive new unsafe blocks via P2P")
 	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 60)
 
 	verifierUnsafe := sys.L2CLB.HeadBlockRef(types.LocalUnsafe)
-	logger.Info("Lite mode verifier received unsafe blocks", "unsafe", verifierUnsafe.Number, "hash", verifierUnsafe.Hash)
+	seqUnsafe := sys.L2CL.HeadBlockRef(types.LocalUnsafe)
+	logger.Info("P2P sync complete", "sequencer", seqUnsafe.Number, "verifier", verifierUnsafe.Number)
 
 	// Verify unsafe heads match (P2P sync is working)
-	require.Equal(newUnsafeSeq, verifierUnsafe.Number, "lite mode verifier unsafe head should match sequencer via P2P")
-	require.Equal(sys.L2CL.HeadBlockRef(types.LocalUnsafe).Hash, verifierUnsafe.Hash, "lite mode verifier unsafe hash should match sequencer")
+	require.Equal(seqUnsafe.Number, verifierUnsafe.Number, "lite mode verifier unsafe head should match sequencer via P2P")
+	require.Equal(seqUnsafe.Hash, verifierUnsafe.Hash, "lite mode verifier unsafe hash should match sequencer")
 }
 
 // TestLiteModeContinuousSync verifies that lite mode continues to sync as the sequencer progresses.

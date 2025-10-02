@@ -1,19 +1,49 @@
 package sysgo
 
 import (
+	"github.com/ethereum-optimism/optimism/op-chain-ops/devkeys"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 )
 
 // LiteModeSystem creates a single-chain multi-node system where one verifier runs in lite mode,
 // sourcing safe/finalized heads from the sequencer's RPC endpoint.
+// Note: This system does NOT include a challenger because lite mode nodes do not maintain
+// a safe head database, which the challenger requires for dispute game verification.
 func LiteModeSystem(dest *DefaultSingleChainMultiNodeSystemIDs) stack.Option[*Orchestrator] {
 	ids := NewDefaultSingleChainMultiNodeSystemIDs(DefaultL1ID, DefaultL2AID)
 
 	opt := stack.Combine[*Orchestrator]()
 
-	// Start with the base minimal system (creates sequencer node)
-	opt.Add(DefaultMinimalSystem(&dest.DefaultMinimalSystemIDs))
+	// Build a minimal system without the challenger (since lite mode doesn't support safe head DB)
+	opt.Add(stack.BeforeDeploy(func(o *Orchestrator) {
+		o.P().Logger().Info("Setting up lite mode system (no challenger)")
+	}))
+
+	opt.Add(WithMnemonicKeys(devkeys.TestMnemonic))
+
+	opt.Add(WithDeployer(),
+		WithDeployerOptions(
+			WithLocalContractSources(),
+			WithCommons(ids.L1.ChainID()),
+			WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+		),
+	)
+
+	opt.Add(WithL1Nodes(ids.L1EL, ids.L1CL))
+
+	opt.Add(WithL2ELNode(ids.L2EL))
+	opt.Add(WithL2CLNode(ids.L2CL, ids.L1CL, ids.L1EL, ids.L2EL, L2CLSequencer()))
+
+	opt.Add(WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL))
+	opt.Add(WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil))
+
+	opt.Add(WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(WithTestSequencer(ids.TestSequencer, ids.L1CL, ids.L2CL, ids.L1EL, ids.L2EL))
+
+	// NOTE: Challenger is intentionally omitted because it queries the safe head database,
+	// which is disabled in lite mode. This was causing 1350+ error logs per test run.
 
 	// Add verifier EL node
 	opt.Add(WithL2ELNode(ids.L2ELB))
