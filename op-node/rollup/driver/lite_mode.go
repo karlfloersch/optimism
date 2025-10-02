@@ -57,42 +57,50 @@ func NewLiteModeSync(
 	}
 }
 
-// SyncStep performs one iteration of sync by polling the remote RPC for safe/finalized heads
-func (lm *LiteModeSync) SyncStep() error {
+// SyncStep performs one iteration of sync by polling the remote RPC for safe/finalized heads.
+// Returns (madeProgress, error) where madeProgress indicates if we actually synced new blocks.
+func (lm *LiteModeSync) SyncStep() (bool, error) {
+	madeProgress := false
+
 	// Step 1: Update finalized head (may also catch up safe head)
-	if err := lm.updateFinalized(); err != nil {
-		return fmt.Errorf("failed to update finalized head: %w", err)
+	finalizedProgress, err := lm.updateFinalized()
+	if err != nil {
+		return false, fmt.Errorf("failed to update finalized head: %w", err)
 	}
+	madeProgress = madeProgress || finalizedProgress
 
 	// Step 2: Find and import next safe block
-	if err := lm.findAndImportNextSafe(); err != nil {
-		return fmt.Errorf("failed to import next safe block: %w", err)
+	safeProgress, err := lm.findAndImportNextSafe()
+	if err != nil {
+		return false, fmt.Errorf("failed to import next safe block: %w", err)
 	}
+	madeProgress = madeProgress || safeProgress
 
 	// Note: Unsafe head is managed by CL sync (P2P gossip) and safe head promotion
 
-	return nil
+	return madeProgress, nil
 }
-// findAndImportNextSafe walks backward from remote safe to find where it connects to our chain
-func (lm *LiteModeSync) findAndImportNextSafe() error {
+// findAndImportNextSafe walks backward from remote safe to find where it connects to our chain.
+// Returns (madeProgress, error) where madeProgress indicates if we imported a new block.
+func (lm *LiteModeSync) findAndImportNextSafe() (bool, error) {
 	localSafe := lm.engine.SafeL2Head()
 	localFinalized := lm.engine.Finalized()
 
 	// Fetch what the remote considers safe
 	remoteSafe, err := lm.remoteEL.L2BlockRefByLabel(lm.ctx, eth.Safe)
 	if err != nil {
-		return fmt.Errorf("failed to fetch remote safe head: %w", err)
+		return false, fmt.Errorf("failed to fetch remote safe head: %w", err)
 	}
 
 	// Don't move safe below finalized
 	if remoteSafe.Number < localFinalized.Number {
-		return fmt.Errorf("remote safe head is behind local finalized head (remote_safe=%d, local_finalized=%d)",
+		return false, fmt.Errorf("remote safe head is behind local finalized head (remote_safe=%d, local_finalized=%d)",
 			remoteSafe.Number, localFinalized.Number)
 	}
 
 	// If we're already at the target, nothing to do
 	if localSafe.Number == remoteSafe.Number && localSafe.Hash == remoteSafe.Hash {
-		return nil
+		return false, nil
 	}
 
 	// Determine starting point for backward walk
@@ -117,14 +125,14 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 		// Get the parent block number
 		parentNum := currentNum - 1
 		if parentNum < localFinalized.Number {
-			return fmt.Errorf("remote safe chain diverged below finalized (at block %d)", currentNum)
+			return false, fmt.Errorf("remote safe chain diverged below finalized (at block %d)", currentNum)
 		}
 
 		// Get the parent block hash from our local chain
 		// We should have all blocks between finalized and safe, so if we don't find it, that's an error
 		localParentHash, found := lm.getLocalBlockHash(parentNum)
 		if !found {
-			return fmt.Errorf("missing local block %d during safe head sync (safe=%d, finalized=%d)",
+			return false, fmt.Errorf("missing local block %d during safe head sync (safe=%d, finalized=%d)",
 				parentNum, localSafe.Number, localFinalized.Number)
 		}
 
@@ -133,15 +141,18 @@ func (lm *LiteModeSync) findAndImportNextSafe() error {
 			// Found the connection point! Now fetch full block data and insert
 			remoteBlockRef, err := lm.remoteEL.L2BlockRefByNumber(lm.ctx, currentNum)
 			if err != nil {
-				return fmt.Errorf("failed to fetch full block data for insertion: %w", err)
+				return false, fmt.Errorf("failed to fetch full block data for insertion: %w", err)
 			}
-			return lm.insertAndPromoteBlock(currentNum, remoteBlockRef)
+			if err := lm.insertAndPromoteBlock(currentNum, remoteBlockRef); err != nil {
+				return false, err
+			}
+			return true, nil // Successfully imported a block
 		}
 		// Hash mismatch - keep walking back
 	}
 
 	// Walked all the way back to finalized without finding connection
-	return fmt.Errorf("remote safe chain diverged from local chain above finalized")
+	return false, fmt.Errorf("remote safe chain diverged from local chain above finalized")
 }
 
 // getLocalBlockHash returns the hash of a local block by number.
@@ -197,26 +208,27 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 	return nil
 }
 
-// updateFinalized updates the finalized head if remote is ahead
-func (lm *LiteModeSync) updateFinalized() error {
+// updateFinalized updates the finalized head if remote is ahead.
+// Returns (madeProgress, error) where madeProgress indicates if we updated finalized.
+func (lm *LiteModeSync) updateFinalized() (bool, error) {
 	// Fetch remote finalized head
 	remoteFin, err := lm.remoteEL.L2BlockRefByLabel(lm.ctx, eth.Finalized)
 	if err != nil {
-		return fmt.Errorf("failed to fetch remote finalized head: %w", err)
+		return false, fmt.Errorf("failed to fetch remote finalized head: %w", err)
 	}
 
 	localFin := lm.engine.Finalized()
 
 	// Only update if remote is ahead
 	if remoteFin.Number <= localFin.Number {
-		return nil
+		return false, nil
 	}
 
 	// Fetch local block at remote finalized number
 	localBlock, err := lm.localEL.L2BlockRefByNumber(lm.ctx, remoteFin.Number)
 	if err != nil {
 		// Block doesn't exist locally yet - will be imported by safe head progression
-		return nil
+		return false, nil
 	}
 
 	// Check if hashes match
@@ -227,7 +239,7 @@ func (lm *LiteModeSync) updateFinalized() error {
 			"remote_hash", remoteFin.Hash,
 		)
 		// Don't promote - will resolve as safe head progresses
-		return nil
+		return false, nil
 	}
 
 	// Promote to finalized (no error return)
@@ -237,6 +249,8 @@ func (lm *LiteModeSync) updateFinalized() error {
 		"number", remoteFin.Number,
 		"hash", remoteFin.Hash,
 	)
+
+	madeProgress := true
 
 	// If safe head is behind finalized after this update, catch it up
 	// This can happen when finalized jumps ahead (e.g., epoch boundary)
@@ -254,5 +268,5 @@ func (lm *LiteModeSync) updateFinalized() error {
 			"hash", remoteFin.Hash)
 	}
 
-	return nil
+	return madeProgress, nil
 }

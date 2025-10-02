@@ -242,14 +242,16 @@ func (s *SyncDeriver) SyncStep() {
 		// In lite mode, safe head progression comes from LiteModeSync polling a remote RPC,
 		// not from L1 derivation.
 		if s.LiteModeSync != nil {
-			if err := s.LiteModeSync.SyncStep(); err != nil {
+			madeProgress, err := s.LiteModeSync.SyncStep()
+			if err != nil {
 				s.Log.Error("Lite mode sync step failed", "err", err)
-			} else {
-				// Reset backoff since we're making progress
+			} else if madeProgress {
+				// Only request immediate next step if we actually synced new blocks
+				// This prevents CPU starvation of P2P unsafe block processing
 				s.StepDeriver.ResetStepBackoff(s.Ctx)
-				// Request another step immediately to continue syncing
 				s.StepDeriver.RequestStep(s.Ctx, true)
 			}
+			// If no progress, let normal backoff happen to give P2P time to process
 		}
 		return
 	}

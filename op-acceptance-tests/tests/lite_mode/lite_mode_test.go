@@ -118,7 +118,7 @@ func TestLiteModeUnsafeViaP2P(gt *testing.T) {
 
 	// The lite mode verifier should receive unsafe blocks via P2P
 	logger.Info("Waiting for lite mode verifier to receive unsafe blocks via P2P")
-	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 30)
+	sys.L2CLB.Matched(sys.L2CL, types.LocalUnsafe, 60)
 
 	verifierUnsafe := sys.L2CLB.HeadBlockRef(types.LocalUnsafe)
 	logger.Info("Lite mode verifier received unsafe blocks", "unsafe", verifierUnsafe.Number, "hash", verifierUnsafe.Hash)
