@@ -51,8 +51,8 @@ type SyncDeriver struct {
 
 	StepDeriver StepDeriver
 
-	// LiteModeSync handles safe/finalized head progression in lite mode
-	LiteModeSync *LiteModeSync
+	// TipModeSync handles safe/finalized head progression in tip mode
+	TipModeSync *TipModeSync
 }
 
 func (s *SyncDeriver) AttachEmitter(em event.Emitter) {
@@ -238,13 +238,13 @@ func (s *SyncDeriver) SyncStep() {
 		return
 	}
 
-	if s.SyncCfg.LiteModeEnabled {
-		// In lite mode, safe head progression comes from LiteModeSync polling a remote RPC,
+	if s.SyncCfg.TipModeEnabled {
+		// In tip mode, safe head progression comes from TipModeSync polling a remote RPC,
 		// not from L1 derivation.
-		if s.LiteModeSync != nil {
-			madeProgress, err := s.LiteModeSync.SyncStep()
+		if s.TipModeSync != nil {
+			madeProgress, err := s.TipModeSync.SyncStep()
 			if err != nil {
-				s.Log.Error("Lite mode sync step failed", "err", err)
+				s.Log.Error("Tip mode sync step failed", "err", err)
 			} else if madeProgress {
 				// Only request immediate next step if we actually synced new blocks
 				// This prevents CPU starvation of P2P unsafe block processing

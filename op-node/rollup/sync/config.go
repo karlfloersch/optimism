@@ -73,6 +73,6 @@ type Config struct {
 
 	SupportsPostFinalizationELSync bool `json:"supports_post_finalization_elsync"`
 
-	// LiteModeEnabled disables derivation and sources safe/finalized heads from an external RPC.
-	LiteModeEnabled bool `json:"lite_mode_enabled"`
+	// TipModeEnabled disables derivation and sources safe/finalized heads from an external RPC.
+	TipModeEnabled bool `json:"tip_mode_enabled"`
 }

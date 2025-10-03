@@ -242,21 +242,21 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 		// Get the L2 engine address from the EL node (which can be a regular EL node or a SyncTesterEL)
 		l2EngineAddr := l2EL.EngineRPC()
 
-		// Check for lite mode configuration (from L2CLConfig or environment variables for backward compatibility)
-		liteModeEnabled := cfg.LiteModeEnabled
-		liteModeRPC := cfg.LiteModeRemoteRPC
+		// Check for tip mode configuration (from L2CLConfig or environment variables for backward compatibility)
+		tipModeEnabled := cfg.TipModeEnabled
+		tipModeRPC := cfg.TipModeRemoteRPC
 
 		// Fall back to environment variables if not configured via L2CLConfig
-		if !liteModeEnabled && os.Getenv("OP_NODE_ROLLUP_LITE_MODE") == "true" {
-			liteModeEnabled = true
-			liteModeRPC = os.Getenv("OP_NODE_ROLLUP_LITE_MODE_RPC")
+		if !tipModeEnabled && os.Getenv("OP_NODE_ROLLUP_TIP_MODE") == "true" {
+			tipModeEnabled = true
+			tipModeRPC = os.Getenv("OP_NODE_ROLLUP_TIP_MODE_RPC")
 		}
 
-		if liteModeEnabled {
-			if liteModeRPC == "" {
-				p.Require().FailNow("Lite mode enabled but LiteModeRemoteRPC not set")
+		if tipModeEnabled {
+			if tipModeRPC == "" {
+				p.Require().FailNow("Tip mode enabled but TipModeRemoteRPC not set")
 			}
-			logger.Info("Lite mode enabled for op-node", "remote_rpc", liteModeRPC)
+			logger.Info("Tip mode enabled for op-node", "remote_rpc", tipModeRPC)
 		}
 
 		nodeCfg := &config.Config{
@@ -280,8 +280,8 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 			Driver: driver.Config{
 				SequencerEnabled:     cfg.IsSequencer,
 				SequencerConfDepth:   2,
-				LiteModeEnabled: liteModeEnabled,
-				LiteModeRPC:     liteModeRPC,
+				TipModeEnabled: tipModeEnabled,
+				TipModeRPC:     tipModeRPC,
 			},
 			Rollup:        *l2Net.rollupCfg,
 			DependencySet: depSet,
@@ -302,7 +302,7 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				SyncMode:                       syncMode,
 				SkipSyncStartCheck:             false,
 				SupportsPostFinalizationELSync: false,
-				LiteModeEnabled:                liteModeEnabled,
+				TipModeEnabled:                tipModeEnabled,
 			},
 			ConfigPersistence:               config.DisabledConfigPersistence{},
 			Metrics:                         opmetrics.CLIConfig{},

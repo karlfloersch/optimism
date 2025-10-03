@@ -75,7 +75,7 @@ var (
 )
 
 // runSyncTest contains the shared test logic for all sync modes
-func runSyncTest(gt *testing.T, syncMode sync.Mode, liteModeRPC string) {
+func runSyncTest(gt *testing.T, syncMode sync.Mode, tipModeRPC string) {
 	t := devtest.SerialT(gt)
 
 	if os.Getenv("CIRCLECI_PIPELINE_SCHEDULE_NAME") != "build_daily" && os.Getenv("CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH") != "true" {
@@ -85,7 +85,7 @@ func runSyncTest(gt *testing.T, syncMode sync.Mode, liteModeRPC string) {
 	l := t.Logger()
 	require := t.Require()
 	blocksToSync := uint64(20)
-	sys, target := setupSystem(gt, t, blocksToSync, syncMode, liteModeRPC)
+	sys, target := setupSystem(gt, t, blocksToSync, syncMode, tipModeRPC)
 
 	attempts := 500
 	if syncMode == sync.ELSync {
@@ -127,19 +127,19 @@ func TestSyncTesterExtEL(gt *testing.T) {
 	runSyncTest(gt, syncMode, "")
 }
 
-// TestSyncTesterExtELLiteMode tests op-node syncing in lite mode (RPC-based sync)
-func TestSyncTesterExtELLiteMode(gt *testing.T) {
-	liteModeRPC := os.Getenv("OP_NODE_ROLLUP_LITE_MODE_RPC")
-	if liteModeRPC == "" {
-		gt.Skip("OP_NODE_ROLLUP_LITE_MODE_RPC not set, skipping lite mode test")
+// TestSyncTesterExtELTipMode tests op-node syncing in tip mode (RPC-based sync)
+func TestSyncTesterExtELTipMode(gt *testing.T) {
+	tipModeRPC := os.Getenv("OP_NODE_ROLLUP_TIP_MODE_RPC")
+	if tipModeRPC == "" {
+		gt.Skip("OP_NODE_ROLLUP_TIP_MODE_RPC not set, skipping tip mode test")
 	}
-	runSyncTest(gt, sync.CLSync, liteModeRPC)
+	runSyncTest(gt, sync.CLSync, tipModeRPC)
 }
 
 // setupSystem initializes the system for the test and returns the system and the target block number of the session
-func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, liteModeRPC string) (*presets.MinimalExternalEL, uint64) {
+func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, tipModeRPC string) (*presets.MinimalExternalEL, uint64) {
 	// Initialize orchestrator
-	orch, target := setupOrchestrator(gt, t, blocksToSync, syncMode, liteModeRPC)
+	orch, target := setupOrchestrator(gt, t, blocksToSync, syncMode, tipModeRPC)
 	system := shim.NewSystem(t)
 	orch.Hydrate(system)
 
@@ -165,7 +165,7 @@ func setupSystem(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.
 }
 
 // setupOrchestrator initializes and configures the orchestrator for the test and returns the orchestrator and the target block number of the session
-func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, liteModeRPC string) (*sysgo.Orchestrator, uint64) {
+func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode sync.Mode, tipModeRPC string) (*sysgo.Orchestrator, uint64) {
 	l := t.Logger()
 	ctx := t.Ctx()
 	require := t.Require()
@@ -197,7 +197,7 @@ func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode
 	l.Info("L1_EL_ENDPOINT", "value", config.L1ELEndpoint)
 	l.Info("TAILSCALE_NETWORKING", "value", os.Getenv("TAILSCALE_NETWORKING"))
 	l.Info("L2_CL_SYNCMODE", "value", syncMode)
-	l.Info("LITE_MODE_RPC", "value", liteModeRPC)
+	l.Info("TIP_MODE_RPC", "value", tipModeRPC)
 
 	// Setup orchestrator
 	logger := testlog.Logger(gt, log.LevelInfo)
@@ -224,11 +224,11 @@ func setupOrchestrator(gt *testing.T, t devtest.T, blocksToSync uint64, syncMode
 	target := initial + blocksToSync
 	l.Info("LATEST_BLOCK", "latest_block", latestBlock.NumberU64(), "session_initial_block", initial, "target_block", target)
 
-	// Set lite mode environment variable if provided
+	// Set tip mode environment variable if provided
 	// The op-node will automatically pick this up during initialization
-	if liteModeRPC != "" {
-		os.Setenv("OP_NODE_ROLLUP_LITE_MODE", "true")
-		os.Setenv("OP_NODE_ROLLUP_LITE_MODE_RPC", liteModeRPC)
+	if tipModeRPC != "" {
+		os.Setenv("OP_NODE_ROLLUP_TIP_MODE", "true")
+		os.Setenv("OP_NODE_ROLLUP_TIP_MODE_RPC", tipModeRPC)
 	}
 
 	opt := presets.WithExternalELWithSuperchainRegistry(config)

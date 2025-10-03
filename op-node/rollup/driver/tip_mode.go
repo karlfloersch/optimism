@@ -28,8 +28,8 @@ type EngineCtrl interface {
 	Finalized() eth.L2BlockRef
 }
 
-// LiteModeSync handles safe/finalized head progression by polling an external RPC
-type LiteModeSync struct {
+// TipModeSync handles safe/finalized head progression by polling an external RPC
+type TipModeSync struct {
 	log      log.Logger
 	ctx      context.Context
 	remoteEL L2Source
@@ -38,16 +38,16 @@ type LiteModeSync struct {
 	cfg      *rollup.Config
 }
 
-// NewLiteModeSync creates a new lite mode sync component
-func NewLiteModeSync(
+// NewTipModeSync creates a new tip mode sync component
+func NewTipModeSync(
 	ctx context.Context,
 	log log.Logger,
 	cfg *rollup.Config,
 	remoteEL L2Source,
 	localEL L2Source,
 	eng EngineCtrl,
-) *LiteModeSync {
-	return &LiteModeSync{
+) *TipModeSync {
+	return &TipModeSync{
 		log:      log,
 		ctx:      ctx,
 		remoteEL: remoteEL,
@@ -59,7 +59,7 @@ func NewLiteModeSync(
 
 // SyncStep performs one iteration of sync by polling the remote RPC for safe/finalized heads.
 // Returns (madeProgress, error) where madeProgress indicates if we actually synced new blocks.
-func (lm *LiteModeSync) SyncStep() (bool, error) {
+func (lm *TipModeSync) SyncStep() (bool, error) {
 	madeProgress := false
 
 	// Step 1: Update finalized head (may also catch up safe head)
@@ -82,7 +82,7 @@ func (lm *LiteModeSync) SyncStep() (bool, error) {
 }
 // findAndImportNextSafe walks backward from remote safe to find where it connects to our chain.
 // Returns (madeProgress, error) where madeProgress indicates if we imported a new block.
-func (lm *LiteModeSync) findAndImportNextSafe() (bool, error) {
+func (lm *TipModeSync) findAndImportNextSafe() (bool, error) {
 	localSafe := lm.engine.SafeL2Head()
 	localFinalized := lm.engine.Finalized()
 
@@ -158,7 +158,7 @@ func (lm *LiteModeSync) findAndImportNextSafe() (bool, error) {
 // getLocalBlockHash returns the hash of a local block by number.
 // It checks in-memory heads first (safe, finalized) before querying the local EL.
 // Returns (hash, true) if found locally, (zero, false) if not found.
-func (lm *LiteModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
+func (lm *TipModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
 	localSafe := lm.engine.SafeL2Head()
 	localFinalized := lm.engine.Finalized()
 
@@ -180,7 +180,7 @@ func (lm *LiteModeSync) getLocalBlockHash(num uint64) (common.Hash, bool) {
 }
 
 // insertAndPromoteBlock fetches the payload and inserts it via the engine
-func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2BlockRef) error {
+func (lm *TipModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2BlockRef) error {
 	// Check if we already have this block locally (via P2P or previous sync)
 	localBlock, err := lm.localEL.L2BlockRefByNumber(lm.ctx, blockNum)
 	needsInsertion := err != nil || localBlock.Hash != blockRef.Hash
@@ -197,21 +197,21 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 			return fmt.Errorf("failed to insert payload for block %d: %w", blockNum, err)
 		}
 
-		lm.log.Info("Lite mode: inserted payload",
+		lm.log.Info("Tip mode: inserted payload",
 			"number", blockRef.Number,
 			"hash", blockRef.Hash,
 		)
 	} else {
-		lm.log.Debug("Lite mode: block already exists locally (likely from P2P), skipping insertion",
+		lm.log.Debug("Tip mode: block already exists locally (likely from P2P), skipping insertion",
 			"number", blockRef.Number,
 			"hash", blockRef.Hash,
 		)
 	}
 
-	// Promote to safe (dummy L1 origin for lite mode)
+	// Promote to safe (dummy L1 origin for tip mode)
 	lm.engine.PromoteSafe(lm.ctx, blockRef, eth.L1BlockRef{})
 
-	lm.log.Info("Lite mode: promoted block to safe",
+	lm.log.Info("Tip mode: promoted block to safe",
 		"number", blockRef.Number,
 		"hash", blockRef.Hash,
 	)
@@ -221,7 +221,7 @@ func (lm *LiteModeSync) insertAndPromoteBlock(blockNum uint64, blockRef eth.L2Bl
 
 // updateFinalized updates the finalized head if remote is ahead.
 // Returns (madeProgress, error) where madeProgress indicates if we updated finalized.
-func (lm *LiteModeSync) updateFinalized() (bool, error) {
+func (lm *TipModeSync) updateFinalized() (bool, error) {
 	// Fetch remote finalized head
 	remoteFin, err := lm.remoteEL.L2BlockRefByLabel(lm.ctx, eth.Finalized)
 	if err != nil {
@@ -256,7 +256,7 @@ func (lm *LiteModeSync) updateFinalized() (bool, error) {
 	// Promote to finalized (no error return)
 	lm.engine.PromoteFinalized(lm.ctx, remoteFin)
 
-	lm.log.Info("Lite mode: promoted block to finalized",
+	lm.log.Info("Tip mode: promoted block to finalized",
 		"number", remoteFin.Number,
 		"hash", remoteFin.Hash,
 	)
@@ -268,13 +268,13 @@ func (lm *LiteModeSync) updateFinalized() (bool, error) {
 	// while safe is still progressing block-by-block
 	localSafe := lm.engine.SafeL2Head()
 	if localSafe.Number < remoteFin.Number {
-		lm.log.Info("Lite mode: catching up safe head to finalized",
+		lm.log.Info("Tip mode: catching up safe head to finalized",
 			"old_safe", localSafe.Number,
 			"finalized", remoteFin.Number)
 
 		// Promote safe to match finalized
 		lm.engine.PromoteSafe(lm.ctx, remoteFin, eth.L1BlockRef{})
-		lm.log.Info("Lite mode: promoted safe head to match finalized",
+		lm.log.Info("Tip mode: promoted safe head to match finalized",
 			"number", remoteFin.Number,
 			"hash", remoteFin.Hash)
 	}

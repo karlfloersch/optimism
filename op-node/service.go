@@ -200,8 +200,8 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		SequencerStopped:     ctx.Bool(flags.SequencerStoppedFlag.Name),
 		SequencerMaxSafeLag:  ctx.Uint64(flags.SequencerMaxSafeLagFlag.Name),
 		RecoverMode:          ctx.Bool(flags.SequencerRecoverMode.Name),
-		LiteModeEnabled: ctx.Bool(flags.LiteModeEnabled.Name),
-		LiteModeRPC:     ctx.String(flags.LiteModeRPC.Name),
+		TipModeEnabled: ctx.Bool(flags.TipModeEnabled.Name),
+		TipModeRPC:     ctx.String(flags.TipModeRPC.Name),
 	}
 }
 
@@ -316,7 +316,7 @@ func NewSyncConfig(ctx *cli.Context, log log.Logger) (*sync.Config, error) {
 		SyncMode:                       mode,
 		SkipSyncStartCheck:             ctx.Bool(flags.SkipSyncStartCheck.Name),
 		SupportsPostFinalizationELSync: engineKind.SupportsPostFinalizationELSync(),
-		LiteModeEnabled:                ctx.Bool(flags.LiteModeEnabled.Name),
+		TipModeEnabled:                ctx.Bool(flags.TipModeEnabled.Name),
 	}
 	if ctx.Bool(flags.L2EngineSyncEnabled.Name) {
 		cfg.SyncMode = sync.ELSync

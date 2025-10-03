@@ -25,12 +25,12 @@ type Config struct {
 	// to be compatible with verifiers forcefully generating the same block while catching up the sequencing window timeout.
 	RecoverMode bool `json:"recover_mode"`
 
-	// LiteModeEnabled disables L1 derivation and sources safe/finalized heads from an external RPC.
+	// TipModeEnabled disables L1 derivation and sources safe/finalized heads from an external RPC.
 	// When enabled, the node will not perform derivation and will instead poll the remote RPC
 	// for safe and finalized block heads.
-	LiteModeEnabled bool `json:"lite_mode_enabled"`
+	TipModeEnabled bool `json:"tip_mode_enabled"`
 
-	// LiteModeRPC is the remote execution client RPC endpoint to query for safe/finalized heads.
-	// Only used when LiteModeEnabled is true.
-	LiteModeRPC string `json:"lite_mode_rpc"`
+	// TipModeRPC is the remote execution client RPC endpoint to query for safe/finalized heads.
+	// Only used when TipModeEnabled is true.
+	TipModeRPC string `json:"tip_mode_rpc"`
 }

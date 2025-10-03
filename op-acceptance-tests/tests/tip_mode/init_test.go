@@ -1,4 +1,4 @@
-package lite_mode
+package tip_mode
 
 import (
 	"testing"
@@ -9,7 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	presets.DoMain(m,
-		presets.WithLiteModeSystem(),
+		presets.WithTipModeSystem(),
 		presets.WithConsensusLayerSync(),
 		presets.WithCompatibleTypes(compat.SysGo),
 	)

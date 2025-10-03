@@ -299,18 +299,18 @@ var (
 		EnvVars:  prefixEnvVars("ROLLUP_LOAD_PROTOCOL_VERSIONS"),
 		Category: RollupCategory,
 	}
-	/* Lite Mode Flags */
-	LiteModeEnabled = &cli.BoolFlag{
-		Name:     "rollup.lite-mode",
-		Usage:    "Enable lite mode: disables L1 derivation and sources safe/finalized heads from external RPC",
-		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE"),
+	/* Tip Mode Flags */
+	TipModeEnabled = &cli.BoolFlag{
+		Name:     "rollup.tip-mode",
+		Usage:    "Enable tip mode: disables L1 derivation and sources safe/finalized heads from external RPC",
+		EnvVars:  prefixEnvVars("ROLLUP_TIP_MODE"),
 		Value:    false,
 		Category: RollupCategory,
 	}
-	LiteModeRPC = &cli.StringFlag{
-		Name:     "rollup.lite-mode-rpc",
-		Usage:    "External L2 RPC endpoint to query for safe/finalized heads in lite mode (required if lite-mode is enabled)",
-		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE_RPC"),
+	TipModeRPC = &cli.StringFlag{
+		Name:     "rollup.tip-mode-rpc",
+		Usage:    "External L2 RPC endpoint to query for safe/finalized heads in tip mode (required if tip-mode is enabled)",
+		EnvVars:  prefixEnvVars("ROLLUP_TIP_MODE_RPC"),
 		Category: RollupCategory,
 	}
 	SafeDBPath = &cli.StringFlag{
@@ -466,8 +466,8 @@ var optionalFlags = []cli.Flag{
 	HeartbeatURLFlag,
 	RollupHalt,
 	RollupLoadProtocolVersions,
-	LiteModeEnabled,
-	LiteModeRPC,
+	TipModeEnabled,
+	TipModeRPC,
 	ConductorEnabledFlag,
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,

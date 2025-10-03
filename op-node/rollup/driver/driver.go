@@ -134,19 +134,19 @@ func NewDriver(
 		sequencer = sequencing.DisabledSequencer{}
 	}
 
-	// Initialize lite mode sync if enabled
-	var liteModeSync *LiteModeSync
-	if syncCfg.LiteModeEnabled {
-		if driverCfg.LiteModeRPC == "" {
-			log.Crit("Lite mode enabled but no remote RPC endpoint configured")
+	// Initialize tip mode sync if enabled
+	var tipModeSync *TipModeSync
+	if syncCfg.TipModeEnabled {
+		if driverCfg.TipModeRPC == "" {
+			log.Crit("Tip mode enabled but no remote RPC endpoint configured")
 		}
 
-		log.Info("Initializing lite mode sync", "remote_rpc", driverCfg.LiteModeRPC)
+		log.Info("Initializing tip mode sync", "remote_rpc", driverCfg.TipModeRPC)
 
 		// Create remote L2 client (no JWT needed for external RPCs)
-		remoteRPC, err := client.NewRPC(driverCtx, log, driverCfg.LiteModeRPC)
+		remoteRPC, err := client.NewRPC(driverCtx, log, driverCfg.TipModeRPC)
 		if err != nil {
-			log.Crit("Failed to create remote RPC client for lite mode", "err", err)
+			log.Crit("Failed to create remote RPC client for tip mode", "err", err)
 		}
 
 		// Create L2 client for the remote endpoint
@@ -154,10 +154,10 @@ func NewDriver(
 		remoteClientCfg := sources.L2ClientDefaultConfig(cfg, true)
 		remoteL2Client, err := sources.NewL2Client(remoteRPC, log, nil, remoteClientCfg)
 		if err != nil {
-			log.Crit("Failed to create remote L2 client for lite mode", "err", err)
+			log.Crit("Failed to create remote L2 client for tip mode", "err", err)
 		}
 
-		liteModeSync = NewLiteModeSync(
+		tipModeSync = NewTipModeSync(
 			driverCtx,
 			log,
 			cfg,
@@ -165,7 +165,7 @@ func NewDriver(
 			l2,             // localEL
 			ec,             // engine
 		)
-		syncDeriver.LiteModeSync = liteModeSync
+		syncDeriver.TipModeSync = tipModeSync
 	}
 
 	driverEmitter := sys.Register("driver", nil)
@@ -185,7 +185,7 @@ func NewDriver(
 		sequencer:     sequencer,
 		metrics:       metrics,
 		altSync:       altSync,
-		liteModeSync:  liteModeSync,
+		tipModeSync:  tipModeSync,
 	}
 
 	return driver
@@ -218,8 +218,8 @@ type Driver struct {
 
 	sequencer sequencing.SequencerIface
 
-	// Lite mode sync component (nil if not in lite mode)
-	liteModeSync *LiteModeSync
+	// Tip mode sync component (nil if not in tip mode)
+	tipModeSync *TipModeSync
 
 	metrics Metrics
 	log     log.Logger
@@ -270,10 +270,10 @@ func (s *Driver) eventLoop() {
 
 	defer s.driverCancel()
 
-	// In lite mode, emit a reset event at startup to properly initialize forkchoice state.
+	// In tip mode, emit a reset event at startup to properly initialize forkchoice state.
 	// This triggers FindL2Heads which handles the case where unsafe < finalized.
-	if s.liteModeSync != nil {
-		s.log.Info("Lite mode: requesting initial engine reset to establish forkchoice state")
+	if s.tipModeSync != nil {
+		s.log.Info("Tip mode: requesting initial engine reset to establish forkchoice state")
 		s.emitter.Emit(s.driverCtx, engine.ResetEngineRequestEvent{})
 	}
 
