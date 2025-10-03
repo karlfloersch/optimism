@@ -200,9 +200,8 @@ func NewDriverConfig(ctx *cli.Context) *driver.Config {
 		SequencerStopped:     ctx.Bool(flags.SequencerStoppedFlag.Name),
 		SequencerMaxSafeLag:  ctx.Uint64(flags.SequencerMaxSafeLagFlag.Name),
 		RecoverMode:          ctx.Bool(flags.SequencerRecoverMode.Name),
-		LiteModeEnabled:      ctx.Bool(flags.LiteModeEnabled.Name),
-		LiteModeRPC:          ctx.String(flags.LiteModeRPC.Name),
-		LiteModePollInterval: ctx.Duration(flags.LiteModePollInterval.Name),
+		LiteModeEnabled: ctx.Bool(flags.LiteModeEnabled.Name),
+		LiteModeRPC:     ctx.String(flags.LiteModeRPC.Name),
 	}
 }
 

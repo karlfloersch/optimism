@@ -313,13 +313,6 @@ var (
 		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE_RPC"),
 		Category: RollupCategory,
 	}
-	LiteModePollInterval = &cli.DurationFlag{
-		Name:     "rollup.lite-mode-poll-interval",
-		Usage:    "Polling interval for querying safe/finalized heads from external RPC in lite mode",
-		EnvVars:  prefixEnvVars("ROLLUP_LITE_MODE_POLL_INTERVAL"),
-		Value:    time.Second * 1,
-		Category: RollupCategory,
-	}
 	SafeDBPath = &cli.StringFlag{
 		Name:     "safedb.path",
 		Usage:    "File path used to persist safe head update data. Disabled if not set.",
@@ -475,7 +468,6 @@ var optionalFlags = []cli.Flag{
 	RollupLoadProtocolVersions,
 	LiteModeEnabled,
 	LiteModeRPC,
-	LiteModePollInterval,
 	ConductorEnabledFlag,
 	ConductorRpcFlag,
 	ConductorRpcTimeoutFlag,

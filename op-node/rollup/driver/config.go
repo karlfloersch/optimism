@@ -1,7 +1,5 @@
 package driver
 
-import "time"
-
 type Config struct {
 	// VerifierConfDepth is the distance to keep from the L1 head when reading L1 data for L2 derivation.
 	VerifierConfDepth uint64 `json:"verifier_conf_depth"`
@@ -35,8 +33,4 @@ type Config struct {
 	// LiteModeRPC is the remote execution client RPC endpoint to query for safe/finalized heads.
 	// Only used when LiteModeEnabled is true.
 	LiteModeRPC string `json:"lite_mode_rpc"`
-
-	// LiteModePollInterval is the interval at which to poll the remote RPC for safe/finalized head updates.
-	// Defaults to 1 second if not specified.
-	LiteModePollInterval time.Duration `json:"lite_mode_poll_interval"`
 }

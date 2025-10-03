@@ -141,9 +141,7 @@ func NewDriver(
 			log.Crit("Lite mode enabled but no remote RPC endpoint configured")
 		}
 
-		log.Info("Initializing lite mode sync",
-			"remote_rpc", driverCfg.LiteModeRPC,
-			"poll_interval", driverCfg.LiteModePollInterval)
+		log.Info("Initializing lite mode sync", "remote_rpc", driverCfg.LiteModeRPC)
 
 		// Create remote L2 client (no JWT needed for external RPCs)
 		remoteRPC, err := client.NewRPC(driverCtx, log, driverCfg.LiteModeRPC)
