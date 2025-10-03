@@ -7,7 +7,7 @@ set -e
 # Configuration
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${TEST_DIR}/test_run_$(date +%Y%m%d_%H%M%S).log"
-TIP_MODE_RPC="${OP_NODE_TIP_MODE_RPC:-}"
+TIP_MODE_RPC="${OP_NODE_ROLLUP_TIP_MODE_RPC:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -37,7 +37,7 @@ CIRCLECI_PARAMETERS_SYNC_TEST_OP_NODE_DISPATCH=true \
   TAILSCALE_NETWORKING=true \
   NETWORK_PRESET=op-sepolia \
   GOMAXPROCS=5 \
-  OP_NODE_TIP_MODE_RPC="${TIP_MODE_RPC}" \
+  OP_NODE_ROLLUP_TIP_MODE_RPC="${TIP_MODE_RPC}" \
   go test -run '^TestSyncTesterExtEL$' -v -count=1 2>&1 | tee "${LOG_FILE}"
 
 # Check exit code
