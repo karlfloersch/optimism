@@ -62,6 +62,16 @@ type ExecEngine interface {
 	NewPayload(ctx context.Context, payload *eth.ExecutionPayload, parentBeaconBlockRoot *common.Hash) (*eth.PayloadStatusV1, error)
 	L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error)
 	L2BlockRefByHash(ctx context.Context, hash common.Hash) (eth.L2BlockRef, error)
+	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
+}
+
+// LightModeClient provides access to a trusted remote node when light CL mode (light mode) is enabled.
+// It supplies safe/finalized block references and payloads.
+type LightModeClient interface {
+	L2BlockRefByLabel(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error)
+	L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error)
+	PayloadByHash(ctx context.Context, hash common.Hash) (*eth.ExecutionPayloadEnvelope, error)
+	PayloadByLabel(ctx context.Context, label eth.BlockLabel) (*eth.ExecutionPayloadEnvelope, error)
 }
 
 // Metrics interface for CLSync functionality
@@ -105,6 +115,9 @@ type EngineController struct {
 
 	// L1 chain for reset functionality
 	l1 sync.L1Chain
+
+	// Remote L2 client for light CL mode (optional)
+	lightModeClient LightModeClient
 
 	ctx     context.Context
 	emitter event.Emitter
@@ -432,6 +445,7 @@ func (e *EngineController) tryUpdateEngineInternal(ctx context.Context) error {
 		e.emitter.Emit(ctx, rollup.CriticalErrorEvent{Err: err}) // make the node exit, things are very wrong.
 		return err
 	}
+
 	fc := eth.ForkchoiceState{
 		HeadBlockHash:      e.unsafeHead.Hash,
 		SafeBlockHash:      e.safeHead.Hash,
@@ -531,6 +545,7 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 		SafeBlockHash:      e.safeHead.Hash,
 		FinalizedBlockHash: e.finalizedHead.Hash,
 	}
+
 	if e.syncStatus == syncStatusFinishedELButNotFinalized {
 		fc.SafeBlockHash = envelope.ExecutionPayload.BlockHash
 		fc.FinalizedBlockHash = envelope.ExecutionPayload.BlockHash
@@ -588,6 +603,99 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 		"mgasps", float64(envelope.ExecutionPayload.GasUsed)*1000/float64(totalTime))
 
 	return nil
+}
+
+// FetchAndInsertRemotePayloadIfMissing queries a block from the remote light CL mode source by label.
+// If the block is missing locally or the local chain has diverged, it fetches and inserts the
+// payload via NewPayload. Returns the block hash, block ref, and whether a reorg is needed.
+func (e *EngineController) FetchAndInsertRemotePayloadIfMissing(ctx context.Context, label eth.BlockLabel) (common.Hash, eth.L2BlockRef, bool, error) {
+	if e.lightModeClient == nil {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("light mode client not configured")
+	}
+
+	// Query block ref from remote L2 to get the block number and hash
+	remoteRef, err := e.lightModeClient.L2BlockRefByLabel(ctx, label)
+	if err != nil {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("failed to fetch %s block from remote L2: %w", label, err)
+	}
+
+	// Check if local EL has this block at this number (canonical chain check)
+	localRef, err := e.engine.L2BlockRefByNumber(ctx, remoteRef.Number)
+	if err == nil && localRef.Hash == remoteRef.Hash {
+		// Block already exists locally on canonical chain
+		e.log.Debug("Remote L2 block already exists locally", "label", label, "hash", remoteRef.Hash, "number", remoteRef.Number)
+		return remoteRef.Hash, remoteRef, false, nil
+	}
+
+	// Either block doesn't exist or local chain has diverged - need to fetch and insert
+	needsReorg := false
+	if err == nil && localRef.Hash != remoteRef.Hash {
+		// Local chain has diverged at this block number
+		e.log.Warn("Local chain diverged from remote L2, triggering reorg",
+			"label", label,
+			"remote_hash", remoteRef.Hash,
+			"local_hash", localRef.Hash,
+			"number", remoteRef.Number)
+		needsReorg = true
+	} else if err != nil {
+		// Block doesn't exist locally yet (any error type treated as not found)
+		e.log.Info("Fetching missing block from remote L2", "label", label, "hash", remoteRef.Hash, "number", remoteRef.Number, "check_err", err)
+	}
+
+	// Fetch the full execution payload from remote L2
+	envelope, err := e.lightModeClient.PayloadByHash(ctx, remoteRef.Hash)
+	if err != nil {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("failed to fetch payload from remote L2: %w", err)
+	}
+
+	// Insert payload into local EL
+	status, err := e.engine.NewPayload(ctx, envelope.ExecutionPayload, envelope.ParentBeaconBlockRoot)
+	if err != nil {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("failed to insert remote payload into local EL: %w", err)
+	}
+	if status.Status == eth.ExecutionInvalid {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("remote payload is invalid: %w", eth.NewPayloadErr(envelope.ExecutionPayload, status))
+	}
+	if status.Status == eth.ExecutionValid {
+		if needsReorg {
+			e.log.Warn("Successfully inserted diverged block from remote L2", "label", label, "hash", remoteRef.Hash, "number", remoteRef.Number)
+		} else {
+			e.log.Info("Successfully inserted remote L2 block into local EL", "label", label, "hash", remoteRef.Hash, "number", remoteRef.Number)
+		}
+	} else if status.Status == eth.ExecutionSyncing || status.Status == eth.ExecutionAccepted {
+		// EL is syncing or accepted the block but hasn't fully processed it yet
+		// This is expected when the remote safe head is ahead of what the local EL has
+		e.log.Info("Remote L2 block insertion pending", "label", label, "hash", remoteRef.Hash, "number", remoteRef.Number, "status", status.Status)
+	} else {
+		return common.Hash{}, eth.L2BlockRef{}, false, fmt.Errorf("unexpected payload status %s: %w", status.Status, eth.NewPayloadErr(envelope.ExecutionPayload, status))
+	}
+
+	// Note: We don't set unsafe/safe heads here. The caller (safeSourceL2Ticker) handles
+	// updating all heads atomically after fetching both safe and finalized blocks.
+	// This ensures the invariant that safe <= unsafe is maintained.
+
+	return remoteRef.Hash, remoteRef, needsReorg, nil
+}
+
+// FetchRemoteL2BlockRef queries a block ref from the remote light CL mode source by label.
+// This is a lightweight version of FetchAndInsertRemotePayloadIfMissing that only fetches
+// the block reference without inserting the payload into the local EL.
+func (e *EngineController) FetchRemoteL2BlockRef(ctx context.Context, label eth.BlockLabel) (eth.L2BlockRef, error) {
+	if e.lightModeClient == nil {
+		return eth.L2BlockRef{}, fmt.Errorf("light mode client not configured")
+	}
+
+	remoteRef, err := e.lightModeClient.L2BlockRefByLabel(ctx, label)
+	if err != nil {
+		return eth.L2BlockRef{}, fmt.Errorf("failed to fetch %s block from remote L2: %w", label, err)
+	}
+
+	return remoteRef, nil
+}
+
+// L2BlockRefByNumber queries a block ref from the local EL by number.
+func (e *EngineController) L2BlockRefByNumber(ctx context.Context, num uint64) (eth.L2BlockRef, error) {
+	return e.engine.L2BlockRefByNumber(ctx, num)
 }
 
 // shouldTryBackupUnsafeReorg checks reorging(restoring) unsafe head to backupUnsafeHead is needed.
@@ -834,6 +942,11 @@ func (e *EngineController) SetPipelineResetter(resetter PipelineForceResetter) {
 // SetOriginSelectorResetter sets the origin selector component that needs force reset notifications
 func (e *EngineController) SetOriginSelectorResetter(resetter OriginSelectorForceResetter) {
 	e.originSelectorResetter = resetter
+}
+
+// SetLightModeClient sets the remote client used when light mode is enabled.
+func (e *EngineController) SetLightModeClient(client LightModeClient) {
+	e.lightModeClient = client
 }
 
 // ForceReset performs a forced reset to the specified block references, acquiring lock

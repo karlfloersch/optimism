@@ -290,6 +290,8 @@ func WithOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				SyncMode:                       syncMode,
 				SkipSyncStartCheck:             false,
 				SupportsPostFinalizationELSync: false,
+				LightMode:                      cfg.LightMode,
+				LightModeRPC:                   cfg.LightModeRPC,
 			},
 			ConfigPersistence:               config.DisabledConfigPersistence{},
 			Metrics:                         opmetrics.CLIConfig{},

@@ -118,6 +118,18 @@ var (
 		}(),
 		Category: RollupCategory,
 	}
+	LightModeFlag = &cli.BoolFlag{
+		Name:     "light-mode",
+		Usage:    "Enable light CL mode (“light mode”) to follow a trusted remote node for safe/finalized heads",
+		EnvVars:  prefixEnvVars("LIGHT_MODE"),
+		Category: RollupCategory,
+	}
+	LightModeRPCFlag = &cli.StringFlag{
+		Name:     "light-mode.rpc",
+		Usage:    "RPC endpoint of the trusted L2 node to follow when light CL mode is enabled",
+		EnvVars:  prefixEnvVars("LIGHT_MODE_RPC"),
+		Category: RollupCategory,
+	}
 	RPCAdminPersistence = &cli.StringFlag{
 		Name:     "rpc.admin-state",
 		Usage:    "File path used to persist state changes made via the admin API so they persist across restarts. Disabled if not set.",
@@ -436,6 +448,8 @@ var optionalFlags = []cli.Flag{
 	BeaconCheckIgnore,
 	BeaconFetchAllSidecars,
 	SyncModeFlag,
+	LightModeFlag,
+	LightModeRPCFlag,
 	FetchWithdrawalRootFromState,
 	L1TrustRPC,
 	L1RPCProviderKind,

@@ -33,6 +33,11 @@ type L2CLConfig struct {
 
 	// NoDiscovery is the flag to enable/disable discovery
 	NoDiscovery bool
+
+	// LightMode enables following a trusted remote node for safe/finalized heads.
+	LightMode bool
+	// LightModeRPC is the RPC endpoint of the trusted remote node.
+	LightModeRPC string
 }
 
 func L2CLSequencer() L2CLOption {
@@ -56,6 +61,8 @@ func DefaultL2CLConfig() *L2CLConfig {
 		IndexingMode:      false,
 		EnableReqRespSync: true,
 		NoDiscovery:       false,
+		LightMode:         false,
+		LightModeRPC:      "",
 	}
 }
 

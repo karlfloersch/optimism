@@ -232,6 +232,15 @@ func (s *SyncDeriver) SyncStep() {
 		return
 	}
 
+	if s.SyncCfg.LightMode {
+		// The derivation pipeline cannot move forwards when using light CL mode.
+		// However, we don't reset the step backoff here because we still want the
+		// unsafe head to progress at max speed via P2P gossip.
+		s.Log.Debug("Skipping derivation pipeline because using light CL mode.",
+			"unsafe_head", s.Engine.UnsafeL2Head())
+		return
+	}
+
 	// Any now processed forkchoice updates will trigger CL-sync payload processing, if any payload is queued up.
 
 	// Since we don't force attributes to be processed at this point,

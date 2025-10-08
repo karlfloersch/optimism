@@ -22,8 +22,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/status"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
+	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/event"
+	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -59,9 +61,28 @@ func NewDriver(
 	l1 = metered.NewMeteredL1Fetcher(l1Tracker, metrics)
 	verifConfDepth := confdepth.NewConfDepth(driverCfg.VerifierConfDepth, statusTracker.L1Head, l1)
 
+	// Initialize remote L2 client for light CL mode (light mode)
+	var lightModeClient *sources.L2Client
+	if syncCfg.LightMode {
+		rpcClient, err := client.NewRPC(driverCtx, log, syncCfg.LightModeRPC)
+		if err != nil {
+			log.Crit("Failed to create light mode RPC client", "err", err)
+		}
+
+		lightModeClient, err = sources.NewL2Client(rpcClient, log, nil, sources.L2ClientDefaultConfig(cfg, true))
+		if err != nil {
+			log.Crit("Failed to create light mode client", "err", err)
+		}
+
+		log.Info("Initialized light CL upstream", "rpc", syncCfg.LightModeRPC)
+	}
+
 	ec := engine.NewEngineController(driverCtx, l2, log, metrics, cfg, syncCfg, l1, sys.Register("engine-controller", nil))
 	// TODO(#17115): Refactor dependency cycles
 	ec.SetCrossUpdateHandler(statusTracker)
+	if lightModeClient != nil {
+		ec.SetLightModeClient(lightModeClient)
+	}
 
 	var finalizer Finalizer
 	if cfg.AltDAEnabled() {
@@ -268,6 +289,11 @@ func (s *Driver) eventLoop() {
 	defer altSyncTicker.Stop()
 	lastUnsafeL2 := s.SyncDeriver.Engine.UnsafeL2Head()
 
+	// Create a ticker to sync safe/finalized from remote L2 when light mode is enabled
+	// Unlike altSyncTicker, this does NOT reset based on chain progress - it always fires
+	lightModeTicker := time.NewTicker(4 * time.Second)
+	defer lightModeTicker.Stop()
+
 	for {
 		if s.driverCtx.Err() != nil { // don't try to schedule/handle more work when we are closing.
 			return
@@ -292,6 +318,23 @@ func (s *Driver) eventLoop() {
 			cancel()
 			if err != nil {
 				s.log.Warn("failed to check for unsafe L2 blocks to sync", "err", err)
+			}
+		case <-lightModeTicker.C:
+			// Sync safe/finalized from remote L2 when using light CL mode
+			if s.SyncDeriver.SyncCfg.LightMode {
+				// Skip if EL is syncing - consistent with SyncStep behavior
+				if s.SyncDeriver.Engine.IsEngineSyncing() {
+					s.log.Debug("Skipping light CL mode update because engine is syncing")
+					continue
+				}
+
+				ctx, cancel := context.WithTimeout(s.driverCtx, time.Second*2)
+				err := s.syncSafeHeadFromLightModePeer(ctx)
+				cancel()
+
+				if err != nil {
+					s.log.Warn("Failed to sync safe head from light mode peer", "err", err)
+				}
 			}
 		case <-s.sched.NextDelayedStep():
 			s.sched.AttemptStep(s.driverCtx)
@@ -319,6 +362,44 @@ func (s *Driver) eventLoop() {
 			return
 		}
 	}
+}
+
+// syncSafeHeadFromLightModePeer fetches safe and finalized heads from a trusted remote node
+// and updates the local engine state when light CL mode is enabled.
+func (s *Driver) syncSafeHeadFromLightModePeer(ctx context.Context) error {
+	s.log.Debug("syncSafeHeadFromLightModePeer: fetching finalized/safe from remote L2 (light CL mode)")
+
+	// Fetch finalized and safe refs from remote L2
+	remoteFinalizedRef, err := s.SyncDeriver.Engine.FetchRemoteL2BlockRef(ctx, eth.Finalized)
+	if err != nil {
+		s.log.Warn("Failed to fetch finalized block from remote L2", "err", err)
+		return err
+	}
+
+	remoteSafeRef, err := s.SyncDeriver.Engine.FetchRemoteL2BlockRef(ctx, eth.Safe)
+	if err != nil {
+		s.log.Warn("Failed to fetch safe block from remote L2", "err", err)
+		return err
+	}
+
+	// Check if remote safe block is on our canonical chain
+	localRef, err := s.SyncDeriver.Engine.L2BlockRefByNumber(ctx, remoteSafeRef.Number)
+	if err != nil || localRef.Hash != remoteSafeRef.Hash {
+		// Either we don't have the block yet, or it's a different hash (reorg needed)
+		s.log.Info("Remote safe block not on canonical chain, advancing unsafe head",
+			"remote_safe", remoteSafeRef.Number,
+			"remote_hash", remoteSafeRef.Hash,
+			"local_err", err,
+			"needs_reorg", err == nil && localRef.Hash != remoteSafeRef.Hash)
+		s.SyncDeriver.Engine.SetUnsafeHead(remoteSafeRef)
+	}
+
+	// Update heads and request forkchoice update
+	s.SyncDeriver.Engine.SetFinalizedHead(remoteFinalizedRef)
+	s.SyncDeriver.Engine.SetSafeHead(remoteSafeRef)
+	s.SyncDeriver.Engine.SetLocalSafeHead(remoteSafeRef)
+	s.SyncDeriver.Engine.RequestForkchoiceUpdate(ctx)
+	return nil
 }
 
 // ResetDerivationPipeline forces a reset of the derivation pipeline.

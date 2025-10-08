@@ -72,4 +72,9 @@ type Config struct {
 	SkipSyncStartCheck bool `json:"skip_sync_start_check"`
 
 	SupportsPostFinalizationELSync bool `json:"supports_post_finalization_elsync"`
+
+	// LightMode (light CL mode) outsources safe/finalized head updates to a trusted remote node.
+	LightMode bool `json:"light_mode"`
+	// LightModeRPC is the RPC endpoint of the remote node to follow when light mode is enabled.
+	LightModeRPC string `json:"light_mode_rpc,omitempty"`
 }

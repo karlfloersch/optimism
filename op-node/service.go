@@ -331,10 +331,28 @@ func NewSyncConfig(ctx cliiface.Context, log log.Logger) (*sync.Config, error) {
 	}
 
 	engineKind := engine.Kind(ctx.String(flags.L2EngineKind.Name))
+
+	// Parse light CL mode (“light mode”) config
+	lightMode := ctx.Bool(flags.LightModeFlag.Name)
+	lightModeRPC := ctx.String(flags.LightModeRPCFlag.Name)
+
+	// Validate light CL mode configuration
+	if lightMode && lightModeRPC == "" {
+		return nil, fmt.Errorf("--light-mode.rpc is required when --light-mode is enabled")
+	}
+	if lightMode && mode == sync.ELSync {
+		return nil, fmt.Errorf("--light-mode is not compatible with --syncmode=execution-layer")
+	}
+	if lightMode {
+		log.Warn("Using light CL mode (light mode) - trusting remote node for safe/finalized heads!", "remote_rpc", lightModeRPC)
+	}
+
 	cfg := &sync.Config{
 		SyncMode:                       mode,
 		SkipSyncStartCheck:             ctx.Bool(flags.SkipSyncStartCheck.Name),
 		SupportsPostFinalizationELSync: engineKind.SupportsPostFinalizationELSync(),
+		LightMode:                      lightMode,
+		LightModeRPC:                   lightModeRPC,
 	}
 	if ctx.Bool(flags.L2EngineSyncEnabled.Name) {
 		cfg.SyncMode = sync.ELSync
