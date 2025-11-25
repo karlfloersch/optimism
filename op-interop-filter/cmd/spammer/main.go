@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/urfave/cli/v2"
 
 	opservice "github.com/ethereum-optimism/optimism/op-service"
@@ -68,7 +71,67 @@ var (
 		Value:   "500ms",
 		EnvVars: []string{"QUERY_INTERVAL"},
 	}
+	MetricsPortFlag = &cli.IntFlag{
+		Name:    "metrics.port",
+		Usage:   "Port for Prometheus metrics server",
+		Value:   7301,
+		EnvVars: []string{"METRICS_PORT"},
+	}
+	MetricsEnabledFlag = &cli.BoolFlag{
+		Name:    "metrics.enabled",
+		Usage:   "Enable Prometheus metrics",
+		Value:   true,
+		EnvVars: []string{"METRICS_ENABLED"},
+	}
 )
+
+// Metrics for the spammer
+type SpammerMetrics struct {
+	queriesTotal       *prometheus.CounterVec
+	queryLatency       *prometheus.HistogramVec
+	errorsTotal        prometheus.Counter
+	uptime             prometheus.Gauge
+	currentBlockRange  prometheus.Gauge
+}
+
+func newSpammerMetrics(reg prometheus.Registerer) *SpammerMetrics {
+	m := &SpammerMetrics{
+		queriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "filter_spammer",
+			Name:      "queries_total",
+			Help:      "Total number of queries sent",
+		}, []string{"type", "result"}),
+		queryLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "filter_spammer",
+			Name:      "query_latency_seconds",
+			Help:      "Latency of filter queries",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}, []string{"type"}),
+		errorsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "filter_spammer",
+			Name:      "errors_total",
+			Help:      "Total number of unexpected errors",
+		}),
+		uptime: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "filter_spammer",
+			Name:      "up",
+			Help:      "1 if spammer is running",
+		}),
+		currentBlockRange: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "filter_spammer",
+			Name:      "block_range",
+			Help:      "Number of blocks in sample range",
+		}),
+	}
+
+	reg.MustRegister(m.queriesTotal)
+	reg.MustRegister(m.queryLatency)
+	reg.MustRegister(m.errorsTotal)
+	reg.MustRegister(m.uptime)
+	reg.MustRegister(m.currentBlockRange)
+
+	return m
+}
 
 func main() {
 	oplog.SetupDefaults()
@@ -84,6 +147,8 @@ func main() {
 		NumQueriesFlag,
 		BlockRangeFlag,
 		QueryIntervalFlag,
+		MetricsPortFlag,
+		MetricsEnabledFlag,
 	}, oplog.CLIFlags("SPAMMER")...))
 	app.Action = run
 
@@ -103,6 +168,8 @@ func run(cliCtx *cli.Context) error {
 	numQueries := cliCtx.Int(NumQueriesFlag.Name)
 	blockRange := cliCtx.Int(BlockRangeFlag.Name)
 	queryIntervalStr := cliCtx.String(QueryIntervalFlag.Name)
+	metricsPort := cliCtx.Int(MetricsPortFlag.Name)
+	metricsEnabled := cliCtx.Bool(MetricsEnabledFlag.Name)
 
 	queryInterval, err := time.ParseDuration(queryIntervalStr)
 	if err != nil {
@@ -111,6 +178,30 @@ func run(cliCtx *cli.Context) error {
 
 	ctx := cliCtx.Context
 
+	// Setup metrics
+	var metrics *SpammerMetrics
+	if metricsEnabled {
+		reg := prometheus.NewRegistry()
+		metrics = newSpammerMetrics(reg)
+		metrics.uptime.Set(1)
+		metrics.currentBlockRange.Set(float64(blockRange))
+
+		// Start metrics server
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		server := &http.Server{
+			Addr:    fmt.Sprintf(":%d", metricsPort),
+			Handler: mux,
+		}
+		go func() {
+			logger.Info("Starting metrics server", "port", metricsPort)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("Metrics server error", "err", err)
+			}
+		}()
+		defer server.Shutdown(context.Background())
+	}
+
 	logger.Info("Starting filter spammer",
 		"l2RPC", l2RPC,
 		"filterRPC", filterRPC,
@@ -118,6 +209,8 @@ func run(cliCtx *cli.Context) error {
 		"numQueries", numQueries,
 		"blockRange", blockRange,
 		"queryInterval", queryInterval,
+		"metricsEnabled", metricsEnabled,
+		"metricsPort", metricsPort,
 	)
 
 	// Connect to L2 RPC
@@ -182,6 +275,7 @@ func run(cliCtx *cli.Context) error {
 		chainID:      eth.ChainIDFromUInt64(chainID),
 		startBlock:   startBlock,
 		endBlock:     headNum,
+		metrics:      metrics,
 	}
 
 	// Run queries
@@ -203,6 +297,9 @@ func run(cliCtx *cli.Context) error {
 				if err := spammer.RunValidQuery(ctx); err != nil {
 					logger.Error("Valid query failed unexpectedly", "err", err, "query", i)
 					errorCount++
+					if metrics != nil {
+						metrics.errorsTotal.Inc()
+					}
 					if errorCount > 10 {
 						return fmt.Errorf("too many errors (%d): last error: %w", errorCount, err)
 					}
@@ -214,6 +311,9 @@ func run(cliCtx *cli.Context) error {
 				if err := spammer.RunInvalidQuery(ctx); err != nil {
 					logger.Error("Invalid query test failed", "err", err, "query", i)
 					errorCount++
+					if metrics != nil {
+						metrics.errorsTotal.Inc()
+					}
 					if errorCount > 10 {
 						return fmt.Errorf("too many errors (%d): last error: %w", errorCount, err)
 					}
@@ -249,10 +349,13 @@ type Spammer struct {
 	chainID      eth.ChainID
 	startBlock   uint64
 	endBlock     uint64
+	metrics      *SpammerMetrics
 }
 
 // RunValidQuery fetches a random log and verifies the filter accepts it
 func (s *Spammer) RunValidQuery(ctx context.Context) error {
+	start := time.Now()
+
 	// Pick a random block
 	blockNum := s.startBlock + uint64(rand.Int63n(int64(s.endBlock-s.startBlock+1)))
 
@@ -300,8 +403,21 @@ func (s *Spammer) RunValidQuery(ctx context.Context) error {
 		}
 
 		err := s.filterClient.CallContext(ctx, nil, "supervisor_checkAccessList", entries, suptypes.LocalUnsafe, execDesc)
+
+		// Record metrics
+		if s.metrics != nil {
+			s.metrics.queryLatency.WithLabelValues("valid").Observe(time.Since(start).Seconds())
+		}
+
 		if err != nil {
+			if s.metrics != nil {
+				s.metrics.queriesTotal.WithLabelValues("valid", "rejected").Inc()
+			}
 			return fmt.Errorf("valid query rejected: block=%d logIdx=%d err=%w", blockNum, log.Index, err)
+		}
+
+		if s.metrics != nil {
+			s.metrics.queriesTotal.WithLabelValues("valid", "accepted").Inc()
 		}
 		foundLog = true
 		break
@@ -317,6 +433,8 @@ func (s *Spammer) RunValidQuery(ctx context.Context) error {
 
 // RunInvalidQuery creates an invalid query and verifies the filter rejects it
 func (s *Spammer) RunInvalidQuery(ctx context.Context) error {
+	start := time.Now()
+
 	// Pick a random block
 	blockNum := s.startBlock + uint64(rand.Int63n(int64(s.endBlock-s.startBlock+1)))
 
@@ -367,10 +485,23 @@ func (s *Spammer) RunInvalidQuery(ctx context.Context) error {
 		}
 
 		err := s.filterClient.CallContext(ctx, nil, "supervisor_checkAccessList", entries, suptypes.LocalUnsafe, execDesc)
+
+		// Record metrics
+		if s.metrics != nil {
+			s.metrics.queryLatency.WithLabelValues("invalid").Observe(time.Since(start).Seconds())
+		}
+
 		if err == nil {
+			if s.metrics != nil {
+				s.metrics.queriesTotal.WithLabelValues("invalid", "accepted").Inc()
+			}
 			return fmt.Errorf("invalid query was accepted: block=%d logIdx=%d", blockNum, log.Index)
 		}
+
 		// Error expected - query was correctly rejected
+		if s.metrics != nil {
+			s.metrics.queriesTotal.WithLabelValues("invalid", "rejected").Inc()
+		}
 		foundLog = true
 		break
 	}
