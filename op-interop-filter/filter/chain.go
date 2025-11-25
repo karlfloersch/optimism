@@ -260,9 +260,20 @@ func (c *Chain) initializeLogsDBFromBlock(ctx context.Context, blockNum uint64) 
 
 func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error {
 	total := endBlock - startBlock + 1
-	c.log.Info("Starting backfill", "blocks", total)
+	c.log.Info("Starting backfill", "blocks", total, "from", startBlock, "to", endBlock)
 
 	chainIDUint, _ := c.chainID.Uint64()
+
+	// Log every 10% or every 100 blocks, whichever is more frequent
+	logInterval := total / 10
+	if logInterval < 100 {
+		logInterval = 100
+	}
+	if logInterval > 1000 {
+		logInterval = 1000
+	}
+
+	lastLogTime := time.Now()
 
 	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
 		if ctx.Err() != nil {
@@ -277,8 +288,12 @@ func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error
 		progress := blockNum - startBlock + 1
 		c.metrics.RecordBackfillProgress(chainIDUint, progress, total)
 
-		if progress%1000 == 0 {
-			c.log.Info("Backfill progress", "block", blockNum, "progress", fmt.Sprintf("%.1f%%", float64(progress)/float64(total)*100))
+		// Log progress periodically (by count or time)
+		if progress%logInterval == 0 || time.Since(lastLogTime) > 10*time.Second {
+			c.log.Info("Backfill progress",
+				"block", blockNum,
+				"progress", fmt.Sprintf("%d/%d (%.1f%%)", progress, total, float64(progress)/float64(total)*100))
+			lastLogTime = time.Now()
 		}
 	}
 

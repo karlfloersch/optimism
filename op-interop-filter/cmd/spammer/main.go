@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,13 +99,14 @@ type SpammerMetrics struct {
 
 // RecentQuery stores info about a recent query for debugging
 type RecentQuery struct {
-	Timestamp   string `json:"timestamp"`
-	BlockNumber uint64 `json:"block_number"`
-	TxHash      string `json:"tx_hash"`
-	LogIndex    uint   `json:"log_index"`
-	Address     string `json:"address"`
-	QueryType   string `json:"query_type"` // "valid" or "invalid"
-	Result      string `json:"result"`     // "accepted" or "rejected"
+	Timestamp   string      `json:"timestamp"`
+	ChainID     eth.ChainID `json:"chain_id"`
+	BlockNumber uint64      `json:"block_number"`
+	TxHash      string      `json:"tx_hash"`
+	LogIndex    uint        `json:"log_index"`
+	Address     string      `json:"address"`
+	QueryType   string      `json:"query_type"` // "valid" or "invalid"
+	Result      string      `json:"result"`     // "accepted" or "rejected"
 }
 
 // RecentQueries is a thread-safe ring buffer of recent queries
@@ -298,7 +300,7 @@ func run(cliCtx *cli.Context) error {
 	}
 	defer filterClient.Close()
 
-	// Check filter is ready
+	// Check filter is ready (not in failsafe)
 	var failsafe bool
 	if err := filterClient.CallContext(ctx, &failsafe, "admin_getFailsafeEnabled"); err != nil {
 		return fmt.Errorf("failed to check filter failsafe: %w", err)
@@ -306,7 +308,41 @@ func run(cliCtx *cli.Context) error {
 	if failsafe {
 		return errors.New("filter service is in failsafe mode")
 	}
-	logger.Info("Filter service is ready", "failsafe", failsafe)
+	logger.Info("Filter service responding", "failsafe", failsafe)
+
+	// Wait for backfill to complete by doing a test query
+	// The filter returns "service not ready, backfill in progress" until ready
+	logger.Info("Waiting for filter backfill to complete...")
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Try a dummy checkAccessList call with empty access list
+		// If backfill is in progress, it will return "backfill in progress"
+		// If ready, it will succeed (empty list = valid)
+		var result any
+		err := filterClient.CallContext(ctx, &result, "supervisor_checkAccessList", []any{}, "finalized", map[string]any{
+			"chainID":   fmt.Sprintf("0x%x", chainID),
+			"timestamp": "0x0",
+			"blockNum":  "0x0",
+		})
+		if err == nil {
+			logger.Info("Filter backfill complete, ready to spam")
+			break
+		}
+		errStr := err.Error()
+		if strings.Contains(errStr, "backfill") {
+			logger.Debug("Backfill still in progress, waiting...", "err", errStr)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		// Other errors mean backfill is done but query failed for other reason
+		logger.Info("Filter backfill complete, ready to spam", "testErr", errStr)
+		break
+	}
 
 	// Get current head
 	head, err := ethClient.InfoByLabel(ctx, eth.Unsafe)
@@ -482,6 +518,7 @@ func (s *Spammer) RunValidQuery(ctx context.Context) error {
 		if s.recentQueries != nil {
 			s.recentQueries.Add(RecentQuery{
 				Timestamp:   time.Now().Format("15:04:05"),
+				ChainID:     s.chainID,
 				BlockNumber: blockNum,
 				TxHash:      receipt.TxHash.Hex(),
 				LogIndex:    log.Index,
@@ -585,6 +622,7 @@ func (s *Spammer) RunInvalidQuery(ctx context.Context) error {
 		if s.recentQueries != nil {
 			s.recentQueries.Add(RecentQuery{
 				Timestamp:   time.Now().Format("15:04:05"),
+				ChainID:     s.chainID,
 				BlockNumber: blockNum,
 				TxHash:      receipt.TxHash.Hex(),
 				LogIndex:    log.Index,
