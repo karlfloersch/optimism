@@ -177,7 +177,8 @@ func (c *Chain) initLogsDB() error {
 	}
 
 	// Create LogsDB
-	db, err := logs.NewFromFile(c.log, &noopLogsDBMetrics{}, c.chainID, dbPath, true)
+	dbMetrics := &logsDBMetrics{chainID: chainIDUint, m: c.metrics}
+	db, err := logs.NewFromFile(c.log, dbMetrics, c.chainID, dbPath, true)
 	if err != nil {
 		return err
 	}
@@ -208,6 +209,10 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 		return
 	}
 
+	// Record the starting block
+	chainIDUint, _ := c.chainID.Uint64()
+	c.metrics.RecordLogsDBFirstBlock(chainIDUint, startBlock)
+
 	// Backfill historical blocks
 	headNum := head.NumberU64()
 	if err := c.backfill(ctx, startBlock, headNum); err != nil {
@@ -216,7 +221,6 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 		return
 	}
 
-	chainIDUint, _ := c.chainID.Uint64()
 	c.log.Info("Backfill complete, starting live ingestion")
 	c.ready.Store(true)
 	c.metrics.RecordChainReady(chainIDUint, true)
@@ -361,6 +365,13 @@ func (c *Chain) ingestBlock(ctx context.Context, blockNum uint64) error {
 		return fmt.Errorf("failed to seal block: %w", err)
 	}
 
+	// Record LogsDB metrics
+	chainIDUint, _ := c.chainID.Uint64()
+	c.metrics.RecordLogsDBBlocksSealed(chainIDUint)
+	if logIdx > 0 {
+		c.metrics.RecordLogsDBLogsAdded(chainIDUint, int(logIdx))
+	}
+
 	return nil
 }
 
@@ -389,8 +400,17 @@ func logToHash(log *gethtypes.Log) common.Hash {
 	return processors.LogToLogHash(log)
 }
 
-// noopLogsDBMetrics implements logs.Metrics interface
-type noopLogsDBMetrics struct{}
+// logsDBMetrics bridges logs.Metrics interface to our metrics.Metricer
+type logsDBMetrics struct {
+	chainID uint64
+	m       metrics.Metricer
+}
 
-func (m *noopLogsDBMetrics) RecordDBEntryCount(kind string, count int64) {}
-func (m *noopLogsDBMetrics) RecordDBSearchEntriesRead(count int64)       {}
+func (l *logsDBMetrics) RecordDBEntryCount(kind string, count int64) {
+	// We track total entries via our own metric
+	l.m.RecordLogsDBEntries(l.chainID, count)
+}
+
+func (l *logsDBMetrics) RecordDBSearchEntriesRead(count int64) {
+	// This tracks search efficiency, could add later if needed
+}

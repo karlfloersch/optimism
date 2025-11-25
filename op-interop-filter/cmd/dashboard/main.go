@@ -47,6 +47,12 @@ type Metrics struct {
 	FilterCheckFailed     float64
 	FilterReorgs          map[string]float64
 
+	// LogsDB metrics
+	LogsDBFirstBlock      map[string]float64
+	LogsDBBlocksSealed    map[string]float64
+	LogsDBLogsAdded       map[string]float64
+	LogsDBEntries         map[string]float64
+
 	// Spammer metrics
 	SpammerUp             float64
 	SpammerValidAccepted  float64
@@ -173,6 +179,24 @@ func render(filterURL, spammerURL string, startTime time.Time) {
 
 	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
 
+	// LogsDB Stats
+	fmt.Println("║  LOGSDB                                                                      ║")
+	if len(m.LogsDBBlocksSealed) > 0 {
+		for chainID := range m.LogsDBBlocksSealed {
+			firstBlock := m.LogsDBFirstBlock[chainID]
+			blocksSealed := m.LogsDBBlocksSealed[chainID]
+			logsAdded := m.LogsDBLogsAdded[chainID]
+			entries := m.LogsDBEntries[chainID]
+			fmt.Printf("║    Chain %s: Blocks=%-8.0f Logs=%-10.0f Entries=%-8.0f            ║\n",
+				chainID, blocksSealed, logsAdded, entries)
+			fmt.Printf("║              First Block=%-10.0f                                       ║\n", firstBlock)
+		}
+	} else {
+		fmt.Println("║    No LogsDB data available                                                  ║")
+	}
+
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+
 	// Spammer Status
 	spammerStatus := "🔴 DOWN"
 	if m.SpammerUp > 0 {
@@ -225,6 +249,10 @@ func fetchAllMetrics(filterURL, spammerURL string) Metrics {
 		FilterChainHead:    make(map[string]float64),
 		FilterBackfillProg: make(map[string]float64),
 		FilterReorgs:       make(map[string]float64),
+		LogsDBFirstBlock:   make(map[string]float64),
+		LogsDBBlocksSealed: make(map[string]float64),
+		LogsDBLogsAdded:    make(map[string]float64),
+		LogsDBEntries:      make(map[string]float64),
 	}
 
 	// Fetch filter metrics
@@ -251,6 +279,23 @@ func fetchAllMetrics(filterURL, spammerURL string) Metrics {
 		if strings.HasPrefix(k, "op_interop_filter_reorg_detected_total{") {
 			chainID := extractLabel(k, "chain_id")
 			m.FilterReorgs[chainID] = v
+		}
+		// LogsDB metrics
+		if strings.HasPrefix(k, "op_interop_filter_logsdb_first_block{") {
+			chainID := extractLabel(k, "chain_id")
+			m.LogsDBFirstBlock[chainID] = v
+		}
+		if strings.HasPrefix(k, "op_interop_filter_logsdb_blocks_sealed_total{") {
+			chainID := extractLabel(k, "chain_id")
+			m.LogsDBBlocksSealed[chainID] = v
+		}
+		if strings.HasPrefix(k, "op_interop_filter_logsdb_logs_added_total{") {
+			chainID := extractLabel(k, "chain_id")
+			m.LogsDBLogsAdded[chainID] = v
+		}
+		if strings.HasPrefix(k, "op_interop_filter_logsdb_entries{") {
+			chainID := extractLabel(k, "chain_id")
+			m.LogsDBEntries[chainID] = v
 		}
 	}
 

@@ -19,6 +19,12 @@ type Metricer interface {
 	RecordBackfillProgress(chainID uint64, current, total uint64)
 	RecordCheckAccessList(success bool)
 	RecordReorgDetected(chainID uint64)
+
+	// LogsDB metrics
+	RecordLogsDBEntries(chainID uint64, count int64)
+	RecordLogsDBFirstBlock(chainID uint64, blockNum uint64)
+	RecordLogsDBBlocksSealed(chainID uint64)
+	RecordLogsDBLogsAdded(chainID uint64, count int)
 }
 
 type Metrics struct {
@@ -33,6 +39,12 @@ type Metrics struct {
 	backfillProgress  *prometheus.GaugeVec
 	checkAccessTotal  *prometheus.CounterVec
 	reorgDetected     *prometheus.CounterVec
+
+	// LogsDB metrics
+	logsDBEntries     *prometheus.GaugeVec
+	logsDBFirstBlock  *prometheus.GaugeVec
+	logsDBBlocksSealed *prometheus.CounterVec
+	logsDBLogsAdded   *prometheus.CounterVec
 }
 
 var _ Metricer = (*Metrics)(nil)
@@ -93,6 +105,30 @@ func NewMetrics() *Metrics {
 			Name:      "reorg_detected_total",
 			Help:      "Number of reorgs detected",
 		}, []string{"chain_id"}),
+
+		logsDBEntries: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "logsdb_entries",
+			Help:      "Total entries in LogsDB",
+		}, []string{"chain_id"}),
+
+		logsDBFirstBlock: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "logsdb_first_block",
+			Help:      "First block number in LogsDB",
+		}, []string{"chain_id"}),
+
+		logsDBBlocksSealed: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "logsdb_blocks_sealed_total",
+			Help:      "Total blocks sealed in LogsDB",
+		}, []string{"chain_id"}),
+
+		logsDBLogsAdded: factory.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "logsdb_logs_added_total",
+			Help:      "Total logs added to LogsDB",
+		}, []string{"chain_id"}),
 	}
 }
 
@@ -148,6 +184,22 @@ func (m *Metrics) RecordReorgDetected(chainID uint64) {
 	m.reorgDetected.WithLabelValues(chainIDLabel(chainID)).Inc()
 }
 
+func (m *Metrics) RecordLogsDBEntries(chainID uint64, count int64) {
+	m.logsDBEntries.WithLabelValues(chainIDLabel(chainID)).Set(float64(count))
+}
+
+func (m *Metrics) RecordLogsDBFirstBlock(chainID uint64, blockNum uint64) {
+	m.logsDBFirstBlock.WithLabelValues(chainIDLabel(chainID)).Set(float64(blockNum))
+}
+
+func (m *Metrics) RecordLogsDBBlocksSealed(chainID uint64) {
+	m.logsDBBlocksSealed.WithLabelValues(chainIDLabel(chainID)).Inc()
+}
+
+func (m *Metrics) RecordLogsDBLogsAdded(chainID uint64, count int) {
+	m.logsDBLogsAdded.WithLabelValues(chainIDLabel(chainID)).Add(float64(count))
+}
+
 func chainIDLabel(chainID uint64) string {
 	return fmt.Sprintf("%d", chainID)
 }
@@ -157,11 +209,15 @@ var NoopMetrics Metricer = &noopMetrics{}
 
 type noopMetrics struct{}
 
-func (n *noopMetrics) RecordInfo(version string)                              {}
-func (n *noopMetrics) RecordUp()                                               {}
-func (n *noopMetrics) RecordFailsafeEnabled(enabled bool)                      {}
-func (n *noopMetrics) RecordChainReady(chainID uint64, ready bool)             {}
-func (n *noopMetrics) RecordChainHead(chainID uint64, blockNum uint64)         {}
+func (n *noopMetrics) RecordInfo(version string)                                    {}
+func (n *noopMetrics) RecordUp()                                                    {}
+func (n *noopMetrics) RecordFailsafeEnabled(enabled bool)                           {}
+func (n *noopMetrics) RecordChainReady(chainID uint64, ready bool)                  {}
+func (n *noopMetrics) RecordChainHead(chainID uint64, blockNum uint64)              {}
 func (n *noopMetrics) RecordBackfillProgress(chainID uint64, current, total uint64) {}
-func (n *noopMetrics) RecordCheckAccessList(success bool)                      {}
-func (n *noopMetrics) RecordReorgDetected(chainID uint64)                      {}
+func (n *noopMetrics) RecordCheckAccessList(success bool)                           {}
+func (n *noopMetrics) RecordReorgDetected(chainID uint64)                           {}
+func (n *noopMetrics) RecordLogsDBEntries(chainID uint64, count int64)              {}
+func (n *noopMetrics) RecordLogsDBFirstBlock(chainID uint64, blockNum uint64)       {}
+func (n *noopMetrics) RecordLogsDBBlocksSealed(chainID uint64)                      {}
+func (n *noopMetrics) RecordLogsDBLogsAdded(chainID uint64, count int)              {}
