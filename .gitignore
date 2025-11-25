@@ -50,4 +50,4 @@ __pycache__
 crytic-export
 
 # ignore local asdf config
-.tool-versions
+.tool-versionsbin/

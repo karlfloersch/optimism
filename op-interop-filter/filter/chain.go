@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -84,10 +85,16 @@ func (c *Chain) Start(ctx context.Context, onReorg ReorgCallback) error {
 		c.log,
 		nil, // no metrics for now
 		&sources.EthClientConfig{
-			TrustRPC:          true,
-			MustBePostMerge:   false,
-			RPCProviderKind:   sources.RPCKindBasic,
-			ReceiptsCacheSize: 100,
+			MaxRequestsPerBatch:   20,
+			MaxConcurrentRequests: 10,
+			TrustRPC:              true,
+			MustBePostMerge:       false,
+			RPCProviderKind:       sources.RPCKindBasic,
+			ReceiptsCacheSize:     100,
+			TransactionsCacheSize: 100,
+			HeadersCacheSize:      100,
+			PayloadsCacheSize:     100,
+			BlockRefsCacheSize:    100,
 		},
 	)
 	if err != nil {
@@ -150,13 +157,26 @@ func (c *Chain) Contains(access suptypes.Access) error {
 }
 
 func (c *Chain) initLogsDB() error {
+	chainIDUint, _ := c.chainID.Uint64()
+
 	var dbPath string
 	if c.cfg.DataDir != "" {
-		chainIDUint, _ := c.chainID.Uint64()
 		dbPath = filepath.Join(c.cfg.DataDir, fmt.Sprintf("chain-%d", chainIDUint), "logs.db")
+	} else {
+		// Use fresh temp directory if no data dir specified
+		// Remove any stale data from previous runs
+		tmpDir := filepath.Join(os.TempDir(), "op-interop-filter", fmt.Sprintf("chain-%d", chainIDUint))
+		if err := os.RemoveAll(tmpDir); err != nil {
+			c.log.Warn("Failed to clean temp dir", "path", tmpDir, "err", err)
+		}
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return fmt.Errorf("failed to create temp dir: %w", err)
+		}
+		dbPath = filepath.Join(tmpDir, "logs.db")
+		c.log.Info("Using temporary directory for LogsDB", "path", tmpDir)
 	}
 
-	// Create LogsDB - use file if path specified, otherwise in-memory
+	// Create LogsDB
 	db, err := logs.NewFromFile(c.log, &noopLogsDBMetrics{}, c.chainID, dbPath, true)
 	if err != nil {
 		return err
@@ -189,7 +209,8 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 	}
 
 	// Backfill historical blocks
-	if err := c.backfill(ctx, startBlock, head.NumberU64()); err != nil {
+	headNum := head.NumberU64()
+	if err := c.backfill(ctx, startBlock, headNum); err != nil {
 		c.log.Error("Backfill failed", "err", err)
 		onReorg(c.chainID, fmt.Errorf("backfill failed: %w", err))
 		return
@@ -200,8 +221,8 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 	c.ready.Store(true)
 	c.metrics.RecordChainReady(chainIDUint, true)
 
-	// Subscribe to new blocks
-	c.subscribeNewBlocks(ctx, onReorg)
+	// Subscribe to new blocks, starting from the head we backfilled to
+	c.subscribeNewBlocks(ctx, onReorg, headNum)
 }
 
 func (c *Chain) calculateStartBlock(head eth.BlockInfo) uint64 {
@@ -227,14 +248,10 @@ func (c *Chain) initializeLogsDBFromBlock(ctx context.Context, blockNum uint64) 
 		return fmt.Errorf("failed to get start block %d: %w", startBlockNum, err)
 	}
 
-	// Force the LogsDB to start from this block
-	// Note: This only works on empty DB
-	return c.logsDB.AddLog(
-		common.Hash{}, // Will be overwritten
-		eth.BlockID{Hash: block.ParentHash(), Number: startBlockNum - 1},
-		0,
-		nil,
-	)
+	// Seal this block as the starting point for an empty DB
+	// When the DB is empty, SealBlock accepts any block to initialize it
+	blockID := eth.BlockID{Hash: block.Hash(), Number: startBlockNum}
+	return c.logsDB.SealBlock(block.ParentHash(), blockID, block.Time())
 }
 
 func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error {
@@ -264,12 +281,12 @@ func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error
 	return nil
 }
 
-func (c *Chain) subscribeNewBlocks(ctx context.Context, onReorg ReorgCallback) {
+func (c *Chain) subscribeNewBlocks(ctx context.Context, onReorg ReorgCallback, startBlock uint64) {
 	// Simple polling loop for new blocks
 	ticker := time.NewTicker(httpPollInterval)
 	defer ticker.Stop()
 
-	var lastBlock uint64
+	lastBlock := startBlock
 	chainIDUint, _ := c.chainID.Uint64()
 
 	for {
