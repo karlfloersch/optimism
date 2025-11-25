@@ -2,10 +2,12 @@ package flags
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/ethereum-optimism/optimism/op-node/chaincfg"
 	opservice "github.com/ethereum-optimism/optimism/op-service"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
@@ -22,7 +24,7 @@ func prefixEnvVars(name string) []string {
 var (
 	L2RPCsFlag = &cli.StringFlag{
 		Name:     "l2-rpcs",
-		Usage:    "Comma-separated list of L2 RPC endpoints in format chainID:rpcURL (e.g., 10:http://op-mainnet:8545,8453:http://base:8545)",
+		Usage:    "Comma-separated list of L2 RPC endpoints in format chainID:rpcURL or chainName:rpcURL (e.g., 10:http://localhost:8545 or op-mainnet:http://localhost:8545)",
 		EnvVars:  prefixEnvVars("L2_RPCS"),
 		Required: true,
 	}
@@ -81,7 +83,8 @@ type L2RPC struct {
 	RPCURL  string
 }
 
-// ParseL2RPCs parses the l2-rpcs flag format: "chainID:rpcURL,chainID:rpcURL,..."
+// ParseL2RPCs parses the l2-rpcs flag format: "chainID:rpcURL,chainID:rpcURL,..." or "chainName:rpcURL,..."
+// Chain names are looked up from the superchain registry (e.g., "op-mainnet", "base-sepolia")
 func ParseL2RPCs(s string) ([]L2RPC, error) {
 	if s == "" {
 		return nil, fmt.Errorf("empty l2-rpcs")
@@ -91,15 +94,24 @@ func ParseL2RPCs(s string) ([]L2RPC, error) {
 	for _, pair := range pairs {
 		parts := strings.SplitN(strings.TrimSpace(pair), ":", 2)
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid format %q, expected chainID:rpcURL", pair)
+			return nil, fmt.Errorf("invalid format %q, expected chainID:rpcURL or chainName:rpcURL", pair)
 		}
-		var chainID uint64
-		if _, err := fmt.Sscanf(parts[0], "%d", &chainID); err != nil {
-			return nil, fmt.Errorf("invalid chain ID %q: %w", parts[0], err)
-		}
+		chainIDOrName := strings.TrimSpace(parts[0])
 		rpcURL := parts[1]
+
+		// Try parsing as chain ID first
+		chainID, err := strconv.ParseUint(chainIDOrName, 10, 64)
+		if err != nil {
+			// Not a number, try looking up as chain name from superchain registry
+			chainCfg := chaincfg.ChainByName(chainIDOrName)
+			if chainCfg == nil {
+				return nil, fmt.Errorf("unknown chain %q (not a valid chain ID or superchain registry name, use chaincfg.AvailableNetworks() for list)", chainIDOrName)
+			}
+			chainID = chainCfg.ChainID
+		}
+
 		if rpcURL == "" {
-			return nil, fmt.Errorf("empty RPC URL for chain %d", chainID)
+			return nil, fmt.Errorf("empty RPC URL for chain %s", chainIDOrName)
 		}
 		result = append(result, L2RPC{ChainID: chainID, RPCURL: rpcURL})
 	}

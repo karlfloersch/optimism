@@ -14,17 +14,46 @@ func TestParseL2RPCs(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:  "single RPC",
+			name:  "single RPC with chain ID",
 			input: "10:http://localhost:8545",
 			want: []L2RPC{
 				{ChainID: 10, RPCURL: "http://localhost:8545"},
 			},
 		},
 		{
-			name:  "multiple RPCs",
+			name:  "multiple RPCs with chain IDs",
 			input: "10:http://op-mainnet:8545,8453:http://base:8545",
 			want: []L2RPC{
 				{ChainID: 10, RPCURL: "http://op-mainnet:8545"},
+				{ChainID: 8453, RPCURL: "http://base:8545"},
+			},
+		},
+		{
+			name:  "chain name from superchain registry",
+			input: "op-mainnet:http://localhost:8545",
+			want: []L2RPC{
+				{ChainID: 10, RPCURL: "http://localhost:8545"},
+			},
+		},
+		{
+			name:  "chain name op-sepolia",
+			input: "op-sepolia:http://localhost:8545",
+			want: []L2RPC{
+				{ChainID: 11155420, RPCURL: "http://localhost:8545"},
+			},
+		},
+		{
+			name:  "chain name base-mainnet",
+			input: "base-mainnet:http://localhost:8545",
+			want: []L2RPC{
+				{ChainID: 8453, RPCURL: "http://localhost:8545"},
+			},
+		},
+		{
+			name:  "mixed chain IDs and names",
+			input: "op-mainnet:http://op:8545,8453:http://base:8545",
+			want: []L2RPC{
+				{ChainID: 10, RPCURL: "http://op:8545"},
 				{ChainID: 8453, RPCURL: "http://base:8545"},
 			},
 		},
@@ -54,9 +83,9 @@ func TestParseL2RPCs(t *testing.T) {
 			wantErr: "invalid format",
 		},
 		{
-			name:    "invalid chain ID",
-			input:   "abc:http://localhost:8545",
-			wantErr: "invalid chain ID",
+			name:    "unknown chain name",
+			input:   "unknown-chain:http://localhost:8545",
+			wantErr: "unknown chain",
 		},
 		{
 			name:    "empty URL",
