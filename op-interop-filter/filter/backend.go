@@ -27,7 +27,7 @@ type Backend struct {
 	metrics metrics.Metricer
 	cfg     *Config
 
-	chains   map[eth.ChainID]*Chain
+	chains   map[eth.ChainID]*ChainIngester
 	chainsMu sync.RWMutex
 
 	failsafe atomic.Bool
@@ -39,13 +39,13 @@ func NewBackend(ctx context.Context, logger log.Logger, m metrics.Metricer, cfg 
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains:  make(map[eth.ChainID]*Chain),
+		chains:  make(map[eth.ChainID]*ChainIngester),
 	}
 
 	// Create chain instances (but don't start them yet)
 	for _, l2rpc := range cfg.L2RPCs {
 		chainID := eth.ChainIDFromUInt64(l2rpc.ChainID)
-		chain, err := NewChain(ctx, logger, m, chainID, l2rpc.RPCURL, cfg)
+		chain, err := NewChainIngester(ctx, logger, m, chainID, l2rpc.RPCURL, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create chain %d: %w", l2rpc.ChainID, err)
 		}

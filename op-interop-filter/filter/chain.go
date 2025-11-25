@@ -34,8 +34,8 @@ const (
 // ReorgCallback is called when a reorg is detected
 type ReorgCallback func(chainID eth.ChainID, err error)
 
-// Chain manages block ingestion and LogsDB for a single chain
-type Chain struct {
+// ChainIngester manages block ingestion and LogsDB for a single chain
+type ChainIngester struct {
 	log      log.Logger
 	metrics  metrics.Metricer
 	chainID  eth.ChainID
@@ -53,11 +53,11 @@ type Chain struct {
 	wg     sync.WaitGroup
 }
 
-// NewChain creates a new Chain instance
-func NewChain(ctx context.Context, logger log.Logger, m metrics.Metricer,
-	chainID eth.ChainID, rpcURL string, cfg *Config) (*Chain, error) {
+// NewChainIngester creates a new ChainIngester instance
+func NewChainIngester(ctx context.Context, logger log.Logger, m metrics.Metricer,
+	chainID eth.ChainID, rpcURL string, cfg *Config) (*ChainIngester, error) {
 
-	c := &Chain{
+	c := &ChainIngester{
 		log:     logger.New("chainID", chainID),
 		metrics: m,
 		chainID: chainID,
@@ -68,7 +68,7 @@ func NewChain(ctx context.Context, logger log.Logger, m metrics.Metricer,
 }
 
 // Start starts the chain ingester
-func (c *Chain) Start(ctx context.Context, onReorg ReorgCallback) error {
+func (c *ChainIngester) Start(ctx context.Context, onReorg ReorgCallback) error {
 	c.log.Info("Starting chain ingester")
 
 	// Create RPC client
@@ -121,7 +121,7 @@ func (c *Chain) Start(ctx context.Context, onReorg ReorgCallback) error {
 }
 
 // Stop stops the chain ingester
-func (c *Chain) Stop(ctx context.Context) error {
+func (c *ChainIngester) Stop(ctx context.Context) error {
 	if !c.stopped.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -140,12 +140,12 @@ func (c *Chain) Stop(ctx context.Context) error {
 }
 
 // Ready returns whether backfill is complete
-func (c *Chain) Ready() bool {
+func (c *ChainIngester) Ready() bool {
 	return c.ready.Load()
 }
 
 // Contains validates that a log exists in the LogsDB
-func (c *Chain) Contains(access suptypes.Access) error {
+func (c *ChainIngester) Contains(access suptypes.Access) error {
 	query := suptypes.ContainsQuery{
 		Timestamp: access.Timestamp,
 		BlockNum:  access.BlockNumber,
@@ -156,7 +156,7 @@ func (c *Chain) Contains(access suptypes.Access) error {
 	return err
 }
 
-func (c *Chain) initLogsDB() error {
+func (c *ChainIngester) initLogsDB() error {
 	chainIDUint, _ := c.chainID.Uint64()
 
 	var dbPath string
@@ -186,7 +186,7 @@ func (c *Chain) initLogsDB() error {
 	return nil
 }
 
-func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
+func (c *ChainIngester) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 	c.log.Info("Starting block ingestion")
 
 	// Get current head
@@ -229,7 +229,7 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 	c.subscribeNewBlocks(ctx, onReorg, headNum)
 }
 
-func (c *Chain) calculateStartBlock(head eth.BlockInfo) uint64 {
+func (c *ChainIngester) calculateStartBlock(head eth.BlockInfo) uint64 {
 	// Estimate blocks in backfill period based on configured duration
 	backfillBlocks := uint64(c.cfg.BackfillDuration / defaultBlockTime)
 
@@ -240,7 +240,7 @@ func (c *Chain) calculateStartBlock(head eth.BlockInfo) uint64 {
 	return headNum - backfillBlocks
 }
 
-func (c *Chain) initializeLogsDBFromBlock(ctx context.Context, blockNum uint64) error {
+func (c *ChainIngester) initializeLogsDBFromBlock(ctx context.Context, blockNum uint64) error {
 	// Get the block before our start block to use as the "sealed" starting point
 	if blockNum == 0 {
 		blockNum = 1
@@ -258,7 +258,7 @@ func (c *Chain) initializeLogsDBFromBlock(ctx context.Context, blockNum uint64) 
 	return c.logsDB.SealBlock(block.ParentHash(), blockID, block.Time())
 }
 
-func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error {
+func (c *ChainIngester) backfill(ctx context.Context, startBlock, endBlock uint64) error {
 	total := endBlock - startBlock + 1
 	c.log.Info("Starting backfill", "blocks", total, "from", startBlock, "to", endBlock)
 
@@ -300,7 +300,7 @@ func (c *Chain) backfill(ctx context.Context, startBlock, endBlock uint64) error
 	return nil
 }
 
-func (c *Chain) subscribeNewBlocks(ctx context.Context, onReorg ReorgCallback, startBlock uint64) {
+func (c *ChainIngester) subscribeNewBlocks(ctx context.Context, onReorg ReorgCallback, startBlock uint64) {
 	// Simple polling loop for new blocks
 	ticker := time.NewTicker(httpPollInterval)
 	defer ticker.Stop()
@@ -341,7 +341,7 @@ func (c *Chain) subscribeNewBlocks(ctx context.Context, onReorg ReorgCallback, s
 	}
 }
 
-func (c *Chain) ingestBlock(ctx context.Context, blockNum uint64) error {
+func (c *ChainIngester) ingestBlock(ctx context.Context, blockNum uint64) error {
 	// Get block info
 	block, err := c.ethClient.InfoByNumber(ctx, blockNum)
 	if err != nil {
@@ -391,7 +391,7 @@ func (c *Chain) ingestBlock(ctx context.Context, blockNum uint64) error {
 }
 
 // parseExecutingMessage checks if a log is an executing message and parses it
-func (c *Chain) parseExecutingMessage(log *gethtypes.Log) *suptypes.ExecutingMessage {
+func (c *ChainIngester) parseExecutingMessage(log *gethtypes.Log) *suptypes.ExecutingMessage {
 	// Check if this is a CrossL2Inbox executing message event
 	// Address: 0x4200000000000000000000000000000000000022
 	if log.Address != params.InteropCrossL2InboxAddress {
