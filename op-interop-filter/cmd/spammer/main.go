@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -94,6 +96,52 @@ type SpammerMetrics struct {
 	currentBlockRange  prometheus.Gauge
 }
 
+// RecentQuery stores info about a recent query for debugging
+type RecentQuery struct {
+	Timestamp   string `json:"timestamp"`
+	BlockNumber uint64 `json:"block_number"`
+	TxHash      string `json:"tx_hash"`
+	LogIndex    uint   `json:"log_index"`
+	Address     string `json:"address"`
+	QueryType   string `json:"query_type"` // "valid" or "invalid"
+	Result      string `json:"result"`     // "accepted" or "rejected"
+}
+
+// RecentQueries is a thread-safe ring buffer of recent queries
+type RecentQueries struct {
+	mu      sync.RWMutex
+	queries []RecentQuery
+	maxSize int
+}
+
+func NewRecentQueries(size int) *RecentQueries {
+	return &RecentQueries{
+		queries: make([]RecentQuery, 0, size),
+		maxSize: size,
+	}
+}
+
+func (r *RecentQueries) Add(q RecentQuery) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.queries) >= r.maxSize {
+		// Remove oldest
+		r.queries = r.queries[1:]
+	}
+	r.queries = append(r.queries, q)
+}
+
+func (r *RecentQueries) Get() []RecentQuery {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// Return in reverse order (newest first)
+	result := make([]RecentQuery, len(r.queries))
+	for i, q := range r.queries {
+		result[len(r.queries)-1-i] = q
+	}
+	return result
+}
+
 func newSpammerMetrics(reg prometheus.Registerer) *SpammerMetrics {
 	m := &SpammerMetrics{
 		queriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -178,17 +226,23 @@ func run(cliCtx *cli.Context) error {
 
 	ctx := cliCtx.Context
 
-	// Setup metrics
+	// Setup metrics and recent queries tracking
 	var metrics *SpammerMetrics
+	recentQueries := NewRecentQueries(10) // Track last 10 queries
+
 	if metricsEnabled {
 		reg := prometheus.NewRegistry()
 		metrics = newSpammerMetrics(reg)
 		metrics.uptime.Set(1)
 		metrics.currentBlockRange.Set(float64(blockRange))
 
-		// Start metrics server
+		// Start metrics server with /recent endpoint
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		mux.HandleFunc("/recent", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(recentQueries.Get())
+		})
 		server := &http.Server{
 			Addr:    fmt.Sprintf(":%d", metricsPort),
 			Handler: mux,
@@ -269,13 +323,14 @@ func run(cliCtx *cli.Context) error {
 	}
 
 	spammer := &Spammer{
-		logger:       logger,
-		ethClient:    ethClient,
-		filterClient: filterClient,
-		chainID:      eth.ChainIDFromUInt64(chainID),
-		startBlock:   startBlock,
-		endBlock:     headNum,
-		metrics:      metrics,
+		logger:        logger,
+		ethClient:     ethClient,
+		filterClient:  filterClient,
+		chainID:       eth.ChainIDFromUInt64(chainID),
+		startBlock:    startBlock,
+		endBlock:      headNum,
+		metrics:       metrics,
+		recentQueries: recentQueries,
 	}
 
 	// Run queries
@@ -343,13 +398,14 @@ func run(cliCtx *cli.Context) error {
 
 // Spammer handles the spam testing logic
 type Spammer struct {
-	logger       log.Logger
-	ethClient    *sources.EthClient
-	filterClient *rpc.Client
-	chainID      eth.ChainID
-	startBlock   uint64
-	endBlock     uint64
-	metrics      *SpammerMetrics
+	logger        log.Logger
+	ethClient     *sources.EthClient
+	filterClient  *rpc.Client
+	chainID       eth.ChainID
+	startBlock    uint64
+	endBlock      uint64
+	metrics       *SpammerMetrics
+	recentQueries *RecentQueries
 }
 
 // RunValidQuery fetches a random log and verifies the filter accepts it
@@ -409,16 +465,36 @@ func (s *Spammer) RunValidQuery(ctx context.Context) error {
 			s.metrics.queryLatency.WithLabelValues("valid").Observe(time.Since(start).Seconds())
 		}
 
+		// Determine result
+		result := "accepted"
 		if err != nil {
+			result = "rejected"
 			if s.metrics != nil {
 				s.metrics.queriesTotal.WithLabelValues("valid", "rejected").Inc()
 			}
+		} else {
+			if s.metrics != nil {
+				s.metrics.queriesTotal.WithLabelValues("valid", "accepted").Inc()
+			}
+		}
+
+		// Record to recent queries
+		if s.recentQueries != nil {
+			s.recentQueries.Add(RecentQuery{
+				Timestamp:   time.Now().Format("15:04:05"),
+				BlockNumber: blockNum,
+				TxHash:      receipt.TxHash.Hex(),
+				LogIndex:    log.Index,
+				Address:     log.Address.Hex(),
+				QueryType:   "valid",
+				Result:      result,
+			})
+		}
+
+		if err != nil {
 			return fmt.Errorf("valid query rejected: block=%d logIdx=%d err=%w", blockNum, log.Index, err)
 		}
 
-		if s.metrics != nil {
-			s.metrics.queriesTotal.WithLabelValues("valid", "accepted").Inc()
-		}
 		foundLog = true
 		break
 	}
@@ -491,17 +567,37 @@ func (s *Spammer) RunInvalidQuery(ctx context.Context) error {
 			s.metrics.queryLatency.WithLabelValues("invalid").Observe(time.Since(start).Seconds())
 		}
 
+		// Determine result
+		result := "rejected"
 		if err == nil {
+			result = "accepted"
 			if s.metrics != nil {
 				s.metrics.queriesTotal.WithLabelValues("invalid", "accepted").Inc()
 			}
+		} else {
+			// Error expected - query was correctly rejected
+			if s.metrics != nil {
+				s.metrics.queriesTotal.WithLabelValues("invalid", "rejected").Inc()
+			}
+		}
+
+		// Record to recent queries
+		if s.recentQueries != nil {
+			s.recentQueries.Add(RecentQuery{
+				Timestamp:   time.Now().Format("15:04:05"),
+				BlockNumber: blockNum,
+				TxHash:      receipt.TxHash.Hex(),
+				LogIndex:    log.Index,
+				Address:     log.Address.Hex(),
+				QueryType:   "invalid",
+				Result:      result,
+			})
+		}
+
+		if err == nil {
 			return fmt.Errorf("invalid query was accepted: block=%d logIdx=%d", blockNum, log.Index)
 		}
 
-		// Error expected - query was correctly rejected
-		if s.metrics != nil {
-			s.metrics.queriesTotal.WithLabelValues("invalid", "rejected").Inc()
-		}
 		foundLog = true
 		break
 	}

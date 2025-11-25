@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,17 @@ import (
 
 	"github.com/urfave/cli/v2"
 )
+
+// RecentQuery matches the spammer's RecentQuery struct
+type RecentQuery struct {
+	Timestamp   string `json:"timestamp"`
+	BlockNumber uint64 `json:"block_number"`
+	TxHash      string `json:"tx_hash"`
+	LogIndex    uint   `json:"log_index"`
+	Address     string `json:"address"`
+	QueryType   string `json:"query_type"`
+	Result      string `json:"result"`
+}
 
 var (
 	FilterMetricsFlag = &cli.StringFlag{
@@ -235,6 +247,43 @@ func render(filterURL, spammerURL string, startTime time.Time) {
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 	fmt.Printf("║    [%s]                        ║\n", bar)
 
+	fmt.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+
+	// Recent queries
+	fmt.Println("║  RECENT QUERIES (newest first)                                               ║")
+	recentQueries := fetchRecentQueries(spammerURL)
+	if len(recentQueries) > 0 {
+		// Show up to 5
+		limit := 5
+		if len(recentQueries) < limit {
+			limit = len(recentQueries)
+		}
+		for i := 0; i < limit; i++ {
+			q := recentQueries[i]
+			icon := "✅"
+			if (q.QueryType == "valid" && q.Result == "rejected") ||
+				(q.QueryType == "invalid" && q.Result == "accepted") {
+				icon = "❌"
+			}
+			// Shorten tx hash for display
+			txShort := q.TxHash
+			if len(txShort) > 18 {
+				txShort = txShort[:10] + "..." + txShort[len(txShort)-6:]
+			}
+			fmt.Printf("║  %s %s blk=%-8d log=%-3d tx=%s          ║\n",
+				icon, q.Timestamp, q.BlockNumber, q.LogIndex, txShort)
+			// Show address on second line
+			addrShort := q.Address
+			if len(addrShort) > 22 {
+				addrShort = addrShort[:12] + "..." + addrShort[len(addrShort)-8:]
+			}
+			fmt.Printf("║       addr=%s type=%-7s result=%-8s         ║\n",
+				addrShort, q.QueryType, q.Result)
+		}
+	} else {
+		fmt.Println("║    No recent queries                                                         ║")
+	}
+
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
 	fmt.Println("Press Ctrl+C to exit")
 }
@@ -358,4 +407,22 @@ func extractLabel(metric, labelName string) string {
 		return ""
 	}
 	return metric[start : start+end]
+}
+
+func fetchRecentQueries(spammerURL string) []RecentQuery {
+	// Convert metrics URL to recent URL (replace /metrics with /recent)
+	recentURL := strings.Replace(spammerURL, "/metrics", "/recent", 1)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(recentURL)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var queries []RecentQuery
+	if err := json.NewDecoder(resp.Body).Decode(&queries); err != nil {
+		return nil
+	}
+	return queries
 }
