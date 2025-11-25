@@ -2,6 +2,8 @@ package filter
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -13,10 +15,10 @@ import (
 )
 
 type Config struct {
-	L2RPCs        []flags.L2RPC
-	DataDir       string
-	BackfillHours uint64
-	Version       string
+	L2RPCs           []flags.L2RPC
+	DataDir          string
+	BackfillDuration time.Duration
+	Version          string
 
 	LogConfig     oplog.CLIConfig
 	MetricsConfig opmetrics.CLIConfig
@@ -40,14 +42,19 @@ func NewConfig(ctx *cli.Context, version string) (*Config, error) {
 		return nil, err
 	}
 
+	backfillDuration, err := time.ParseDuration(ctx.String(flags.BackfillDurationFlag.Name))
+	if err != nil {
+		return nil, fmt.Errorf("invalid backfill-duration: %w", err)
+	}
+
 	return &Config{
-		L2RPCs:        l2rpcs,
-		DataDir:       ctx.String(flags.DataDirFlag.Name),
-		BackfillHours: ctx.Uint64(flags.BackfillHoursFlag.Name),
-		Version:       version,
-		LogConfig:     oplog.ReadCLIConfig(ctx),
-		MetricsConfig: opmetrics.ReadCLIConfig(ctx),
-		PprofConfig:   oppprof.ReadCLIConfig(ctx),
-		RPC:           oprpc.ReadCLIConfig(ctx),
+		L2RPCs:           l2rpcs,
+		DataDir:          ctx.String(flags.DataDirFlag.Name),
+		BackfillDuration: backfillDuration,
+		Version:          version,
+		LogConfig:        oplog.ReadCLIConfig(ctx),
+		MetricsConfig:    opmetrics.ReadCLIConfig(ctx),
+		PprofConfig:      oppprof.ReadCLIConfig(ctx),
+		RPC:              oprpc.ReadCLIConfig(ctx),
 	}, nil
 }

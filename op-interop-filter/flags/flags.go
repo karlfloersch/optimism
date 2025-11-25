@@ -32,11 +32,11 @@ var (
 		EnvVars: prefixEnvVars("DATA_DIR"),
 		Value:   "",
 	}
-	BackfillHoursFlag = &cli.Uint64Flag{
-		Name:    "backfill-hours",
-		Usage:   "Number of hours to backfill on startup",
-		EnvVars: prefixEnvVars("BACKFILL_HOURS"),
-		Value:   24,
+	BackfillDurationFlag = &cli.StringFlag{
+		Name:    "backfill-duration",
+		Usage:   "Duration to backfill on startup (e.g., 24h, 30m, 1h30m)",
+		EnvVars: prefixEnvVars("BACKFILL_DURATION"),
+		Value:   "24h",
 	}
 )
 
@@ -46,7 +46,7 @@ var requiredFlags = []cli.Flag{
 
 var optionalFlags = []cli.Flag{
 	DataDirFlag,
-	BackfillHoursFlag,
+	BackfillDurationFlag,
 }
 
 func init() {

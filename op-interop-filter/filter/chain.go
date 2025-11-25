@@ -205,9 +205,8 @@ func (c *Chain) runIngestion(ctx context.Context, onReorg ReorgCallback) {
 }
 
 func (c *Chain) calculateStartBlock(head eth.BlockInfo) uint64 {
-	// Estimate blocks in backfill period
-	blocksPerHour := uint64(time.Hour / defaultBlockTime)
-	backfillBlocks := blocksPerHour * c.cfg.BackfillHours
+	// Estimate blocks in backfill period based on configured duration
+	backfillBlocks := uint64(c.cfg.BackfillDuration / defaultBlockTime)
 
 	headNum := head.NumberU64()
 	if headNum <= backfillBlocks {

@@ -124,7 +124,7 @@ After backfill:
 **Optional**:
 ```
 --data-dir=/path/to/data          # LogsDB storage (default: in-memory)
---backfill-hours=24               # How far back to backfill (default: 24)
+--backfill-duration=24h           # How far back to backfill (e.g., 10h, 30m, 1h30m)
 --rpc.addr=0.0.0.0                # RPC listen address
 --rpc.port=8560                   # RPC listen port
 --metrics.enabled                 # Enable Prometheus metrics
