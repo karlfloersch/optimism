@@ -16,9 +16,7 @@ import (
 )
 
 var (
-	ErrFailsafeEnabled = errors.New("failsafe is enabled")
-	ErrNotReady        = errors.New("service not ready, backfill in progress")
-	ErrUnknownChain    = errors.New("unknown chain")
+	ErrUnknownChain = errors.New("unknown chain")
 )
 
 // Backend coordinates chain ingesters and handles the failsafe state
@@ -112,13 +110,19 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	// Check failsafe first
 	if b.FailsafeEnabled() {
 		b.metrics.RecordCheckAccessList(false)
-		return ErrFailsafeEnabled
+		return types.ErrFailsafeEnabled
 	}
 
 	// Check if we're ready (all chains backfilled)
 	if !b.Ready() {
 		b.metrics.RecordCheckAccessList(false)
-		return ErrNotReady
+		return types.ErrUninitialized
+	}
+
+	// Only support "unsafe" safety level - we don't track safety levels
+	if minSafety != types.LocalUnsafe {
+		b.metrics.RecordCheckAccessList(false)
+		return fmt.Errorf("unsupported safety level %q: only %q is supported", minSafety, types.LocalUnsafe)
 	}
 
 	// Parse and validate each access entry
@@ -145,12 +149,12 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 			return fmt.Errorf("%w: %s", ErrUnknownChain, access.ChainID)
 		}
 
-		// Validate via LogsDB
+		// Validate via LogsDB - propagate actual error from LogsDB
 		if err := chain.Contains(access); err != nil {
 			b.log.Debug("Access validation failed", "chainID", access.ChainID,
 				"blockNum", access.BlockNumber, "logIdx", access.LogIndex, "err", err)
 			b.metrics.RecordCheckAccessList(false)
-			return types.ErrConflict
+			return err
 		}
 	}
 

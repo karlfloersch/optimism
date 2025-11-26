@@ -22,7 +22,7 @@ func TestBackend_FailsafeEnabled(t *testing.T) {
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains:  make(map[eth.ChainID]*Chain),
+		chains:  make(map[eth.ChainID]*ChainIngester),
 	}
 
 	// Initially failsafe should be disabled
@@ -45,7 +45,7 @@ func TestBackend_CheckAccessList_FailsafeEnabled(t *testing.T) {
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains:  make(map[eth.ChainID]*Chain),
+		chains:  make(map[eth.ChainID]*ChainIngester),
 	}
 
 	// Enable failsafe
@@ -53,7 +53,7 @@ func TestBackend_CheckAccessList_FailsafeEnabled(t *testing.T) {
 
 	// CheckAccessList should return ErrFailsafeEnabled
 	err := b.CheckAccessList(context.Background(), nil, suptypes.LocalUnsafe, suptypes.ExecutingDescriptor{})
-	require.ErrorIs(t, err, ErrFailsafeEnabled)
+	require.ErrorIs(t, err, suptypes.ErrFailsafeEnabled)
 }
 
 func TestBackend_CheckAccessList_NotReady(t *testing.T) {
@@ -62,7 +62,7 @@ func TestBackend_CheckAccessList_NotReady(t *testing.T) {
 	cfg := &Config{}
 
 	chainID := eth.ChainIDFromUInt64(10)
-	chain := &Chain{
+	chain := &ChainIngester{
 		log:     logger,
 		chainID: chainID,
 	}
@@ -72,12 +72,12 @@ func TestBackend_CheckAccessList_NotReady(t *testing.T) {
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains:  map[eth.ChainID]*Chain{chainID: chain},
+		chains:  map[eth.ChainID]*ChainIngester{chainID: chain},
 	}
 
-	// CheckAccessList should return ErrNotReady when chain is not ready
+	// CheckAccessList should return ErrUninitialized when chain is not ready
 	err := b.CheckAccessList(context.Background(), nil, suptypes.LocalUnsafe, suptypes.ExecutingDescriptor{})
-	require.ErrorIs(t, err, ErrNotReady)
+	require.ErrorIs(t, err, suptypes.ErrUninitialized)
 }
 
 func TestBackend_CheckAccessList_UnknownChain(t *testing.T) {
@@ -87,7 +87,7 @@ func TestBackend_CheckAccessList_UnknownChain(t *testing.T) {
 
 	// Create a ready chain for chainID 10
 	chainID := eth.ChainIDFromUInt64(10)
-	chain := &Chain{
+	chain := &ChainIngester{
 		log:     logger,
 		chainID: chainID,
 	}
@@ -97,7 +97,7 @@ func TestBackend_CheckAccessList_UnknownChain(t *testing.T) {
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains:  map[eth.ChainID]*Chain{chainID: chain},
+		chains:  map[eth.ChainID]*ChainIngester{chainID: chain},
 	}
 
 	// Create access entries for an unknown chain (chainID 999)
@@ -113,14 +113,14 @@ func TestBackend_Ready(t *testing.T) {
 	m := metrics.NoopMetrics
 	cfg := &Config{}
 
-	chain1 := &Chain{log: logger, chainID: eth.ChainIDFromUInt64(10)}
-	chain2 := &Chain{log: logger, chainID: eth.ChainIDFromUInt64(8453)}
+	chain1 := &ChainIngester{log: logger, chainID: eth.ChainIDFromUInt64(10)}
+	chain2 := &ChainIngester{log: logger, chainID: eth.ChainIDFromUInt64(8453)}
 
 	b := &Backend{
 		log:     logger,
 		metrics: m,
 		cfg:     cfg,
-		chains: map[eth.ChainID]*Chain{
+		chains: map[eth.ChainID]*ChainIngester{
 			eth.ChainIDFromUInt64(10):   chain1,
 			eth.ChainIDFromUInt64(8453): chain2,
 		},
