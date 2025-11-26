@@ -62,3 +62,5 @@ type L2ELMatcher = Matcher[L2ELNodeID, L2ELNode]
 type FaucetMatcher = Matcher[FaucetID, Faucet]
 
 type SyncTesterMatcher = Matcher[SyncTesterID, SyncTester]
+
+type InteropFilterMatcher = Matcher[InteropFilterID, InteropFilter]

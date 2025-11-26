@@ -227,3 +227,8 @@ func (s *Service) Stop(ctx context.Context) error {
 func (s *Service) Stopped() bool {
 	return s.stopped.Load()
 }
+
+// RPC returns the RPC server for accessing the endpoint
+func (s *Service) RPC() *oprpc.Server {
+	return s.rpcServer
+}
