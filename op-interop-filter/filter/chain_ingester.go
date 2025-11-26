@@ -161,11 +161,7 @@ func (c *ChainIngester) initLogsDB() error {
 
 	var dbPath string
 	if c.cfg.DataDir != "" {
-		chainDir := filepath.Join(c.cfg.DataDir, fmt.Sprintf("chain-%d", chainIDUint))
-		if err := os.MkdirAll(chainDir, 0755); err != nil {
-			return fmt.Errorf("failed to create chain dir: %w", err)
-		}
-		dbPath = filepath.Join(chainDir, "logs.db")
+		dbPath = filepath.Join(c.cfg.DataDir, fmt.Sprintf("chain-%d", chainIDUint), "logs.db")
 	} else {
 		// Use fresh temp directory if no data dir specified
 		// Remove any stale data from previous runs
