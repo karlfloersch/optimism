@@ -45,7 +45,9 @@ go run ./cmd --help
 
 ### Build docker image
 
-Not yet available. Docker image support will be added when the service is ready for production deployment.
+```bash
+docker buildx bake op-interop-filter
+```
 
 ## Overview
 
