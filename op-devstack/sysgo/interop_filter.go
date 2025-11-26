@@ -80,7 +80,7 @@ func (s *InteropFilterService) Start() {
 	err = srv.Start(context.Background())
 	s.p.Require().NoError(err, "interop filter failed to start")
 	s.logger.Info("Started interop filter")
-	s.proxy.SetUpstream(ProxyAddr(s.p.Require(), "http://"+srv.RPC().Endpoint()))
+	s.proxy.SetUpstream(ProxyAddr(s.p.Require(), srv.RPC().Endpoint()))
 }
 
 func (s *InteropFilterService) Stop() {
