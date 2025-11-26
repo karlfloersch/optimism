@@ -45,7 +45,7 @@ go run ./cmd --help
 
 ### Build docker image
 
-See `op-interop-filter` docker-bake target.
+Not yet available. Docker image support will be added when the service is ready for production deployment.
 
 ## Overview
 
