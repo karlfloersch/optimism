@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
@@ -41,14 +42,26 @@ func NewBackend(ctx context.Context, logger log.Logger, m metrics.Metricer, cfg 
 	}
 
 	// Create chain instances (but don't start them yet)
-	for _, l2rpc := range cfg.L2RPCs {
-		chainID := eth.ChainIDFromUInt64(l2rpc.ChainID)
-		chain, err := NewChainIngester(ctx, logger, m, chainID, l2rpc.RPCURL, cfg)
+	for _, rpcURL := range cfg.L2RPCs {
+		// Query chain ID from RPC
+		client, err := ethclient.DialContext(ctx, rpcURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create chain %d: %w", l2rpc.ChainID, err)
+			return nil, fmt.Errorf("failed to dial RPC %s: %w", rpcURL, err)
+		}
+		chainIDBig, err := client.ChainID(ctx)
+		client.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get chain ID from %s: %w", rpcURL, err)
+		}
+		chainIDUint := chainIDBig.Uint64()
+		chainID := eth.ChainIDFromUInt64(chainIDUint)
+
+		chain, err := NewChainIngester(ctx, logger, m, chainID, rpcURL, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create chain %d: %w", chainIDUint, err)
 		}
 		b.chains[chainID] = chain
-		logger.Info("Created chain ingester", "chainID", l2rpc.ChainID, "rpc", l2rpc.RPCURL)
+		logger.Info("Created chain ingester", "chainID", chainIDUint, "rpc", rpcURL)
 	}
 
 	return b, nil
