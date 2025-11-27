@@ -32,7 +32,10 @@ type Metrics struct {
 var _ Metricer = (*Metrics)(nil)
 var _ opmetrics.RegistryMetricer = (*Metrics)(nil)
 
-func NewMetrics() *Metrics {
+func NewMetrics(procName string) *Metrics {
+	if procName == "" {
+		procName = "default"
+	}
 	registry := opmetrics.NewRegistry()
 	factory := opmetrics.With(registry)
 
@@ -74,6 +77,10 @@ func NewMetrics() *Metrics {
 
 func (m *Metrics) Registry() *prometheus.Registry {
 	return m.registry
+}
+
+func (m *Metrics) Document() []opmetrics.DocumentedMetric {
+	return m.factory.Document()
 }
 
 func (m *Metrics) RecordInfo(version string) {

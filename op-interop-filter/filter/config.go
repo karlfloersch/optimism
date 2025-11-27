@@ -15,7 +15,7 @@ import (
 )
 
 type Config struct {
-	L2RPCs           []flags.L2RPC
+	L2RPCs           []string
 	DataDir          string
 	BackfillDuration time.Duration
 	Version          string
@@ -38,18 +38,13 @@ func (c *Config) Check() error {
 }
 
 func NewConfig(ctx *cli.Context, version string) (*Config, error) {
-	l2rpcs, err := flags.ParseL2RPCs(ctx.String(flags.L2RPCsFlag.Name))
-	if err != nil {
-		return nil, err
-	}
-
 	backfillDuration, err := time.ParseDuration(ctx.String(flags.BackfillDurationFlag.Name))
 	if err != nil {
 		return nil, fmt.Errorf("invalid backfill-duration: %w", err)
 	}
 
 	return &Config{
-		L2RPCs:           l2rpcs,
+		L2RPCs:           ctx.StringSlice(flags.L2RPCsFlag.Name),
 		DataDir:          ctx.String(flags.DataDirFlag.Name),
 		BackfillDuration: backfillDuration,
 		Version:          version,

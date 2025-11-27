@@ -95,7 +95,7 @@ func (s *Service) init(ctx context.Context, cfg *Config) error {
 
 func (s *Service) initMetrics(cfg *Config) {
 	if cfg.MetricsConfig.Enabled {
-		s.metrics = metrics.NewMetrics()
+		s.metrics = metrics.NewMetrics("default")
 		s.metrics.RecordInfo(s.version)
 	} else {
 		s.metrics = metrics.NoopMetrics
