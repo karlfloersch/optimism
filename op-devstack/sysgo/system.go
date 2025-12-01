@@ -278,6 +278,70 @@ func DefaultMinimalSystemWithSyncTester(dest *DefaultMinimalSystemWithSyncTester
 	return opt
 }
 
+// DefaultMinimalSystemWithInteropFilterIDs extends DefaultMinimalSystemIDs with InteropFilter
+type DefaultMinimalSystemWithInteropFilterIDs struct {
+	DefaultMinimalSystemIDs
+
+	InteropFilter stack.InteropFilterID
+}
+
+func NewDefaultMinimalSystemWithInteropFilterIDs(l1ID, l2ID eth.ChainID) DefaultMinimalSystemWithInteropFilterIDs {
+	minimal := NewDefaultMinimalSystemIDs(l1ID, l2ID)
+	return DefaultMinimalSystemWithInteropFilterIDs{
+		DefaultMinimalSystemIDs: minimal,
+		InteropFilter:           stack.InteropFilterID("interop-filter"),
+	}
+}
+
+// DefaultMinimalSystemWithInteropFilter creates a minimal system with an interop filter.
+// This is useful for testing interop transaction filtering without a full supervisor.
+func DefaultMinimalSystemWithInteropFilter(dest *DefaultMinimalSystemWithInteropFilterIDs) stack.Option[*Orchestrator] {
+	l1ID := eth.ChainIDFromUInt64(900)
+	l2ID := eth.ChainIDFromUInt64(901)
+	ids := NewDefaultMinimalSystemWithInteropFilterIDs(l1ID, l2ID)
+
+	opt := stack.Combine[*Orchestrator]()
+	opt.Add(stack.BeforeDeploy(func(o *Orchestrator) {
+		o.P().Logger().Info("Setting up")
+	}))
+
+	opt.Add(WithMnemonicKeys(devkeys.TestMnemonic))
+
+	opt.Add(WithDeployer(),
+		WithDeployerOptions(
+			WithLocalContractSources(),
+			WithCommons(ids.L1.ChainID()),
+			WithPrefundedL2(ids.L1.ChainID(), ids.L2.ChainID()),
+		),
+	)
+
+	opt.Add(WithL1Nodes(ids.L1EL, ids.L1CL))
+
+	opt.Add(WithL2ELNode(ids.L2EL))
+	opt.Add(WithL2CLNode(ids.L2CL, ids.L1CL, ids.L1EL, ids.L2EL, L2CLSequencer()))
+
+	opt.Add(WithBatcher(ids.L2Batcher, ids.L1EL, ids.L2CL, ids.L2EL))
+	opt.Add(WithProposer(ids.L2Proposer, ids.L1EL, &ids.L2CL, nil))
+
+	opt.Add(WithFaucets([]stack.L1ELNodeID{ids.L1EL}, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(WithTestSequencer(ids.TestSequencer, ids.L1CL, ids.L2CL, ids.L1EL, ids.L2EL))
+
+	opt.Add(WithL2Challenger(ids.L2Challenger, ids.L1EL, ids.L1CL, nil, nil, &ids.L2CL, []stack.L2ELNodeID{
+		ids.L2EL,
+	}))
+
+	opt.Add(WithInteropFilter(ids.InteropFilter, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(WithL2MetricsDashboard())
+
+	opt.Add(stack.Finally(func(orch *Orchestrator) {
+		*dest = ids
+	}))
+
+	return opt
+}
+
 type DefaultSingleChainInteropSystemIDs struct {
 	L1   stack.L1NetworkID
 	L1EL stack.L1ELNodeID
