@@ -32,10 +32,7 @@ type Metrics struct {
 var _ Metricer = (*Metrics)(nil)
 var _ opmetrics.RegistryMetricer = (*Metrics)(nil)
 
-func NewMetrics(procName string) *Metrics {
-	if procName == "" {
-		procName = "default"
-	}
+func NewMetrics(_ string) *Metrics {
 	registry := opmetrics.NewRegistry()
 	factory := opmetrics.With(registry)
 
