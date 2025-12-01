@@ -48,10 +48,7 @@ type Metrics struct {
 var _ Metricer = (*Metrics)(nil)
 var _ opmetrics.RegistryMetricer = (*Metrics)(nil)
 
-func NewMetrics(procName string) *Metrics {
-	if procName == "" {
-		procName = "default"
-	}
+func NewMetrics(_ string) *Metrics {
 	registry := opmetrics.NewRegistry()
 	factory := opmetrics.With(registry)
 
@@ -210,15 +207,15 @@ var NoopMetrics Metricer = &noopMetrics{}
 
 type noopMetrics struct{}
 
-func (n *noopMetrics) RecordInfo(version string)                                  {}
-func (n *noopMetrics) RecordUp()                                                  {}
-func (n *noopMetrics) RecordFailsafeEnabled(enabled bool)                         {}
-func (n *noopMetrics) RecordChainHead(chainID uint64, blockNum uint64)            {}
-func (n *noopMetrics) RecordCheckAccessList(success bool)                         {}
-func (n *noopMetrics) RecordReorgDetected(chainID uint64)                         {}
-func (n *noopMetrics) RecordChainReady(chainID uint64, ready bool)                {}
+func (n *noopMetrics) RecordInfo(version string)                                    {}
+func (n *noopMetrics) RecordUp()                                                    {}
+func (n *noopMetrics) RecordFailsafeEnabled(enabled bool)                           {}
+func (n *noopMetrics) RecordChainHead(chainID uint64, blockNum uint64)              {}
+func (n *noopMetrics) RecordCheckAccessList(success bool)                           {}
+func (n *noopMetrics) RecordReorgDetected(chainID uint64)                           {}
+func (n *noopMetrics) RecordChainReady(chainID uint64, ready bool)                  {}
 func (n *noopMetrics) RecordBackfillProgress(chainID uint64, current, total uint64) {}
-func (n *noopMetrics) RecordLogsDBFirstBlock(chainID uint64, blockNum uint64)     {}
-func (n *noopMetrics) RecordLogsDBBlocksSealed(chainID uint64)                    {}
-func (n *noopMetrics) RecordLogsDBLogsAdded(chainID uint64, count int)            {}
-func (n *noopMetrics) RecordLogsDBEntries(chainID uint64, count int64)            {}
+func (n *noopMetrics) RecordLogsDBFirstBlock(chainID uint64, blockNum uint64)       {}
+func (n *noopMetrics) RecordLogsDBBlocksSealed(chainID uint64)                      {}
+func (n *noopMetrics) RecordLogsDBLogsAdded(chainID uint64, count int)              {}
+func (n *noopMetrics) RecordLogsDBEntries(chainID uint64, count int64)              {}

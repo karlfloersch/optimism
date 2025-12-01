@@ -36,11 +36,11 @@ type ReorgCallback func(chainID eth.ChainID, err error)
 
 // ChainIngester manages block ingestion and LogsDB for a single chain
 type ChainIngester struct {
-	log      log.Logger
-	metrics  metrics.Metricer
-	chainID  eth.ChainID
-	rpcURL   string
-	cfg      *Config
+	log     log.Logger
+	metrics metrics.Metricer
+	chainID eth.ChainID
+	rpcURL  string
+	cfg     *Config
 
 	rpcClient client.RPC
 	ethClient *sources.EthClient

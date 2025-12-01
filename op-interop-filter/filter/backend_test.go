@@ -141,7 +141,9 @@ func TestBackend_Ready(t *testing.T) {
 // createMockAccessEntry creates a mock access entry for testing
 // This follows the encoding format from supervisor types:
 // Hash 0: byte 0 = PrefixLookup (1), bytes 1-3 = zeros, bytes 4-12 = chainID,
-//         bytes 12-20 = blockNum, bytes 20-28 = timestamp, bytes 28-32 = logIdx
+//
+//	bytes 12-20 = blockNum, bytes 20-28 = timestamp, bytes 28-32 = logIdx
+//
 // Hash 1: byte 0 = PrefixChecksum (3), rest = checksum data
 func createMockAccessEntry(chainID uint64, blockNum uint64, logIdx uint32, timestamp uint64, checksum common.Hash) []common.Hash {
 	const (

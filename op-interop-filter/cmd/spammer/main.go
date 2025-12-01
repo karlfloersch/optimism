@@ -22,8 +22,8 @@ import (
 	"github.com/urfave/cli/v2"
 
 	opservice "github.com/ethereum-optimism/optimism/op-service"
-	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/cliapp"
+	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/ctxinterrupt"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
@@ -90,11 +90,11 @@ var (
 
 // Metrics for the spammer
 type SpammerMetrics struct {
-	queriesTotal       *prometheus.CounterVec
-	queryLatency       *prometheus.HistogramVec
-	errorsTotal        prometheus.Counter
-	uptime             prometheus.Gauge
-	currentBlockRange  prometheus.Gauge
+	queriesTotal      *prometheus.CounterVec
+	queryLatency      *prometheus.HistogramVec
+	errorsTotal       prometheus.Counter
+	uptime            prometheus.Gauge
+	currentBlockRange prometheus.Gauge
 }
 
 // RecentQuery stores info about a recent query for debugging
@@ -241,9 +241,9 @@ func run(cliCtx *cli.Context) error {
 		// Start metrics server with /recent endpoint
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-		mux.HandleFunc("/recent", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/recent", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(recentQueries.Get())
+			_ = json.NewEncoder(w).Encode(recentQueries.Get())
 		})
 		server := &http.Server{
 			Addr:    fmt.Sprintf(":%d", metricsPort),
@@ -255,7 +255,7 @@ func run(cliCtx *cli.Context) error {
 				logger.Error("Metrics server error", "err", err)
 			}
 		}()
-		defer server.Shutdown(context.Background())
+		defer func() { _ = server.Shutdown(context.Background()) }()
 	}
 
 	logger.Info("Starting filter spammer",
@@ -334,9 +334,9 @@ func run(cliCtx *cli.Context) error {
 			break
 		}
 		errStr := err.Error()
-		if strings.Contains(errStr, "backfill") {
+		if strings.Contains(errStr, "backfill") || strings.Contains(errStr, "uninitialized") {
 			logger.Debug("Backfill still in progress, waiting...", "err", errStr)
-			time.Sleep(5 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 		// Other errors mean backfill is done but query failed for other reason
@@ -529,6 +529,13 @@ func (s *Spammer) RunValidQuery(ctx context.Context) error {
 		}
 
 		if err != nil {
+			// Check if this is a "skipped data" error (block outside filter's range)
+			// This means the block is too old for the filter to search, not a real error
+			if strings.Contains(err.Error(), "skipped data") {
+				s.logger.Debug("Block outside filter's searchable range, retrying with different block",
+					"block", blockNum, "err", err)
+				return s.RunValidQuery(ctx) // Try again with a different block
+			}
 			return fmt.Errorf("valid query rejected: block=%d logIdx=%d err=%w", blockNum, log.Index, err)
 		}
 

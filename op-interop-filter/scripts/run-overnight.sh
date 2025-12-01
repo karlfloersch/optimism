@@ -86,9 +86,11 @@ trap cleanup SIGINT SIGTERM
 # Start filter service with both chains
 echo "Starting filter service (multi-chain)..."
 ./bin/op-interop-filter \
-    --l2-rpcs="${OP_SEPOLIA_CHAIN_ID}:${OP_SEPOLIA_RPC},${UNICHAIN_SEPOLIA_CHAIN_ID}:${UNICHAIN_SEPOLIA_RPC}" \
+    --l2-rpcs="$OP_SEPOLIA_RPC" \
+    --l2-rpcs="$UNICHAIN_SEPOLIA_RPC" \
     --backfill-duration="$BACKFILL_DURATION" \
     --rpc.port=$FILTER_RPC_PORT \
+    --rpc.enable-admin \
     --metrics.enabled \
     --metrics.port=$FILTER_METRICS_PORT \
     --log.level=info \

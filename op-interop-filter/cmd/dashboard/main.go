@@ -72,30 +72,30 @@ var (
 
 type Metrics struct {
 	// Filter metrics
-	FilterUp              float64
-	FilterFailsafe        float64
-	FilterChainReady      map[string]float64
-	FilterChainHead       map[string]float64
-	FilterBackfillProg    map[string]float64
-	FilterCheckSuccess    float64
-	FilterCheckFailed     float64
-	FilterReorgs          map[string]float64
+	FilterUp           float64
+	FilterFailsafe     float64
+	FilterChainReady   map[string]float64
+	FilterChainHead    map[string]float64
+	FilterBackfillProg map[string]float64
+	FilterCheckSuccess float64
+	FilterCheckFailed  float64
+	FilterReorgs       map[string]float64
 
 	// LogsDB metrics
-	LogsDBFirstBlock      map[string]float64
-	LogsDBBlocksSealed    map[string]float64
-	LogsDBLogsAdded       map[string]float64
-	LogsDBEntries         map[string]float64
+	LogsDBFirstBlock   map[string]float64
+	LogsDBBlocksSealed map[string]float64
+	LogsDBLogsAdded    map[string]float64
+	LogsDBEntries      map[string]float64
 
 	// Spammer metrics
-	SpammerUp             float64
-	SpammerValidAccepted  float64
-	SpammerValidRejected  float64
+	SpammerUp              float64
+	SpammerValidAccepted   float64
+	SpammerValidRejected   float64
 	SpammerInvalidAccepted float64
 	SpammerInvalidRejected float64
-	SpammerErrors         float64
-	SpammerLatencyValid   float64
-	SpammerLatencyInvalid float64
+	SpammerErrors          float64
+	SpammerLatencyValid    float64
+	SpammerLatencyInvalid  float64
 }
 
 func main() {
