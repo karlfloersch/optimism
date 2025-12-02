@@ -21,16 +21,10 @@ func (f *QueryFrontend) CheckAccessList(ctx context.Context, inboxEntries []comm
 
 	err := f.backend.CheckAccessList(ctx, inboxEntries, minSafety, executingDescriptor)
 	if err != nil {
-		// Map errors to appropriate RPC error codes
-		code := types.GetErrorCode(err)
-		if code != 0 {
-			return &rpc.JsonError{
-				Code:    code,
-				Message: err.Error(),
-			}
+		return &rpc.JsonError{
+			Code:    types.GetErrorCode(err),
+			Message: err.Error(),
 		}
-		// For unknown errors, return as-is (will be internal error)
-		return err
 	}
 	return nil
 }
@@ -45,7 +39,7 @@ func (a *AdminFrontend) GetFailsafeEnabled(ctx context.Context) (bool, error) {
 	return a.backend.FailsafeEnabled(), nil
 }
 
-// SetFailsafeEnabled is not supported - failsafe is automatically managed
+// SetFailsafeEnabled enables or disables failsafe mode (TODO: implement)
 func (a *AdminFrontend) SetFailsafeEnabled(ctx context.Context, enabled bool) error {
-	return errors.New("SetFailsafeEnabled not supported: failsafe is automatically managed based on reorg detection")
+	return errors.New("SetFailsafeEnabled not yet implemented")
 }
