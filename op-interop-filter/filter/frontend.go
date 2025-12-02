@@ -7,6 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -42,4 +43,10 @@ func (a *AdminFrontend) GetFailsafeEnabled(ctx context.Context) (bool, error) {
 // SetFailsafeEnabled enables or disables failsafe mode (TODO: implement)
 func (a *AdminFrontend) SetFailsafeEnabled(ctx context.Context, enabled bool) error {
 	return errors.New("SetFailsafeEnabled not yet implemented")
+}
+
+// Rewind rewinds chain state to a specific block (TODO: implement)
+// This can be used to recover from reorg-induced stuck states.
+func (a *AdminFrontend) Rewind(ctx context.Context, chain eth.ChainID, block eth.BlockID) error {
+	return errors.New("Rewind not yet implemented")
 }
