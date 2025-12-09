@@ -220,6 +220,33 @@ func DefaultSupernodeTwoL2System(dest *DefaultTwoL2SystemIDs) stack.Option[*Orch
 	return opt
 }
 
+type DefaultMinimalSystemWithInteropFilterIDs struct {
+	DefaultMinimalSystemIDs
+
+	InteropFilter stack.InteropFilterID
+}
+
+func NewDefaultMinimalSystemWithInteropFilterIDs(l1ID, l2ID eth.ChainID) DefaultMinimalSystemWithInteropFilterIDs {
+	minimal := NewDefaultMinimalSystemIDs(l1ID, l2ID)
+	return DefaultMinimalSystemWithInteropFilterIDs{
+		DefaultMinimalSystemIDs: minimal,
+		InteropFilter:           "interop-filter",
+	}
+}
+
+func DefaultMinimalSystemWithInteropFilter(dest *DefaultMinimalSystemWithInteropFilterIDs) stack.Option[*Orchestrator] {
+	ids := NewDefaultMinimalSystemWithInteropFilterIDs(DefaultL1ID, DefaultL2AID)
+	opt := defaultMinimalSystemOpts(&ids.DefaultMinimalSystemIDs, &dest.DefaultMinimalSystemIDs)
+
+	opt.Add(WithInteropFilter(ids.InteropFilter, []stack.L2ELNodeID{ids.L2EL}))
+
+	opt.Add(stack.Finally(func(orch *Orchestrator) {
+		*dest = ids
+	}))
+
+	return opt
+}
+
 type DefaultMinimalSystemWithSyncTesterIDs struct {
 	DefaultMinimalSystemIDs
 
