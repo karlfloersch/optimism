@@ -104,6 +104,13 @@ func (b *Backend) FailsafeEnabled() bool {
 	return b.failsafe.Load()
 }
 
+// SetFailsafeEnabled enables or disables failsafe mode
+func (b *Backend) SetFailsafeEnabled(enabled bool) {
+	b.log.Info("Setting failsafe state", "enabled", enabled)
+	b.failsafe.Store(enabled)
+	b.metrics.RecordFailsafeEnabled(enabled)
+}
+
 // Ready returns whether all chains have finished backfill
 func (b *Backend) Ready() bool {
 	b.chainsMu.RLock()

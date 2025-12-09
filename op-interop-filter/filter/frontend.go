@@ -46,9 +46,10 @@ func (a *AdminFrontend) GetFailsafeEnabled(ctx context.Context) (bool, error) {
 	return a.backend.FailsafeEnabled(), nil
 }
 
-// SetFailsafeEnabled enables or disables failsafe mode (TODO: implement)
+// SetFailsafeEnabled enables or disables failsafe mode
 func (a *AdminFrontend) SetFailsafeEnabled(ctx context.Context, enabled bool) error {
-	return errors.New("SetFailsafeEnabled not yet implemented")
+	a.backend.SetFailsafeEnabled(enabled)
+	return nil
 }
 
 // Rewind rewinds chain state to a specific block (TODO: implement)
