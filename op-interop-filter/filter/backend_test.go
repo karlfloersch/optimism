@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -136,6 +137,112 @@ func TestBackend_Ready(t *testing.T) {
 	// Both chains ready
 	chain2.ready.Store(true)
 	require.True(t, b.Ready())
+}
+
+func TestBackend_SetFailsafeEnabled(t *testing.T) {
+	logger := log.New()
+	m := metrics.NoopMetrics
+	cfg := &Config{}
+
+	b := &Backend{
+		log:     logger,
+		metrics: m,
+		cfg:     cfg,
+		chains:  make(map[eth.ChainID]*ChainIngester),
+	}
+
+	// Initially failsafe should be disabled
+	require.False(t, b.FailsafeEnabled())
+
+	// Enable failsafe via SetFailsafeEnabled
+	b.SetFailsafeEnabled(true)
+	require.True(t, b.FailsafeEnabled())
+
+	// Disable failsafe via SetFailsafeEnabled
+	b.SetFailsafeEnabled(false)
+	require.False(t, b.FailsafeEnabled())
+}
+
+func TestBackend_Rewind_UnknownChain(t *testing.T) {
+	logger := log.New()
+	m := metrics.NoopMetrics
+	cfg := &Config{}
+
+	b := &Backend{
+		log:     logger,
+		metrics: m,
+		cfg:     cfg,
+		chains:  make(map[eth.ChainID]*ChainIngester),
+	}
+
+	// Try to rewind an unknown chain
+	unknownChainID := eth.ChainIDFromUInt64(999)
+	block := eth.BlockID{Hash: common.Hash{1}, Number: 100}
+
+	err := b.Rewind(unknownChainID, block)
+	require.ErrorIs(t, err, ErrUnknownChain)
+}
+
+func TestChainIngester_Rewind_NoLogsDB(t *testing.T) {
+	logger := log.New()
+	chainID := eth.ChainIDFromUInt64(10)
+
+	// Create a chain ingester without initializing logsDB
+	c := &ChainIngester{
+		log:     logger,
+		chainID: chainID,
+		// logsDB is nil
+	}
+
+	block := eth.BlockID{Hash: common.Hash{1}, Number: 100}
+	err := c.Rewind(block)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "LogsDB not initialized")
+}
+
+func TestChainIngester_Rewind_WithLogsDB(t *testing.T) {
+	logger := log.New()
+	chainID := eth.ChainIDFromUInt64(10)
+	m := metrics.NoopMetrics
+
+	// Create a temporary directory for the LogsDB
+	tmpDir := t.TempDir()
+
+	// Create LogsDB
+	dbMetrics := &logsDBMetrics{chainID: 10, m: m}
+	logsDB, err := logs.NewFromFile(logger, dbMetrics, chainID, tmpDir+"/logs.db", true)
+	require.NoError(t, err)
+	defer logsDB.Close()
+
+	c := &ChainIngester{
+		log:     logger,
+		chainID: chainID,
+		logsDB:  logsDB,
+	}
+
+	// Seed the LogsDB with some blocks
+	block49 := eth.BlockID{Hash: common.Hash{49}, Number: 49}
+	block50 := eth.BlockID{Hash: common.Hash{50}, Number: 50}
+	block51 := eth.BlockID{Hash: common.Hash{51}, Number: 51}
+
+	// Seal block 50 (this initializes the DB)
+	require.NoError(t, logsDB.SealBlock(common.Hash{48}, block49, 490))
+	require.NoError(t, logsDB.SealBlock(block49.Hash, block50, 500))
+	require.NoError(t, logsDB.SealBlock(block50.Hash, block51, 510))
+
+	// Verify block 51 is the latest
+	latestBlock, ok := logsDB.LatestSealedBlock()
+	require.True(t, ok)
+	require.Equal(t, block51, latestBlock)
+
+	// Rewind to block 50
+	err = c.Rewind(block50)
+	require.NoError(t, err)
+
+	// Verify block 50 is now the latest
+	latestBlock, ok = logsDB.LatestSealedBlock()
+	require.True(t, ok)
+	require.Equal(t, block50, latestBlock)
 }
 
 // createMockAccessEntry creates a mock access entry for testing
