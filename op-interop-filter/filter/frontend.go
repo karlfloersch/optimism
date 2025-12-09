@@ -22,10 +22,16 @@ func (f *QueryFrontend) CheckAccessList(ctx context.Context, inboxEntries []comm
 
 	err := f.backend.CheckAccessList(ctx, inboxEntries, minSafety, executingDescriptor)
 	if err != nil {
-		return &rpc.JsonError{
-			Code:    types.GetErrorCode(err),
-			Message: err.Error(),
+		// Map errors to appropriate RPC error codes
+		code := types.GetErrorCode(err)
+		if code != 0 {
+			return &rpc.JsonError{
+				Code:    code,
+				Message: err.Error(),
+			}
 		}
+		// For unknown errors, return as-is (will be internal error)
+		return err
 	}
 	return nil
 }
