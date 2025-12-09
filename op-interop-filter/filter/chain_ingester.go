@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/processors"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -432,4 +433,20 @@ func (l *logsDBMetrics) RecordDBEntryCount(kind string, count int64) {
 
 func (l *logsDBMetrics) RecordDBSearchEntriesRead(count int64) {
 	// This tracks search efficiency, could add later if needed
+}
+
+// Rewind truncates the LogsDB to the specified block
+func (c *ChainIngester) Rewind(block eth.BlockID) error {
+	if c.logsDB == nil {
+		return errors.New("LogsDB not initialized")
+	}
+	c.log.Info("Rewinding LogsDB", "block", block.Number, "hash", block.Hash)
+	return c.logsDB.Rewind(&noopInvalidator{}, block)
+}
+
+// noopInvalidator implements reads.Invalidator for simple single-threaded use
+type noopInvalidator struct{}
+
+func (n *noopInvalidator) TryInvalidate(rule reads.InvalidationRule) (release func(), err error) {
+	return func() {}, nil
 }

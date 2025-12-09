@@ -123,6 +123,17 @@ func (b *Backend) Ready() bool {
 	return true
 }
 
+// Rewind truncates the LogsDB for the specified chain to the given block
+func (b *Backend) Rewind(chainID eth.ChainID, block eth.BlockID) error {
+	b.chainsMu.RLock()
+	chain, ok := b.chains[chainID]
+	b.chainsMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownChain, chainID)
+	}
+	return chain.Rewind(block)
+}
+
 // CheckAccessList validates the given access list entries
 func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
 	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {

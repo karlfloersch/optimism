@@ -2,7 +2,6 @@ package filter
 
 import (
 	"context"
-	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -52,8 +51,8 @@ func (a *AdminFrontend) SetFailsafeEnabled(ctx context.Context, enabled bool) er
 	return nil
 }
 
-// Rewind rewinds chain state to a specific block (TODO: implement)
+// Rewind rewinds chain state to a specific block.
 // This can be used to recover from reorg-induced stuck states.
 func (a *AdminFrontend) Rewind(ctx context.Context, chain eth.ChainID, block eth.BlockID) error {
-	return errors.New("Rewind not yet implemented")
+	return a.backend.Rewind(chain, block)
 }
