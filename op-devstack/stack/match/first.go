@@ -24,3 +24,5 @@ var FirstSyncTester = First[stack.SyncTesterID, stack.SyncTester]()
 
 var FirstOPRBuilderNode = First[stack.OPRBuilderNodeID, stack.OPRBuilderNode]()
 var FirstRollupBoostNode = First[stack.RollupBoostNodeID, stack.RollupBoostNode]()
+
+var FirstInteropFilter = First[stack.InteropFilterID, stack.InteropFilter]()

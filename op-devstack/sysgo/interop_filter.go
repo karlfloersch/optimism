@@ -11,7 +11,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/shim"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-interop-filter/filter"
-	"github.com/ethereum-optimism/optimism/op-interop-filter/flags"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
@@ -109,16 +108,11 @@ func WithInteropFilter(filterID stack.InteropFilterID, l2ELs []stack.L2ELNodeID)
 		require.Nil(orch.interopFilter, "can only support a single interop-filter in sysgo")
 
 		// Build L2 RPC list from EL nodes
-		l2RPCs := make([]flags.L2RPC, 0, len(l2ELs))
+		l2RPCs := make([]string, 0, len(l2ELs))
 		for _, elID := range l2ELs {
 			el, ok := orch.l2ELs.Get(elID)
 			require.True(ok, "need L2 EL for interop filter", elID)
-			chainID, ok := elID.ChainID().Uint64()
-			require.True(ok, "chain ID must fit in uint64")
-			l2RPCs = append(l2RPCs, flags.L2RPC{
-				ChainID: chainID,
-				RPCURL:  el.UserRPC(),
-			})
+			l2RPCs = append(l2RPCs, el.UserRPC())
 		}
 
 		cfg := &filter.Config{

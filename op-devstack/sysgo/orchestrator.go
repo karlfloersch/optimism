@@ -56,8 +56,9 @@ type Orchestrator struct {
 	// service name => prometheus endpoints to scrape
 	l2MetricsEndpoints locks.RWMap[string, []PrometheusMetricsTarget]
 
-	syncTester *SyncTesterService
-	faucet     *FaucetService
+	syncTester     *SyncTesterService
+	faucet         *FaucetService
+	interopFilter  *InteropFilterService
 
 	controlPlane *ControlPlane
 
@@ -164,6 +165,9 @@ func (o *Orchestrator) Hydrate(sys stack.ExtensibleSystem) {
 	o.proposers.Range(rangeHydrateFn[stack.L2ProposerID, *L2Proposer](sys))
 	if o.syncTester != nil {
 		o.syncTester.hydrate(sys)
+	}
+	if o.interopFilter != nil {
+		o.interopFilter.hydrate(sys)
 	}
 	o.faucet.hydrate(sys)
 	o.sysHook.PostHydrate(sys)

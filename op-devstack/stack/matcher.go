@@ -51,6 +51,8 @@ type L2CLMatcher = Matcher[L2CLNodeID, L2CLNode]
 
 type SupervisorMatcher = Matcher[SupervisorID, Supervisor]
 
+type InteropFilterMatcher = Matcher[InteropFilterID, InteropFilter]
+
 type TestSequencerMatcher = Matcher[TestSequencerID, TestSequencer]
 
 type ConductorMatcher = Matcher[ConductorID, Conductor]
