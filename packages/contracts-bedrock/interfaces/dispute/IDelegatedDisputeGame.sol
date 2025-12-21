@@ -20,4 +20,8 @@ interface IDelegatedDisputeGame is IDisputeGame {
     /// @notice Returns the anchor state registry.
     /// @return registry_ The anchor state registry.
     function anchorStateRegistry() external view returns (IAnchorStateRegistry registry_);
+
+    /// @notice Returns the superchain-level anchor state registry.
+    /// @return registry_ The superchain anchor state registry.
+    function superchainRegistry() external view returns (IAnchorStateRegistry registry_);
 }

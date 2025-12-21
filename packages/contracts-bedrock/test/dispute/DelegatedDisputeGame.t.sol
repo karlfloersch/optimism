@@ -84,7 +84,8 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         init({ _rootClaim: ROOT_CLAIM, _absolutePrestate: absolutePrestate, _super: SUPER_ROOT_PROOF });
 
         // Deploy the DelegatedDisputeGame implementation with constructor args.
-        delegatedGameImpl = new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry);
+        // In tests, we use the same registry for both per-chain and superchain since we're testing mechanics.
+        delegatedGameImpl = new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry, anchorStateRegistry);
 
         // Register the implementation with the factory.
         // Transfer ownership to this test contract first (already done in parent setUp).
@@ -541,7 +542,8 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
         init({ _rootClaim: ROOT_CLAIM, _absolutePrestate: absolutePrestate, _super: SUPER_ROOT_PROOF });
 
         // Deploy the DelegatedDisputeGame implementation with constructor args.
-        delegatedGameImpl = new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry);
+        // In tests, we use the same registry for both per-chain and superchain since we're testing mechanics.
+        delegatedGameImpl = new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry, anchorStateRegistry);
 
         // Register the implementation with the factory.
         disputeGameFactory.setImplementation(DELEGATED_GAME_TYPE, delegatedGameImpl);
@@ -723,7 +725,8 @@ contract DelegatedDisputeGame_AnchorRegistry_Test is DelegatedDisputeGame_TestIn
     /// @notice Tests that isGameRegistered returns false for an unregistered game.
     function test_isGameRegistered_unregisteredGame_fails() public {
         // Create a game directly (not through factory) - it won't be registered.
-        DelegatedDisputeGame unregisteredGame = new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry);
+        DelegatedDisputeGame unregisteredGame =
+            new DelegatedDisputeGame(DELEGATED_GAME_TYPE, anchorStateRegistry, anchorStateRegistry);
         assertFalse(anchorStateRegistry.isGameRegistered(unregisteredGame));
     }
 

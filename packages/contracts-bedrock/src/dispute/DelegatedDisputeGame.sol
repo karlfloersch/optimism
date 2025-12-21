@@ -122,8 +122,11 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @notice The game type ID for this delegated dispute game.
     GameType internal immutable GAME_TYPE;
 
-    /// @notice The anchor state registry for validation.
+    /// @notice The anchor state registry for this chain's validation.
     IAnchorStateRegistry internal immutable ANCHOR_STATE_REGISTRY;
+
+    /// @notice The superchain-level anchor state registry for SuperGame validation.
+    IAnchorStateRegistry internal immutable SUPERCHAIN_REGISTRY;
 
     ////////////////////////////////////////////////////////////////
     //                        MUTABLE STATE                       //
@@ -166,15 +169,20 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @notice Thrown when the SuperGame address is zero.
     error InvalidSuperGame();
 
+    /// @notice Thrown when the SuperGame is not registered in the superchain registry.
+    error SuperGameNotRegistered();
+
     ////////////////////////////////////////////////////////////////
     //                        CONSTRUCTOR                         //
     ////////////////////////////////////////////////////////////////
 
     /// @param _gameType The game type ID for this delegated dispute game.
-    /// @param _anchorStateRegistry The anchor state registry for validation.
-    constructor(GameType _gameType, IAnchorStateRegistry _anchorStateRegistry) {
+    /// @param _anchorStateRegistry The anchor state registry for this chain.
+    /// @param _superchainRegistry The superchain-level anchor state registry for SuperGame validation.
+    constructor(GameType _gameType, IAnchorStateRegistry _anchorStateRegistry, IAnchorStateRegistry _superchainRegistry) {
         GAME_TYPE = _gameType;
         ANCHOR_STATE_REGISTRY = _anchorStateRegistry;
+        SUPERCHAIN_REGISTRY = _superchainRegistry;
     }
 
     ////////////////////////////////////////////////////////////////
@@ -200,14 +208,15 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
         // INVARIANT: SuperGame address must not be zero.
         if (address(superGameContract) == address(0)) revert InvalidSuperGame();
 
+        // INVARIANT: SuperGame must be registered in the superchain registry.
+        // This prevents fake SuperGames from being used.
+        if (!SUPERCHAIN_REGISTRY.isGameRegistered(IDisputeGame(address(superGameContract)))) {
+            revert SuperGameNotRegistered();
+        }
+
         // Verify the root claim matches what the SuperGame has for this chain.
         Claim expectedRoot = superGameContract.rootClaimByChainId(chainId());
         if (rootClaim().raw() != expectedRoot.raw()) revert RootClaimMismatch();
-
-        // Note: We intentionally do NOT check that the SuperGame uses the same AnchorStateRegistry.
-        // The DelegatedDisputeGame may use a per-chain AnchorStateRegistry while the SuperGame uses
-        // a superchain-level AnchorStateRegistry. Invalidation propagates through isGameProper()
-        // which checks the SuperGame's registry for blacklist/retirement status.
 
         // Verify the block number matches the output root proof and header RLP.
         _verifyBlockNumber();
@@ -306,6 +315,12 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @return registry_ The anchor state registry.
     function anchorStateRegistry() public view returns (IAnchorStateRegistry registry_) {
         registry_ = ANCHOR_STATE_REGISTRY;
+    }
+
+    /// @notice Returns the superchain-level anchor state registry.
+    /// @return registry_ The superchain anchor state registry.
+    function superchainRegistry() public view returns (IAnchorStateRegistry registry_) {
+        registry_ = SUPERCHAIN_REGISTRY;
     }
 
     /// @notice Returns the super game this delegated game is linked to.
