@@ -151,9 +151,6 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @notice Thrown when the root claim doesn't match the SuperGame's claim for this chain.
     error RootClaimMismatch();
 
-    /// @notice Thrown when the SuperGame doesn't use the same anchor state registry.
-    error AnchorStateRegistryMismatch();
-
     /// @notice Thrown when the game is not in progress (for resolve).
     error GameNotInProgress();
 
@@ -207,10 +204,10 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
         Claim expectedRoot = superGameContract.rootClaimByChainId(chainId());
         if (rootClaim().raw() != expectedRoot.raw()) revert RootClaimMismatch();
 
-        // Verify the super game uses the same anchor state registry.
-        if (address(superGameContract.anchorStateRegistry()) != address(ANCHOR_STATE_REGISTRY)) {
-            revert AnchorStateRegistryMismatch();
-        }
+        // Note: We intentionally do NOT check that the SuperGame uses the same AnchorStateRegistry.
+        // The DelegatedDisputeGame may use a per-chain AnchorStateRegistry while the SuperGame uses
+        // a superchain-level AnchorStateRegistry. Invalidation propagates through isGameProper()
+        // which checks the SuperGame's registry for blacklist/retirement status.
 
         // Verify the block number matches the output root proof and header RLP.
         _verifyBlockNumber();

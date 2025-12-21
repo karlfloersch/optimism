@@ -958,33 +958,6 @@ contract DelegatedDisputeGame_EdgeCases_Test is DelegatedDisputeGame_TestInit {
         disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
     }
 
-    /// @notice Tests that anchor state registry mismatch is caught.
-    /// @dev Uses vm.mockCall to test this error path (acceptable per testing guidelines).
-    function test_create_anchorRegistryMismatch_reverts() public {
-        // Mock the SuperGame's anchorStateRegistry() to return a different address.
-        address fakeRegistry = address(0xDEAD);
-        vm.mockCall(
-            address(gameProxy),
-            abi.encodeWithSelector(ISuperFaultDisputeGame.anchorStateRegistry.selector),
-            abi.encode(fakeRegistry)
-        );
-
-        // Try to create a delegated game for chain 6 (chain 5 already used in setUp).
-        bytes memory extraData = _createExtendedExtraData(
-            6000,
-            address(gameProxy),
-            6,
-            proofChain6,
-            headerRLPChain6
-        );
-
-        vm.expectRevert(DelegatedDisputeGame.AnchorStateRegistryMismatch.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData);
-
-        // Clear the mock.
-        vm.clearMockedCalls();
-    }
-
     /// @notice Tests that SuperGame address zero is rejected.
     function test_create_invalidSuperGame_reverts() public {
         // Create extraData with address(0) as superGame.

@@ -16,6 +16,9 @@ import { IDisputeGame } from "interfaces/dispute/IDisputeGame.sol";
 import { IDisputeGameFactory } from "interfaces/dispute/IDisputeGameFactory.sol";
 import { ISystemConfig } from "interfaces/L1/ISystemConfig.sol";
 import { ISuperchainConfig } from "interfaces/L1/ISuperchainConfig.sol";
+import { ISuperFaultDisputeGame } from "interfaces/dispute/ISuperFaultDisputeGame.sol";
+import { IAnchorStateRegistry } from "interfaces/dispute/IAnchorStateRegistry.sol";
+import { IDelegatedDisputeGame } from "interfaces/dispute/IDelegatedDisputeGame.sol";
 
 /// @custom:proxied true
 /// @title AnchorStateRegistry
@@ -279,6 +282,24 @@ contract AnchorStateRegistry is ProxyAdminOwnedBase, Initializable, Reinitializa
         // Must not be paused, temporarily causes game to be considered improper.
         if (paused()) {
             return false;
+        }
+
+        // For DelegatedDisputeGames, also check SuperGame validity.
+        // If the SuperGame is blacklisted or retired, the DelegatedDisputeGame is also invalid.
+        try IDelegatedDisputeGame(address(_game)).superGame() returns (ISuperFaultDisputeGame superGame) {
+            IAnchorStateRegistry superRegistry = superGame.anchorStateRegistry();
+
+            // SuperGame must not be blacklisted.
+            if (superRegistry.isGameBlacklisted(IDisputeGame(address(superGame)))) {
+                return false;
+            }
+
+            // SuperGame must not be retired.
+            if (superRegistry.isGameRetired(IDisputeGame(address(superGame)))) {
+                return false;
+            }
+        } catch {
+            // Not a DelegatedDisputeGame, that's fine.
         }
 
         return true;
