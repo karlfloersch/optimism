@@ -285,9 +285,15 @@ contract AnchorStateRegistry is ProxyAdminOwnedBase, Initializable, Reinitializa
         }
 
         // For DelegatedDisputeGames, also check SuperGame validity.
-        // If the SuperGame is blacklisted or retired, the DelegatedDisputeGame is also invalid.
+        // If the SuperGame is not registered, blacklisted, or retired, the DelegatedDisputeGame is also invalid.
         try IDelegatedDisputeGame(address(_game)).superGame() returns (ISuperFaultDisputeGame superGame) {
             IAnchorStateRegistry superRegistry = superGame.anchorStateRegistry();
+
+            // SuperGame must be registered in the superchain DisputeGameFactory.
+            // This prevents fake SuperGames from being used.
+            if (!superRegistry.isGameRegistered(IDisputeGame(address(superGame)))) {
+                return false;
+            }
 
             // SuperGame must not be blacklisted.
             if (superRegistry.isGameBlacklisted(IDisputeGame(address(superGame)))) {
