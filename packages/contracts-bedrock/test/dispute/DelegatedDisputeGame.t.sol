@@ -16,7 +16,6 @@ import { DelegatedDisputeGame } from "src/dispute/DelegatedDisputeGame.sol";
 // Interfaces
 import { IDisputeGame } from "interfaces/dispute/IDisputeGame.sol";
 import { ISuperFaultDisputeGame } from "interfaces/dispute/ISuperFaultDisputeGame.sol";
-import { ISystemConfig } from "interfaces/L1/ISystemConfig.sol";
 
 /// @title DelegatedDisputeGame_Test
 /// @notice Tests for the DelegatedDisputeGame contract using standard DisputeGameFactory.
@@ -31,15 +30,15 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     /// @dev A created DelegatedDisputeGame proxy.
     DelegatedDisputeGame internal delegatedGameProxy;
 
-    /// @dev Stored proof data for chain 5.
-    Types.OutputRootProof internal proofChain5;
-    bytes internal headerRLPChain5;
-    bytes32 internal outputRootChain5;
+    /// @dev Stored proof data for chain 901 (the actual l2ChainId from deploy config).
+    Types.OutputRootProof internal proofChain901;
+    bytes internal headerRLPChain901;
+    bytes32 internal outputRootChain901;
 
-    /// @dev Stored proof data for chain 6.
-    Types.OutputRootProof internal proofChain6;
-    bytes internal headerRLPChain6;
-    bytes32 internal outputRootChain6;
+    /// @dev Stored proof data for chain 902 (a second chain for testing).
+    Types.OutputRootProof internal proofChain902;
+    bytes internal headerRLPChain902;
+    bytes32 internal outputRootChain902;
 
     /// @dev The root claim of the game.
     Claim internal ROOT_CLAIM;
@@ -67,18 +66,19 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         validl2SequenceNumber = l2Seqno + 1;
 
         // Generate real OutputRootProofs for each chain.
-        // These will be the actual root claims stored in the SuperGame.
-        (proofChain5, outputRootChain5, headerRLPChain5) =
-            _generateOutputRootProof(bytes32(uint256(5)), bytes32(uint256(5000)), abi.encodePacked(uint256(5000)));
+        // Chain 901 is the actual l2ChainId from deploy-config/hardhat.json.
+        // Chain 902 is a second chain for multi-chain testing.
+        (proofChain901, outputRootChain901, headerRLPChain901) =
+            _generateOutputRootProof(bytes32(uint256(901)), bytes32(uint256(5000)), abi.encodePacked(uint256(5000)));
 
-        (proofChain6, outputRootChain6, headerRLPChain6) =
-            _generateOutputRootProof(bytes32(uint256(6)), bytes32(uint256(6000)), abi.encodePacked(uint256(6000)));
+        (proofChain902, outputRootChain902, headerRLPChain902) =
+            _generateOutputRootProof(bytes32(uint256(902)), bytes32(uint256(6000)), abi.encodePacked(uint256(6000)));
 
         // Build SUPER_ROOT_PROOF with real OutputRootProof hashes.
         SUPER_ROOT_PROOF.version = bytes1(uint8(1));
         SUPER_ROOT_PROOF.timestamp = uint64(validl2SequenceNumber);
-        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 5, root: outputRootChain5 }));
-        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 6, root: outputRootChain6 }));
+        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 901, root: outputRootChain901 }));
+        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 902, root: outputRootChain902 }));
         ROOT_CLAIM = Claim.wrap(Hashing.hashSuperRootProof(SUPER_ROOT_PROOF));
 
         // Initialize the SuperGame with real output roots.
@@ -94,14 +94,6 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
         // Set init bond to 0 for delegated games (no bonds).
         disputeGameFactory.setInitBond(DELEGATED_GAME_TYPE, 0);
-
-        // Mock the SystemConfig.l2ChainId() to return chainId 5 for testing.
-        // In production, each per-chain factory would have its own SystemConfig with the correct L2 chain ID.
-        vm.mockCall(
-            address(anchorStateRegistry.systemConfig()),
-            abi.encodeWithSelector(ISystemConfig.l2ChainId.selector),
-            abi.encode(5)
-        );
     }
 
     /// @notice Helper to change the VM status byte of a claim.
@@ -190,46 +182,46 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         );
     }
 
-    /// @notice Helper to create a delegated game for chain 5 (uses stored proof data).
+    /// @notice Helper to create a delegated game for chain 901 (uses stored proof data).
     /// @param _l2BlockNumber The L2 block number to claim.
     /// @return game_ The created delegated game.
-    function _createDelegatedGameChain5(uint256 _l2BlockNumber)
+    function _createDelegatedGameChain901(uint256 _l2BlockNumber)
         internal
         returns (DelegatedDisputeGame game_)
     {
-        // For chain 5, the block number in the proof is 5000.
+        // For chain 901, the block number in the proof is 5000.
         // If _l2BlockNumber matches 5000, it will pass verification.
         // Otherwise it will fail with L2BlockNumberMismatch.
         bytes memory extraData = _createExtendedExtraData(
             _l2BlockNumber,
             address(gameProxy),
-            5,
-            proofChain5,
-            headerRLPChain5
+            901,
+            proofChain901,
+            headerRLPChain901
         );
 
         game_ = DelegatedDisputeGame(
-            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData)))
+            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData)))
         );
     }
 
-    /// @notice Helper to create a delegated game for chain 6 (uses stored proof data).
+    /// @notice Helper to create a delegated game for chain 902 (uses stored proof data).
     /// @param _l2BlockNumber The L2 block number to claim.
     /// @return game_ The created delegated game.
-    function _createDelegatedGameChain6(uint256 _l2BlockNumber)
+    function _createDelegatedGameChain902(uint256 _l2BlockNumber)
         internal
         returns (DelegatedDisputeGame game_)
     {
         bytes memory extraData = _createExtendedExtraData(
             _l2BlockNumber,
             address(gameProxy),
-            6,
-            proofChain6,
-            headerRLPChain6
+            902,
+            proofChain902,
+            headerRLPChain902
         );
 
         game_ = DelegatedDisputeGame(
-            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData)))
+            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain902), extraData)))
         );
     }
 
@@ -241,16 +233,16 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
     /// @notice Tests that a delegated game can be created successfully via standard factory.
     function test_create_succeeds() public {
-        // Create delegated game for chain 5 with matching block number (5000).
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        // Create delegated game for chain 901 with matching block number (5000).
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
 
         // Verify the game was created.
         assertTrue(address(delegatedGameProxy) != address(0));
 
         // Verify the game's properties.
         assertEq(delegatedGameProxy.gameType().raw(), DELEGATED_GAME_TYPE.raw());
-        assertEq(delegatedGameProxy.rootClaim().raw(), outputRootChain5);
-        assertEq(delegatedGameProxy.chainId(), 5);
+        assertEq(delegatedGameProxy.rootClaim().raw(), outputRootChain901);
+        assertEq(delegatedGameProxy.chainId(), 901);
         assertEq(address(delegatedGameProxy.superGame()), address(gameProxy));
         assertEq(address(delegatedGameProxy.anchorStateRegistry()), address(anchorStateRegistry));
 
@@ -268,14 +260,14 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
     /// @notice Tests that create reverts if root claim doesn't match SuperGame.
     function test_create_rootClaimMismatch_reverts() public {
-        uint256 chainId = 5;
+        uint256 chainId = 901;
         uint256 l2BlockNumber = 5000;
 
         // Use a different root claim than what SuperGame returns.
         Claim wrongRootClaim = Claim.wrap(bytes32(uint256(12345)));
 
         bytes memory extraData = _createExtendedExtraData(
-            l2BlockNumber, address(gameProxy), chainId, proofChain5, headerRLPChain5
+            l2BlockNumber, address(gameProxy), chainId, proofChain901, headerRLPChain901
         );
 
         vm.expectRevert(DelegatedDisputeGame.RootClaimMismatch.selector);
@@ -286,42 +278,42 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     /// @dev The factory rejects with IncorrectBondAmount since init bond is 0.
     function test_create_withBonds_reverts() public {
         bytes memory extraData = _createExtendedExtraData(
-            5000, address(gameProxy), 5, proofChain5, headerRLPChain5
+            5000, address(gameProxy), 901, proofChain901, headerRLPChain901
         );
 
         // Factory rejects because init bond is 0, so any value is incorrect
         vm.expectRevert(abi.encodeWithSignature("IncorrectBondAmount()"));
-        disputeGameFactory.create{ value: 1 ether }(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create{ value: 1 ether }(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
     }
 
     /// @notice Tests that status is delegated to SuperGame.
     function test_status_delegatesToSuperGame() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         // Status should match SuperGame's status.
         assertEq(uint256(delegatedGameProxy.status()), uint256(gameProxy.status()));
     }
 
     /// @notice Tests that resolvedAt is delegated to SuperGame.
     function test_resolvedAt_delegatesToSuperGame() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         // resolvedAt should match SuperGame's resolvedAt.
         assertEq(delegatedGameProxy.resolvedAt().raw(), gameProxy.resolvedAt().raw());
     }
 
     /// @notice Tests that l2SequenceNumber returns the block number from extraData.
     function test_l2SequenceNumber_returnsBlockNumber() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         assertEq(delegatedGameProxy.l2SequenceNumber(), 5000);
     }
 
     /// @notice Tests that gameData returns correct values.
     function test_gameData_returnsCorrectValues() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
 
         (GameType gameType_, Claim rootClaim_, bytes memory extraData_) = delegatedGameProxy.gameData();
 
         assertEq(gameType_.raw(), DELEGATED_GAME_TYPE.raw());
-        assertEq(rootClaim_.raw(), outputRootChain5);
+        assertEq(rootClaim_.raw(), outputRootChain901);
         // extraData first 32 bytes are l2BlockNumber (use l2SequenceNumber for viem compatibility)
         uint256 decodedBlockNumber;
         assembly {
@@ -334,7 +326,7 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     function test_gameAtIndex_succeeds() public {
         uint256 gameCountBefore = disputeGameFactory.gameCount();
 
-        DelegatedDisputeGame proxy = _createDelegatedGameChain5(5000);
+        DelegatedDisputeGame proxy = _createDelegatedGameChain901(5000);
 
         (GameType gameType_, Timestamp timestamp_, IDisputeGame proxy_) = disputeGameFactory.gameAtIndex(gameCountBefore);
 
@@ -346,14 +338,14 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     /// @notice Tests that games() lookup works correctly.
     function test_games_succeeds() public {
         bytes memory extraData = _createExtendedExtraData(
-            5000, address(gameProxy), 5, proofChain5, headerRLPChain5
+            5000, address(gameProxy), 901, proofChain901, headerRLPChain901
         );
 
-        IDisputeGame proxy = disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        IDisputeGame proxy = disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
 
         // Look up by game parameters
         (IDisputeGame proxy_, Timestamp timestamp_) =
-            disputeGameFactory.games(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+            disputeGameFactory.games(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
 
         assertTrue(timestamp_.raw() > 0);
         assertEq(address(proxy_), address(proxy));
@@ -363,22 +355,22 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     function test_gameCount_increments() public {
         uint256 gameCountBefore = disputeGameFactory.gameCount();
 
-        // Create delegated game for chain 5.
-        _createDelegatedGameChain5(5000);
+        // Create delegated game for chain 901.
+        _createDelegatedGameChain901(5000);
         assertEq(disputeGameFactory.gameCount(), gameCountBefore + 1);
     }
 
     /// @notice Tests that createdAt is set correctly.
     function test_createdAt_isSetCorrectly() public {
         uint256 expectedTimestamp = block.timestamp;
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         assertEq(delegatedGameProxy.createdAt().raw(), expectedTimestamp);
     }
 
     /// @notice Tests that wasRespectedGameTypeWhenCreated returns correct value.
     function test_wasRespectedGameTypeWhenCreated_returnsCorrectValue() public {
         // The delegated game type is not the respected type (SUPER_CANNON is), so this should be false.
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         assertFalse(delegatedGameProxy.wasRespectedGameTypeWhenCreated());
     }
 
@@ -389,14 +381,14 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
     /// @notice Tests that gameCreator returns the correct address.
     function test_gameCreator_returnsCorrectAddress() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         // gameCreator should be the caller of create() (this test contract)
         assertEq(delegatedGameProxy.gameCreator(), address(this));
     }
 
     /// @notice Tests that l1Head returns a non-zero value.
     function test_l1Head_returnsNonZero() public {
-        delegatedGameProxy = _createDelegatedGameChain5(5000);
+        delegatedGameProxy = _createDelegatedGameChain901(5000);
         // l1Head should be the parent block hash
         assertTrue(delegatedGameProxy.l1Head().raw() != bytes32(0));
     }
@@ -405,14 +397,14 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     /// @dev Note: Each per-chain factory can only create games for its L2 chain.
     ///      Multi-chain testing would require separate factories with different l2ChainId configs.
     function test_delegatedGame_correctConfiguration_succeeds() public {
-        // Create delegated game for chain 5
-        DelegatedDisputeGame game = _createDelegatedGameChain5(5000);
+        // Create delegated game for chain 901
+        DelegatedDisputeGame game = _createDelegatedGameChain901(5000);
 
         // Verify game points to correct SuperGame
         assertEq(address(game.superGame()), address(gameProxy));
 
         // Verify correct chain ID
-        assertEq(game.chainId(), 5);
+        assertEq(game.chainId(), 901);
 
         // Verify status delegates to SuperGame
         assertEq(uint256(game.status()), uint256(gameProxy.status()));
@@ -423,25 +415,25 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
     /// @notice Tests that creating a game with wrong chain ID reverts.
     function test_create_wrongChainId_reverts() public {
-        // Try to create a game for chain 6 on this factory (which is configured for chain 5).
-        bytes memory extraData = _createExtendedExtraData(6000, address(gameProxy), 6, proofChain6, headerRLPChain6);
+        // Try to create a game for chain 902 on this factory (which is configured for chain 901).
+        bytes memory extraData = _createExtendedExtraData(6000, address(gameProxy), 902, proofChain902, headerRLPChain902);
 
         vm.expectRevert(DelegatedDisputeGame.InvalidChainId.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain902), extraData);
     }
 
     /// @notice Tests that create reverts with invalid output root proof.
     function test_create_invalidOutputRootProof_reverts() public {
         // Create a corrupted proof (different stateRoot than what was used).
-        Types.OutputRootProof memory corruptedProof = proofChain5;
+        Types.OutputRootProof memory corruptedProof = proofChain901;
         corruptedProof.stateRoot = bytes32(uint256(999));
 
         bytes memory extraData = _createExtendedExtraData(
-            5000, address(gameProxy), 5, corruptedProof, headerRLPChain5
+            5000, address(gameProxy), 901, corruptedProof, headerRLPChain901
         );
 
         vm.expectRevert(DelegatedDisputeGame.InvalidOutputRootProof.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
     }
 
     /// @notice Tests that create reverts with invalid header RLP.
@@ -450,11 +442,11 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         bytes memory invalidHeaderRLP = hex"DEADBEEF";
 
         bytes memory extraData = _createExtendedExtraData(
-            5000, address(gameProxy), 5, proofChain5, invalidHeaderRLP
+            5000, address(gameProxy), 901, proofChain901, invalidHeaderRLP
         );
 
         vm.expectRevert(DelegatedDisputeGame.InvalidHeaderRLP.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
     }
 
     /// @notice Tests that create reverts with mismatched block number.
@@ -463,11 +455,11 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         uint256 wrongBlockNumber = 2000;
 
         bytes memory extraData = _createExtendedExtraData(
-            wrongBlockNumber, address(gameProxy), 5, proofChain5, headerRLPChain5
+            wrongBlockNumber, address(gameProxy), 901, proofChain901, headerRLPChain901
         );
 
         vm.expectRevert(DelegatedDisputeGame.L2BlockNumberMismatch.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
     }
 }
 
@@ -490,15 +482,15 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
     /// @dev The L2 block number for the delegated game (encoded in the proof).
     uint256 internal delegatedL2BlockNumber;
 
-    /// @dev Stored proof data for chain 5.
-    Types.OutputRootProof internal proofChain5;
-    bytes internal headerRLPChain5;
-    bytes32 internal outputRootChain5;
+    /// @dev Stored proof data for chain 901 (the actual l2ChainId from deploy config).
+    Types.OutputRootProof internal proofChain901;
+    bytes internal headerRLPChain901;
+    bytes32 internal outputRootChain901;
 
-    /// @dev Stored proof data for chain 6.
-    Types.OutputRootProof internal proofChain6;
-    bytes internal headerRLPChain6;
-    bytes32 internal outputRootChain6;
+    /// @dev Stored proof data for chain 902 (a second chain for testing).
+    Types.OutputRootProof internal proofChain902;
+    bytes internal headerRLPChain902;
+    bytes32 internal outputRootChain902;
 
     /// @dev The root claim of the game.
     Claim internal ROOT_CLAIM;
@@ -526,25 +518,25 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
         validl2SequenceNumber = l2Seqno + 1;
 
         // Generate real OutputRootProofs for each chain.
-        // Chain 5 has block number 5000, chain 6 has block number 6000.
-        delegatedChainId = 5;
+        // Chain 901 has block number 5000, chain 902 has block number 6000.
+        delegatedChainId = 901;
         delegatedL2BlockNumber = 5000;
 
-        (proofChain5, outputRootChain5, headerRLPChain5) =
+        (proofChain901, outputRootChain901, headerRLPChain901) =
             _generateOutputRootProof(
-                bytes32(uint256(5)),
+                bytes32(uint256(901)),
                 bytes32(uint256(delegatedL2BlockNumber)),
                 abi.encodePacked(delegatedL2BlockNumber)
             );
 
-        (proofChain6, outputRootChain6, headerRLPChain6) =
-            _generateOutputRootProof(bytes32(uint256(6)), bytes32(uint256(6000)), abi.encodePacked(uint256(6000)));
+        (proofChain902, outputRootChain902, headerRLPChain902) =
+            _generateOutputRootProof(bytes32(uint256(902)), bytes32(uint256(6000)), abi.encodePacked(uint256(6000)));
 
         // Build SUPER_ROOT_PROOF with real OutputRootProof hashes.
         SUPER_ROOT_PROOF.version = bytes1(uint8(1));
         SUPER_ROOT_PROOF.timestamp = uint64(validl2SequenceNumber);
-        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 5, root: outputRootChain5 }));
-        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 6, root: outputRootChain6 }));
+        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 901, root: outputRootChain901 }));
+        SUPER_ROOT_PROOF.outputRoots.push(Types.OutputRootWithChainId({ chainId: 902, root: outputRootChain902 }));
         ROOT_CLAIM = Claim.wrap(Hashing.hashSuperRootProof(SUPER_ROOT_PROOF));
 
         // Initialize the SuperGame with real output roots.
@@ -560,21 +552,13 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
         // Set init bond to 0 for delegated games (no bonds).
         disputeGameFactory.setInitBond(DELEGATED_GAME_TYPE, 0);
 
-        // Mock the SystemConfig.l2ChainId() to return chainId 5 for testing.
-        // In production, each per-chain factory would have its own SystemConfig with the correct L2 chain ID.
-        vm.mockCall(
-            address(anchorStateRegistry.systemConfig()),
-            abi.encodeWithSelector(ISystemConfig.l2ChainId.selector),
-            abi.encode(5)
-        );
-
         // Set the delegated game type as the respected type before creating the game.
         // This ensures wasRespectedGameTypeWhenCreated is true for tests that need it.
         vm.prank(anchorStateRegistry.superchainConfig().guardian());
         anchorStateRegistry.setRespectedGameType(DELEGATED_GAME_TYPE);
 
-        // Create a delegated game for chain 5 with the correct block number.
-        delegatedGameProxy = _createDelegatedGameChain5(delegatedL2BlockNumber);
+        // Create a delegated game for chain 901 with the correct block number.
+        delegatedGameProxy = _createDelegatedGameChain901(delegatedL2BlockNumber);
     }
 
     /// @notice Helper to change the VM status byte of a claim.
@@ -641,39 +625,39 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
         );
     }
 
-    /// @notice Helper to create a delegated game for chain 5 (uses stored proof data).
-    function _createDelegatedGameChain5(uint256 _l2BlockNumber)
+    /// @notice Helper to create a delegated game for chain 901 (uses stored proof data).
+    function _createDelegatedGameChain901(uint256 _l2BlockNumber)
         internal
         returns (DelegatedDisputeGame game_)
     {
         bytes memory extraData = _createExtendedExtraData(
             _l2BlockNumber,
             address(gameProxy),
-            5,
-            proofChain5,
-            headerRLPChain5
+            901,
+            proofChain901,
+            headerRLPChain901
         );
 
         game_ = DelegatedDisputeGame(
-            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData)))
+            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData)))
         );
     }
 
-    /// @notice Helper to create a delegated game for chain 6 (uses stored proof data).
-    function _createDelegatedGameChain6(uint256 _l2BlockNumber)
+    /// @notice Helper to create a delegated game for chain 902 (uses stored proof data).
+    function _createDelegatedGameChain902(uint256 _l2BlockNumber)
         internal
         returns (DelegatedDisputeGame game_)
     {
         bytes memory extraData = _createExtendedExtraData(
             _l2BlockNumber,
             address(gameProxy),
-            6,
-            proofChain6,
-            headerRLPChain6
+            902,
+            proofChain902,
+            headerRLPChain902
         );
 
         game_ = DelegatedDisputeGame(
-            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData)))
+            payable(address(disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain902), extraData)))
         );
     }
 
@@ -706,7 +690,7 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
         gameCounter++;
 
         // Get the expected block number for this chain.
-        uint256 blockNumber = _chainId == 5 ? delegatedL2BlockNumber : 6000;
+        uint256 blockNumber = _chainId == 901 ? delegatedL2BlockNumber : 6000;
 
         // Generate a unique proof by varying the storage root.
         (Types.OutputRootProof memory proof, bytes32 outputRoot, bytes memory headerRLP) =
@@ -950,16 +934,16 @@ contract DelegatedDisputeGame_EdgeCases_Test is DelegatedDisputeGame_TestInit {
 
     /// @notice Tests that creation fails with wrong root claim.
     function test_create_mismatchedRootClaim_reverts() public {
-        // Use chain 5's extraData but with a wrong root claim.
+        // Use chain 901's extraData but with a wrong root claim.
         bytes memory extraData = _createExtendedExtraData(
             delegatedL2BlockNumber,
             address(gameProxy),
-            5,
-            proofChain5,
-            headerRLPChain5
+            901,
+            proofChain901,
+            headerRLPChain901
         );
 
-        // Should revert because the provided rootClaim doesn't match what SuperGame has for chain 5.
+        // Should revert because the provided rootClaim doesn't match what SuperGame has for chain 901.
         bytes32 wrongRootClaim = bytes32(uint256(0xdead));
         vm.expectRevert(DelegatedDisputeGame.RootClaimMismatch.selector);
         disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(wrongRootClaim), extraData);
@@ -971,13 +955,13 @@ contract DelegatedDisputeGame_EdgeCases_Test is DelegatedDisputeGame_TestInit {
         bytes memory extraData = _createExtendedExtraData(
             5000,
             address(0), // Invalid zero address
-            5,
-            proofChain5,
-            headerRLPChain5
+            901,
+            proofChain901,
+            headerRLPChain901
         );
 
         vm.expectRevert(DelegatedDisputeGame.InvalidSuperGame.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain901), extraData);
     }
 
     /// @notice Tests that resolve can be called multiple times after resolution.
