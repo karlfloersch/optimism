@@ -16,6 +16,7 @@ import { DelegatedDisputeGame } from "src/dispute/DelegatedDisputeGame.sol";
 // Interfaces
 import { IDisputeGame } from "interfaces/dispute/IDisputeGame.sol";
 import { ISuperFaultDisputeGame } from "interfaces/dispute/ISuperFaultDisputeGame.sol";
+import { ISystemConfig } from "interfaces/L1/ISystemConfig.sol";
 
 /// @title DelegatedDisputeGame_Test
 /// @notice Tests for the DelegatedDisputeGame contract using standard DisputeGameFactory.
@@ -93,6 +94,14 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
 
         // Set init bond to 0 for delegated games (no bonds).
         disputeGameFactory.setInitBond(DELEGATED_GAME_TYPE, 0);
+
+        // Mock the SystemConfig.l2ChainId() to return chainId 5 for testing.
+        // In production, each per-chain factory would have its own SystemConfig with the correct L2 chain ID.
+        vm.mockCall(
+            address(anchorStateRegistry.systemConfig()),
+            abi.encodeWithSelector(ISystemConfig.l2ChainId.selector),
+            abi.encode(5)
+        );
     }
 
     /// @notice Helper to change the VM status byte of a claim.
@@ -354,13 +363,9 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
     function test_gameCount_increments() public {
         uint256 gameCountBefore = disputeGameFactory.gameCount();
 
-        // Create first delegated game for chain 5.
+        // Create delegated game for chain 5.
         _createDelegatedGameChain5(5000);
         assertEq(disputeGameFactory.gameCount(), gameCountBefore + 1);
-
-        // Create second delegated game for chain 6.
-        _createDelegatedGameChain6(6000);
-        assertEq(disputeGameFactory.gameCount(), gameCountBefore + 2);
     }
 
     /// @notice Tests that createdAt is set correctly.
@@ -396,29 +401,33 @@ contract DelegatedDisputeGame_Test is BaseSuperFaultDisputeGame_TestInit {
         assertTrue(delegatedGameProxy.l1Head().raw() != bytes32(0));
     }
 
-    /// @notice Tests creating multiple delegated games for different chains from same SuperGame.
-    function test_multipleChains_succeeds() public {
+    /// @notice Tests creating multiple delegated games for same chain from same SuperGame.
+    /// @dev Note: Each per-chain factory can only create games for its L2 chain.
+    ///      Multi-chain testing would require separate factories with different l2ChainId configs.
+    function test_delegatedGame_correctConfiguration_succeeds() public {
         // Create delegated game for chain 5
-        DelegatedDisputeGame game5 = _createDelegatedGameChain5(5000);
+        DelegatedDisputeGame game = _createDelegatedGameChain5(5000);
 
-        // Create delegated game for chain 6
-        DelegatedDisputeGame game6 = _createDelegatedGameChain6(6000);
+        // Verify game points to correct SuperGame
+        assertEq(address(game.superGame()), address(gameProxy));
 
-        // Verify both games point to same SuperGame
-        assertEq(address(game5.superGame()), address(gameProxy));
-        assertEq(address(game6.superGame()), address(gameProxy));
+        // Verify correct chain ID
+        assertEq(game.chainId(), 5);
 
-        // Verify different chain IDs
-        assertEq(game5.chainId(), 5);
-        assertEq(game6.chainId(), 6);
+        // Verify status delegates to SuperGame
+        assertEq(uint256(game.status()), uint256(gameProxy.status()));
 
-        // Verify different root claims
-        assertEq(game5.rootClaim().raw(), outputRootChain5);
-        assertEq(game6.rootClaim().raw(), outputRootChain6);
+        // Verify L2 block number is correct
+        assertEq(game.l2SequenceNumber(), 5000);
+    }
 
-        // Verify both delegate status to same SuperGame
-        assertEq(uint256(game5.status()), uint256(gameProxy.status()));
-        assertEq(uint256(game6.status()), uint256(gameProxy.status()));
+    /// @notice Tests that creating a game with wrong chain ID reverts.
+    function test_create_wrongChainId_reverts() public {
+        // Try to create a game for chain 6 on this factory (which is configured for chain 5).
+        bytes memory extraData = _createExtendedExtraData(6000, address(gameProxy), 6, proofChain6, headerRLPChain6);
+
+        vm.expectRevert(DelegatedDisputeGame.InvalidChainId.selector);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData);
     }
 
     /// @notice Tests that create reverts with invalid output root proof.
@@ -550,6 +559,19 @@ contract DelegatedDisputeGame_TestInit is BaseSuperFaultDisputeGame_TestInit {
 
         // Set init bond to 0 for delegated games (no bonds).
         disputeGameFactory.setInitBond(DELEGATED_GAME_TYPE, 0);
+
+        // Mock the SystemConfig.l2ChainId() to return chainId 5 for testing.
+        // In production, each per-chain factory would have its own SystemConfig with the correct L2 chain ID.
+        vm.mockCall(
+            address(anchorStateRegistry.systemConfig()),
+            abi.encodeWithSelector(ISystemConfig.l2ChainId.selector),
+            abi.encode(5)
+        );
+
+        // Set the delegated game type as the respected type before creating the game.
+        // This ensures wasRespectedGameTypeWhenCreated is true for tests that need it.
+        vm.prank(anchorStateRegistry.superchainConfig().guardian());
+        anchorStateRegistry.setRespectedGameType(DELEGATED_GAME_TYPE);
 
         // Create a delegated game for chain 5 with the correct block number.
         delegatedGameProxy = _createDelegatedGameChain5(delegatedL2BlockNumber);
@@ -740,53 +762,41 @@ contract DelegatedDisputeGame_AnchorRegistry_Test is DelegatedDisputeGame_TestIn
     }
 
     /// @notice Tests that isGameProper returns true when game type is respected.
-    function test_isGameProper_whenRespected_succeeds() public {
-        // Set the delegated game type as the respected type.
-        vm.prank(anchorStateRegistry.superchainConfig().guardian());
-        anchorStateRegistry.setRespectedGameType(DELEGATED_GAME_TYPE);
-
-        // Create a new delegated game for chain 6 (chain 5 already used in setUp).
-        DelegatedDisputeGame newGame = _createDelegatedGameChain6(6000);
-
-        assertTrue(anchorStateRegistry.isGameProper(newGame));
+    function test_isGameProper_whenRespected_succeeds() public view {
+        // The delegated game was created when respected (set in setUp).
+        assertTrue(anchorStateRegistry.isGameProper(delegatedGameProxy));
     }
 
     /// @notice Tests that isGameProper returns false when game is blacklisted.
     function test_isGameProper_blacklisted_fails() public {
-        // Set the delegated game type as respected first.
-        vm.prank(anchorStateRegistry.superchainConfig().guardian());
-        anchorStateRegistry.setRespectedGameType(DELEGATED_GAME_TYPE);
-
-        // Create a new game for chain 6 when respected (chain 5 already used in setUp).
-        DelegatedDisputeGame newGame = _createDelegatedGameChain6(6000);
-
         // Verify it's proper before blacklisting.
-        assertTrue(anchorStateRegistry.isGameProper(newGame));
+        assertTrue(anchorStateRegistry.isGameProper(delegatedGameProxy));
 
         // Blacklist the game.
         vm.prank(anchorStateRegistry.superchainConfig().guardian());
-        anchorStateRegistry.blacklistDisputeGame(newGame);
+        anchorStateRegistry.blacklistDisputeGame(delegatedGameProxy);
 
         // Now it should not be proper.
-        assertFalse(anchorStateRegistry.isGameProper(newGame));
+        assertFalse(anchorStateRegistry.isGameProper(delegatedGameProxy));
     }
 
     /// @notice Tests that isGameRespected returns the correct value.
-    function test_isGameRespected_whenRespected_succeeds() public {
-        // Set the delegated game type as the respected type.
-        vm.prank(anchorStateRegistry.superchainConfig().guardian());
-        anchorStateRegistry.setRespectedGameType(DELEGATED_GAME_TYPE);
-
-        // Create a new delegated game for chain 6 (chain 5 already used in setUp).
-        DelegatedDisputeGame newGame = _createDelegatedGameChain6(6000);
-
-        assertTrue(anchorStateRegistry.isGameRespected(newGame));
+    function test_isGameRespected_whenRespected_succeeds() public view {
+        // The delegated game was created when respected (set in setUp).
+        assertTrue(anchorStateRegistry.isGameRespected(delegatedGameProxy));
     }
 
-    /// @notice Tests that isGameRespected returns false when not respected.
-    function test_isGameRespected_whenNotRespected_fails() public view {
-        // The delegated game was created when its type was not respected.
-        assertFalse(anchorStateRegistry.isGameRespected(delegatedGameProxy));
+    /// @notice Tests that changing respected game type after creation doesn't affect existing games.
+    function test_isGameRespected_unchangedAfterRespectedTypeChange() public {
+        // Game was created when respected.
+        assertTrue(anchorStateRegistry.isGameRespected(delegatedGameProxy));
+
+        // Change respected game type to something else.
+        vm.prank(anchorStateRegistry.superchainConfig().guardian());
+        anchorStateRegistry.setRespectedGameType(GameType.wrap(999));
+
+        // Game should still be respected (wasRespectedGameTypeWhenCreated is immutable).
+        assertTrue(anchorStateRegistry.isGameRespected(delegatedGameProxy));
     }
 
     /// @notice Tests that isGameResolved returns correct value based on SuperGame status.
@@ -900,24 +910,19 @@ contract DelegatedDisputeGame_Resolution_Test is DelegatedDisputeGame_TestInit {
         assertEq(uint256(status), uint256(GameStatus.CHALLENGER_WINS));
     }
 
-    /// @notice Tests multiple delegated games share resolution from same SuperGame.
-    function test_multipleGames_sharedResolution() public {
-        // Create another delegated game for chain 6.
-        DelegatedDisputeGame game6 = _createDelegatedGameChain6(6000);
-
-        // Both should be IN_PROGRESS.
+    /// @notice Tests delegated game shares resolution with SuperGame.
+    function test_sharedResolution_succeeds() public {
+        // Delegated game should be IN_PROGRESS.
         assertEq(uint256(delegatedGameProxy.status()), uint256(GameStatus.IN_PROGRESS));
-        assertEq(uint256(game6.status()), uint256(GameStatus.IN_PROGRESS));
 
         // Resolve the SuperGame.
         _resolveSuperGame();
 
-        // Both should now be DEFENDER_WINS.
+        // Delegated game should now be DEFENDER_WINS.
         assertEq(uint256(delegatedGameProxy.status()), uint256(GameStatus.DEFENDER_WINS));
-        assertEq(uint256(game6.status()), uint256(GameStatus.DEFENDER_WINS));
 
-        // Both should have same resolvedAt.
-        assertEq(delegatedGameProxy.resolvedAt().raw(), game6.resolvedAt().raw());
+        // Delegated game should have same resolvedAt as SuperGame.
+        assertEq(delegatedGameProxy.resolvedAt().raw(), gameProxy.resolvedAt().raw());
     }
 }
 
@@ -925,16 +930,15 @@ contract DelegatedDisputeGame_Resolution_Test is DelegatedDisputeGame_TestInit {
 /// @notice Tests for DelegatedDisputeGame edge cases.
 contract DelegatedDisputeGame_EdgeCases_Test is DelegatedDisputeGame_TestInit {
     /// @notice Tests that a delegated game can be created after SuperGame is resolved.
-    function test_create_afterSuperGameResolved_succeeds() public {
-        // Resolve the SuperGame first.
+    function test_status_afterSuperGameResolved_succeeds() public {
+        // Verify status is IN_PROGRESS before resolution.
+        assertEq(uint256(delegatedGameProxy.status()), uint256(GameStatus.IN_PROGRESS));
+
+        // Resolve the SuperGame.
         _resolveSuperGame();
 
-        // Create a new delegated game for chain 6 (chain 5 already used in setUp).
-        DelegatedDisputeGame newGame = _createDelegatedGameChain6(6000);
-
-        // Verify the game was created and status is DEFENDER_WINS (delegates to resolved SuperGame).
-        assertTrue(address(newGame) != address(0));
-        assertEq(uint256(newGame.status()), uint256(GameStatus.DEFENDER_WINS));
+        // Verify status is now DEFENDER_WINS (delegates to resolved SuperGame).
+        assertEq(uint256(delegatedGameProxy.status()), uint256(GameStatus.DEFENDER_WINS));
     }
 
     /// @notice Tests that initialize reverts if called twice.
@@ -944,36 +948,36 @@ contract DelegatedDisputeGame_EdgeCases_Test is DelegatedDisputeGame_TestInit {
         delegatedGameProxy.initialize();
     }
 
-    /// @notice Tests that creation fails with wrong chain ID (root claim mismatch).
-    function test_create_mismatchedChainId_reverts() public {
-        // Get root claim for chain 5 but try to use chain 6's extraData structure.
-        // This creates extraData pointing to chain 6 but using chain 5's proof.
+    /// @notice Tests that creation fails with wrong root claim.
+    function test_create_mismatchedRootClaim_reverts() public {
+        // Use chain 5's extraData but with a wrong root claim.
         bytes memory extraData = _createExtendedExtraData(
             delegatedL2BlockNumber,
             address(gameProxy),
-            6, // Wrong chainId - should be 5 to match proofChain5
+            5,
             proofChain5,
             headerRLPChain5
         );
 
-        // Should revert because rootClaim (for chain 5's output root) doesn't match what SuperGame has for chain 6.
+        // Should revert because the provided rootClaim doesn't match what SuperGame has for chain 5.
+        bytes32 wrongRootClaim = bytes32(uint256(0xdead));
         vm.expectRevert(DelegatedDisputeGame.RootClaimMismatch.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(wrongRootClaim), extraData);
     }
 
     /// @notice Tests that SuperGame address zero is rejected.
     function test_create_invalidSuperGame_reverts() public {
         // Create extraData with address(0) as superGame.
         bytes memory extraData = _createExtendedExtraData(
-            6000,
+            5000,
             address(0), // Invalid zero address
-            6,
-            proofChain6,
-            headerRLPChain6
+            5,
+            proofChain5,
+            headerRLPChain5
         );
 
         vm.expectRevert(DelegatedDisputeGame.InvalidSuperGame.selector);
-        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain6), extraData);
+        disputeGameFactory.create(DELEGATED_GAME_TYPE, Claim.wrap(outputRootChain5), extraData);
     }
 
     /// @notice Tests that resolve can be called multiple times after resolution.

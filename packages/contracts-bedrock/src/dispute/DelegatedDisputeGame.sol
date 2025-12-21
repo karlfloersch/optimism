@@ -175,6 +175,9 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @notice Thrown when the SuperGame's registry doesn't match SUPERCHAIN_REGISTRY.
     error SuperchainRegistryMismatch();
 
+    /// @notice Thrown when the chain ID in extraData doesn't match the actual chain.
+    error InvalidChainId();
+
     ////////////////////////////////////////////////////////////////
     //                        CONSTRUCTOR                         //
     ////////////////////////////////////////////////////////////////
@@ -201,6 +204,11 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
 
         // INVARIANT: No bonds are accepted for delegated games.
         if (msg.value != 0) revert NoBondsAccepted();
+
+        // INVARIANT: Chain ID must match this factory's L2 chain.
+        // The per-chain AnchorStateRegistry's SystemConfig knows the correct L2 chain ID.
+        // This prevents creating games for other chains on this factory.
+        if (chainId() != ANCHOR_STATE_REGISTRY.systemConfig().l2ChainId()) revert InvalidChainId();
 
         // Mark as initialized before external calls (CEI pattern).
         initialized = true;
