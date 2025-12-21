@@ -172,6 +172,9 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
     /// @notice Thrown when the SuperGame is not registered in the superchain registry.
     error SuperGameNotRegistered();
 
+    /// @notice Thrown when the SuperGame's registry doesn't match SUPERCHAIN_REGISTRY.
+    error SuperchainRegistryMismatch();
+
     ////////////////////////////////////////////////////////////////
     //                        CONSTRUCTOR                         //
     ////////////////////////////////////////////////////////////////
@@ -212,6 +215,12 @@ contract DelegatedDisputeGame is Clone, IDisputeGame {
         // This prevents fake SuperGames from being used.
         if (!SUPERCHAIN_REGISTRY.isGameRegistered(IDisputeGame(address(superGameContract)))) {
             revert SuperGameNotRegistered();
+        }
+
+        // INVARIANT: SuperGame's registry must match SUPERCHAIN_REGISTRY.
+        // This ensures consistency between initialize() and isGameProper() validation.
+        if (address(superGameContract.anchorStateRegistry()) != address(SUPERCHAIN_REGISTRY)) {
+            revert SuperchainRegistryMismatch();
         }
 
         // Verify the root claim matches what the SuperGame has for this chain.
