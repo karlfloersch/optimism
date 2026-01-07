@@ -24,9 +24,77 @@ import (
 )
 
 const (
-	defaultBlockTime = 2 * time.Second
-	pollInterval     = 2 * time.Second
+	pollInterval = 2 * time.Second
 )
+
+// BlockTimestampFetcher fetches a block's timestamp by block number.
+// Returns (timestamp, error). Used for binary search to find blocks by timestamp.
+type BlockTimestampFetcher func(ctx context.Context, blockNum uint64) (uint64, error)
+
+// FindBlockByTimestamp uses binary search to find the first block with timestamp >= targetTimestamp.
+// Parameters:
+//   - ctx: context for cancellation
+//   - targetTimestamp: the timestamp we're looking for
+//   - latestBlockNum: the highest block number to search (typically chain head)
+//   - fetchTimestamp: function to get a block's timestamp by number
+//
+// Returns the block number of the first block at or after targetTimestamp.
+// If all blocks are after targetTimestamp, returns 1.
+// If all blocks are before targetTimestamp, returns latestBlockNum.
+func FindBlockByTimestamp(
+	ctx context.Context,
+	targetTimestamp uint64,
+	latestBlockNum uint64,
+	fetchTimestamp BlockTimestampFetcher,
+) (uint64, error) {
+	if latestBlockNum == 0 {
+		return 1, nil
+	}
+
+	// Check if target is before the first block
+	firstTimestamp, err := fetchTimestamp(ctx, 1)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch block 1: %w", err)
+	}
+	if targetTimestamp <= firstTimestamp {
+		return 1, nil
+	}
+
+	// Check if target is after the latest block
+	latestTimestamp, err := fetchTimestamp(ctx, latestBlockNum)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch block %d: %w", latestBlockNum, err)
+	}
+	if targetTimestamp > latestTimestamp {
+		return latestBlockNum, nil
+	}
+
+	// Binary search for the first block with timestamp >= targetTimestamp
+	low, high := uint64(1), latestBlockNum
+
+	for low < high {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		default:
+		}
+
+		mid := low + (high-low)/2
+
+		midTimestamp, err := fetchTimestamp(ctx, mid)
+		if err != nil {
+			return 0, fmt.Errorf("failed to fetch block %d: %w", mid, err)
+		}
+
+		if midTimestamp < targetTimestamp {
+			low = mid + 1
+		} else {
+			high = mid
+		}
+	}
+
+	return low, nil
+}
 
 // ExecutingMessageCallback is called when executing messages are detected during ingestion
 type ExecutingMessageCallback func(chainID eth.ChainID, timestamp uint64, execMsgs []*types.ExecutingMessage)
@@ -283,15 +351,26 @@ func (c *ChainIngester) runIngestion() {
 			return
 		}
 	} else {
-		// Fresh start - calculate backfill range
-		blocksToBackfill := uint64(c.backfillDuration / defaultBlockTime)
-		if head.NumberU64() > blocksToBackfill {
-			startBlock = head.NumberU64() - blocksToBackfill
-		} else {
-			startBlock = 1 // Start from block 1, not genesis
+		// Fresh start - find the block at our target backfill timestamp using binary search
+		targetTimestamp := head.Time() - uint64(c.backfillDuration.Seconds())
+
+		// Create a fetcher that uses our ethClient
+		fetchTimestamp := func(ctx context.Context, blockNum uint64) (uint64, error) {
+			info, err := c.ethClient.InfoByNumber(ctx, blockNum)
+			if err != nil {
+				return 0, err
+			}
+			return info.Time(), nil
 		}
 
-		c.log.Info("Starting fresh backfill", "from", startBlock, "to", head.NumberU64(), "blocks", head.NumberU64()-startBlock+1)
+		foundBlock, err := FindBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
+		if err != nil {
+			c.log.Error("Failed to find backfill start block", "err", err)
+			return
+		}
+		startBlock = foundBlock
+
+		c.log.Info("Starting fresh backfill", "from", startBlock, "to", head.NumberU64(), "targetTimestamp", targetTimestamp, "blocks", head.NumberU64()-startBlock+1)
 
 		// Initialize the LogsDB with the parent block of the start block
 		// This is needed because the LogsDB requires a sealed parent block before adding logs
