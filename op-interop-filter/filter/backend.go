@@ -381,7 +381,7 @@ func (b *Backend) tryValidateCrossUnsafe() {
 	b.crossUnsafeTimestamp.Store(minTimestamp)
 
 	// Record metrics
-	b.metrics.RecordPendingExecMsgs(0, int64(len(b.pendingExecMsgs)))
+	b.metrics.RecordPendingExecMsgs(int64(len(b.pendingExecMsgs)))
 	b.metrics.RecordCrossUnsafeValidatedTimestamp(minTimestamp)
 }
 

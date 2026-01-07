@@ -352,7 +352,11 @@ func (c *ChainIngester) runIngestion() {
 		}
 	} else {
 		// Fresh start - find the block at our target backfill timestamp using binary search
-		targetTimestamp := head.Time() - uint64(c.backfillDuration.Seconds())
+		backfillSeconds := uint64(c.backfillDuration / time.Second)
+		var targetTimestamp uint64
+		if head.Time() > backfillSeconds {
+			targetTimestamp = head.Time() - backfillSeconds
+		} // else targetTimestamp = 0, backfill from genesis
 
 		// Create a fetcher that uses our ethClient
 		fetchTimestamp := func(ctx context.Context, blockNum uint64) (uint64, error) {

@@ -21,7 +21,7 @@ type Metricer interface {
 	RecordLogsAdded(chainID uint64, count int64)
 	RecordBlocksSealed(chainID uint64, count int64)
 	RecordCrossUnsafeValidatedTimestamp(timestamp uint64)
-	RecordPendingExecMsgs(chainID uint64, count int64)
+	RecordPendingExecMsgs(count int64)
 }
 
 type Metrics struct {
@@ -41,7 +41,7 @@ type Metrics struct {
 	logsAddedTotal                *prometheus.CounterVec
 	blocksSealedTotal             *prometheus.CounterVec
 	crossUnsafeValidatedTimestamp prometheus.Gauge
-	pendingExecMsgs               *prometheus.GaugeVec
+	pendingExecMsgs               prometheus.Gauge
 }
 
 var _ Metricer = (*Metrics)(nil)
@@ -121,11 +121,11 @@ func NewMetrics(procName string) *Metrics {
 			Help:      "Latest cross-unsafe validated timestamp",
 		}),
 
-		pendingExecMsgs: factory.NewGaugeVec(prometheus.GaugeOpts{
+		pendingExecMsgs: factory.NewGauge(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "pending_exec_msgs",
-			Help:      "Pending executing messages awaiting cross-unsafe validation per chain",
-		}, []string{"chain_id"}),
+			Help:      "Pending executing messages awaiting cross-unsafe validation",
+		}),
 	}
 }
 
@@ -185,8 +185,8 @@ func (m *Metrics) RecordCrossUnsafeValidatedTimestamp(timestamp uint64) {
 	m.crossUnsafeValidatedTimestamp.Set(float64(timestamp))
 }
 
-func (m *Metrics) RecordPendingExecMsgs(chainID uint64, count int64) {
-	m.pendingExecMsgs.WithLabelValues(strconv.FormatUint(chainID, 10)).Set(float64(count))
+func (m *Metrics) RecordPendingExecMsgs(count int64) {
+	m.pendingExecMsgs.Set(float64(count))
 }
 
 // NoopMetrics is a no-op implementation for testing
@@ -203,5 +203,5 @@ func (n *noopMetrics) RecordBackfillProgress(chainID uint64, progress float64) {
 func (n *noopMetrics) RecordReorgDetected(chainID uint64)                      {}
 func (n *noopMetrics) RecordLogsAdded(chainID uint64, count int64)             {}
 func (n *noopMetrics) RecordBlocksSealed(chainID uint64, count int64)          {}
-func (n *noopMetrics) RecordCrossUnsafeValidatedTimestamp(timestamp uint64)    {}
-func (n *noopMetrics) RecordPendingExecMsgs(chainID uint64, count int64)       {}
+func (n *noopMetrics) RecordCrossUnsafeValidatedTimestamp(timestamp uint64) {}
+func (n *noopMetrics) RecordPendingExecMsgs(count int64)                    {}
