@@ -19,7 +19,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/processors"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -645,21 +644,6 @@ func (c *ChainIngester) triggerReorg() {
 	}
 }
 
-// Rewind rewinds the chain to the specified block
-func (c *ChainIngester) Rewind(newHead eth.BlockID) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.logsDB == nil {
-		return types.ErrUninitialized
-	}
-
-	// Use a no-op invalidator since we don't have cross-safe tracking
-	inv := &noopInvalidator{}
-
-	return c.logsDB.Rewind(inv, newHead)
-}
-
 // BlockExecMsgs contains executing messages from a single block
 type BlockExecMsgs struct {
 	BlockNum  uint64
@@ -714,11 +698,4 @@ func (l *logsDBMetrics) RecordDBEntryCount(kind string, count int64) {
 
 func (l *logsDBMetrics) RecordDBSearchEntriesRead(count int64) {
 	// Could add more detailed metrics here if needed
-}
-
-// noopInvalidator is a no-op implementation of reads.Invalidator
-type noopInvalidator struct{}
-
-func (n *noopInvalidator) TryInvalidate(inv reads.InvalidationRule) (func(), error) {
-	return func() {}, nil
 }

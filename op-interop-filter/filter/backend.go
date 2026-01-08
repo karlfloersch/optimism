@@ -305,25 +305,6 @@ func saturatingAdd(a, b uint64) uint64 {
 	return result
 }
 
-// Rewind rewinds a chain to a specific block
-func (b *Backend) Rewind(ctx context.Context, chainID eth.ChainID, newHead eth.BlockID) error {
-	ingester, ok := b.chains[chainID]
-	if !ok {
-		return types.ErrUnknownChain
-	}
-
-	if err := ingester.Rewind(newHead); err != nil {
-		return err
-	}
-
-	// Reset cross-unsafe timestamp; the validation loop will detect the rewind
-	// and reset its per-chain state when it sees latestBlock < validatedUpToBlockNum
-	b.crossUnsafeTimestamp.Store(0)
-
-	b.log.Warn("Rewind complete, reset cross-unsafe timestamp", "chain", chainID, "newHead", newHead)
-	return nil
-}
-
 const validationInterval = 500 * time.Millisecond
 
 // runValidationLoop periodically validates cross-unsafe executing messages
@@ -346,6 +327,11 @@ func (b *Backend) runValidationLoop() {
 // tryValidateCrossUnsafe validates executing messages when all chains have caught up.
 // Queries chain ingesters directly for their latest state.
 func (b *Backend) tryValidateCrossUnsafe() {
+	// Don't validate while failsafe is enabled
+	if b.failsafe.Load() {
+		return
+	}
+
 	// Find minimum timestamp across all chains
 	minTimestamp, ok := b.getMinChainTimestamp()
 	if !ok {
@@ -359,9 +345,12 @@ func (b *Backend) tryValidateCrossUnsafe() {
 			continue
 		}
 
-		// Detect rewind: if chain rewound past our validated point, reset
-		if b.validatedUpToBlockNum[chainID] > latestBlock.Number {
-			b.validatedUpToBlockNum[chainID] = 0
+		// Initialize or detect rewind: trust existing blocks, only validate new ones
+		// On first encounter (startup) or rewind, set to current latest block
+		if _, exists := b.validatedUpToBlockNum[chainID]; !exists ||
+			b.validatedUpToBlockNum[chainID] > latestBlock.Number {
+			b.validatedUpToBlockNum[chainID] = latestBlock.Number
+			continue // Trust existing, will validate from next block onwards
 		}
 
 		startBlock := b.validatedUpToBlockNum[chainID] + 1

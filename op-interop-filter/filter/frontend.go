@@ -2,6 +2,7 @@ package filter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -45,8 +46,9 @@ func (a *AdminFrontend) SetFailsafeEnabled(ctx context.Context, enabled bool) er
 	return nil
 }
 
-// Rewind rewinds chain state to a specific block.
-// This can be used to recover from reorg-induced stuck states.
+// Rewind is not implemented. For cross-chain consistency, rewind would need to
+// coordinate across all chains to the same timestamp, which is complex.
+// Instead, wipe the filter's data directory and restart fresh.
 func (a *AdminFrontend) Rewind(ctx context.Context, chain eth.ChainID, block eth.BlockID) error {
-	return a.backend.Rewind(ctx, chain, block)
+	return errors.New("rewind not implemented: wipe the filter's data directory and restart instead")
 }
