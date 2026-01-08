@@ -329,59 +329,31 @@ func (c *ChainIngester) runIngestion() {
 // catchUp syncs from the last known block to the current chain head.
 // Returns nil if already caught up or after successful backfill.
 func (c *ChainIngester) catchUp() error {
+	// Step 1: Get current chain head
 	head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
 	if err != nil {
 		return fmt.Errorf("failed to get current head: %w", err)
 	}
 	c.log.Info("Current chain head", "block", head.NumberU64(), "hash", head.Hash())
 
-	// Check if DB has existing data (for restarts with persistent storage)
-	c.mu.RLock()
-	latestSealed, hasSealed := c.logsDB.LatestSealedBlock()
-	c.mu.RUnlock()
-
-	var startBlock uint64
-	if hasSealed {
-		startBlock = latestSealed.Number + 1
-		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", startBlock)
-
+	// Step 2: Determine where to start
+	startBlock, needsAnchorInit, err := c.determineStartBlock(head)
+	if err != nil {
+		return err
+	}
+	if startBlock == 0 {
 		// Already caught up
-		if startBlock > head.NumberU64() {
-			c.log.Info("DB is up to date")
-			return nil
-		}
-	} else {
-		// Fresh start - find the block at our target backfill timestamp using binary search
-		backfillSeconds := uint64(c.backfillDuration / time.Second)
-		var targetTimestamp uint64
-		if head.Time() > backfillSeconds {
-			targetTimestamp = head.Time() - backfillSeconds
-		} // else targetTimestamp = 0, backfill from genesis
+		return nil
+	}
 
-		fetchTimestamp := func(ctx context.Context, blockNum uint64) (uint64, error) {
-			info, err := c.ethClient.InfoByNumber(ctx, blockNum)
-			if err != nil {
-				return 0, err
-			}
-			return info.Time(), nil
-		}
-
-		startBlock, err = findBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
-		if err != nil {
-			return fmt.Errorf("failed to find backfill start block: %w", err)
-		}
-
-		c.log.Info("Starting fresh backfill", "from", startBlock, "to", head.NumberU64(), "targetTimestamp", targetTimestamp, "blocks", head.NumberU64()-startBlock+1)
-
-		// Initialize the LogsDB with the parent block of the start block
-		if startBlock > 0 {
-			if err := c.initializeAnchorBlock(startBlock - 1); err != nil {
-				return fmt.Errorf("failed to initialize anchor block: %w", err)
-			}
+	// Step 3: Initialize anchor block if this is a fresh start
+	if needsAnchorInit && startBlock > 0 {
+		if err := c.initializeAnchorBlock(startBlock - 1); err != nil {
+			return fmt.Errorf("failed to initialize anchor block: %w", err)
 		}
 	}
 
-	// Backfill to head
+	// Step 4: Backfill to head
 	if err := c.backfill(startBlock, head.NumberU64()); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			c.triggerReorg()
@@ -390,6 +362,63 @@ func (c *ChainIngester) catchUp() error {
 	}
 
 	return nil
+}
+
+// determineStartBlock figures out where to start ingestion.
+// Returns:
+//   - startBlock: the block number to start from (0 if already caught up)
+//   - needsAnchorInit: true if this is a fresh start requiring anchor block initialization
+//   - error: any error that occurred
+func (c *ChainIngester) determineStartBlock(head eth.BlockInfo) (startBlock uint64, needsAnchorInit bool, err error) {
+	// Check if DB has existing data (for restarts with persistent storage)
+	c.mu.RLock()
+	latestSealed, hasSealed := c.logsDB.LatestSealedBlock()
+	c.mu.RUnlock()
+
+	if hasSealed {
+		// Resuming from existing DB
+		startBlock = latestSealed.Number + 1
+		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", startBlock)
+
+		if startBlock > head.NumberU64() {
+			c.log.Info("DB is up to date")
+			return 0, false, nil // Already caught up
+		}
+		return startBlock, false, nil
+	}
+
+	// Fresh start - find the block at our target backfill timestamp using binary search
+	startBlock, err = c.findBackfillStartBlock(head)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to find backfill start block: %w", err)
+	}
+
+	c.log.Info("Starting fresh backfill",
+		"from", startBlock,
+		"to", head.NumberU64(),
+		"blocks", head.NumberU64()-startBlock+1)
+
+	return startBlock, true, nil
+}
+
+// findBackfillStartBlock uses binary search to find the first block at or after
+// the target backfill timestamp (head.Time - backfillDuration).
+func (c *ChainIngester) findBackfillStartBlock(head eth.BlockInfo) (uint64, error) {
+	backfillSeconds := uint64(c.backfillDuration / time.Second)
+	var targetTimestamp uint64
+	if head.Time() > backfillSeconds {
+		targetTimestamp = head.Time() - backfillSeconds
+	} // else targetTimestamp = 0, backfill from genesis
+
+	fetchTimestamp := func(ctx context.Context, blockNum uint64) (uint64, error) {
+		info, err := c.ethClient.InfoByNumber(ctx, blockNum)
+		if err != nil {
+			return 0, err
+		}
+		return info.Time(), nil
+	}
+
+	return findBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
 }
 
 // initializeAnchorBlock seals the anchor block in the LogsDB
