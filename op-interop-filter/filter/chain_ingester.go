@@ -354,14 +354,10 @@ func (c *ChainIngester) catchUp() error {
 	}
 
 	// Step 4: Backfill to head
-	if err := c.backfill(startBlock, head.NumberU64()); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			c.triggerReorg()
-		}
-		return err
-	}
-
-	return nil
+	// Note: reorg detection happens inside ingestBlock via parent hash mismatch
+	// and inside processBlockLogs via ErrConflict - we don't trigger reorg on
+	// generic errors like RPC failures
+	return c.backfill(startBlock, head.NumberU64())
 }
 
 // determineStartBlock figures out where to start ingestion.
