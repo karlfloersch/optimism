@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
-	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
@@ -69,11 +69,18 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 	// Create chain ingesters for each L2 RPC
 	for _, rpcURL := range cfg.L2RPCs {
 		// Query chain ID from the RPC
-		chainID, err := b.queryChainID(ctx, rpcURL)
+		ethClient, err := ethclient.Dial(rpcURL)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("failed to connect to %s: %w", rpcURL, err)
+		}
+		chainIDBig, err := ethClient.ChainID(ctx)
+		ethClient.Close()
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("failed to query chain ID from %s: %w", rpcURL, err)
 		}
+		chainID := eth.ChainIDFromBig(chainIDBig)
 
 		// Check for duplicate chain IDs BEFORE creating ingester
 		if _, exists := b.chains[chainID]; exists {
@@ -103,27 +110,6 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 
 	logger.Info("Created backend", "chains", len(b.chains))
 	return b, nil
-}
-
-// queryChainID queries the chain ID from an RPC endpoint
-func (b *Backend) queryChainID(ctx context.Context, rpcURL string) (eth.ChainID, error) {
-	rpcClient, err := client.NewRPC(ctx, b.log, rpcURL)
-	if err != nil {
-		return eth.ChainID{}, fmt.Errorf("failed to create RPC client: %w", err)
-	}
-	defer rpcClient.Close()
-
-	var chainIDHex string
-	if err := rpcClient.CallContext(ctx, &chainIDHex, "eth_chainId"); err != nil {
-		return eth.ChainID{}, fmt.Errorf("failed to query chain ID: %w", err)
-	}
-
-	chainID, err := eth.ChainIDFromString(chainIDHex)
-	if err != nil {
-		return eth.ChainID{}, fmt.Errorf("invalid chain ID response: %w", err)
-	}
-
-	return chainID, nil
 }
 
 // Start starts all chain ingesters and the validation loop
