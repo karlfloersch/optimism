@@ -236,8 +236,8 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 }
 
 // validateAccess validates a single access entry
-// This follows the same linking rules as op-supervisor:
-// 1. initTimestamp <= execTimestamp (same-timestamp is valid)
+// This follows simplified linking rules (no cycle detection):
+// 1. initTimestamp < execTimestamp (must be strictly earlier to avoid cycles)
 // 2. initTimestamp + MessageExpiryWindow >= execTimestamp (message not expired)
 // 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= execTimestamp + Timeout
 // 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
@@ -248,10 +248,9 @@ func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSa
 		return fmt.Errorf("chain %s: %w", access.ChainID, types.ErrUnknownChain)
 	}
 
-	// Initiating message timestamp must not be after execution timestamp
-	// (same-timestamp is valid per supervisor spec)
-	if access.Timestamp > execDescriptor.Timestamp {
-		return fmt.Errorf("initiating message timestamp %d after execution timestamp %d: %w",
+	// Initiating message timestamp must be strictly before execution timestamp
+	if access.Timestamp >= execDescriptor.Timestamp {
+		return fmt.Errorf("initiating message timestamp %d not before execution timestamp %d: %w",
 			access.Timestamp, execDescriptor.Timestamp, types.ErrConflict)
 	}
 
@@ -413,10 +412,9 @@ func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, exec
 		return fmt.Errorf("source chain %s: %w", execMsg.ChainID, types.ErrUnknownChain)
 	}
 
-	// Initiating message timestamp must not be after execution timestamp
-	// (same-timestamp is valid per supervisor spec)
-	if execMsg.Timestamp > execTimestamp {
-		return fmt.Errorf("initiating message timestamp %d after execution timestamp %d: %w",
+	// Initiating message timestamp must be strictly before execution timestamp
+	if execMsg.Timestamp >= execTimestamp {
+		return fmt.Errorf("initiating message timestamp %d not before execution timestamp %d: %w",
 			execMsg.Timestamp, execTimestamp, types.ErrConflict)
 	}
 
