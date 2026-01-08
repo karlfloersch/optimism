@@ -83,7 +83,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 		}
 		chainID := eth.ChainIDFromBig(chainIDBig)
 
-		// Check for duplicate chain IDs BEFORE creating ingester
+		// Check for duplicate chain IDs before creating ingester
 		if _, exists := b.chains[chainID]; exists {
 			cleanup()
 			return nil, fmt.Errorf("duplicate chain ID %s: multiple RPCs return the same chain ID", chainID)
