@@ -214,7 +214,7 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 		}
 
 		// Validate the access entry
-		if err := b.validateAccess(ctx, access, minSafety, execDescriptor); err != nil {
+		if err := b.checkAccessListEntry(ctx, access, minSafety, execDescriptor); err != nil {
 			b.metrics.RecordCheckAccessList(false)
 			return err
 		}
@@ -224,13 +224,13 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	return nil
 }
 
-// validateAccess validates a single access entry
+// checkAccessListEntry checks a single access list entry against linking rules.
 // This follows simplified linking rules (no cycle detection):
 // 1. initTimestamp < execTimestamp (must be strictly earlier to avoid cycles)
 // 2. initTimestamp + MessageExpiryWindow >= execTimestamp (message not expired)
 // 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= execTimestamp + Timeout
 // 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
-func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
+func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	// Check timeout expiry first
 	if execDescriptor.Timeout > 0 {
 		expiresAt := safemath.SaturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
@@ -378,7 +378,7 @@ func (b *Backend) getMinChainTimestamp() (uint64, bool) {
 
 // validateExecutingMessage validates a single executing message against the source chain
 // execTimestamp is the timestamp when the executing message was processed
-// Uses the same linking rules as validateAccess (matching op-supervisor)
+// Uses the same linking rules as checkAccessListEntry (matching op-supervisor)
 func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, execTimestamp uint64) error {
 	ingester, ok := b.chains[execMsg.ChainID]
 	if !ok {
