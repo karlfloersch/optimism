@@ -29,9 +29,9 @@ type Backend struct {
 	metrics metrics.Metricer
 	cfg     *Config
 
-	// Chain ingesters keyed by chain ID
-	chains   map[eth.ChainID]*ChainIngester
-	chainsMu sync.RWMutex
+	// Chain ingesters keyed by chain ID.
+	// Immutable after NewBackend returns; safe for concurrent reads.
+	chains map[eth.ChainID]*ChainIngester
 
 	// Failsafe state
 	failsafe atomic.Bool
@@ -173,9 +173,6 @@ func (b *Backend) SetFailsafeEnabled(enabled bool) {
 
 // Ready returns true if all chains have completed backfill
 func (b *Backend) Ready() bool {
-	b.chainsMu.RLock()
-	defer b.chainsMu.RUnlock()
-
 	for _, ingester := range b.chains {
 		if !ingester.Ready() {
 			return false
@@ -210,6 +207,12 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 			minSafety, types.LocalUnsafe, types.CrossUnsafe)
 	}
 
+	// Validate executing chain is one we're tracking
+	if _, ok := b.chains[execDescriptor.ChainID]; !ok {
+		b.metrics.RecordCheckAccessList(false)
+		return fmt.Errorf("executing chain %s: %w", execDescriptor.ChainID, types.ErrUnknownChain)
+	}
+
 	// Parse and validate each access entry
 	remaining := inboxEntries
 	for len(remaining) > 0 {
@@ -240,10 +243,7 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 // 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
 func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	// Find the chain ingester for this access entry
-	b.chainsMu.RLock()
 	ingester, ok := b.chains[access.ChainID]
-	b.chainsMu.RUnlock()
-
 	if !ok {
 		return fmt.Errorf("chain %s: %w", access.ChainID, types.ErrUnknownChain)
 	}
@@ -306,10 +306,7 @@ func saturatingAdd(a, b uint64) uint64 {
 
 // Rewind rewinds a chain to a specific block
 func (b *Backend) Rewind(ctx context.Context, chainID eth.ChainID, newHead eth.BlockID) error {
-	b.chainsMu.RLock()
 	ingester, ok := b.chains[chainID]
-	b.chainsMu.RUnlock()
-
 	if !ok {
 		return types.ErrUnknownChain
 	}
@@ -388,9 +385,6 @@ func (b *Backend) tryValidateCrossUnsafe() {
 // getMinChainTimestamp returns the minimum timestamp across all chains.
 // Returns false if any chain is not ready yet.
 func (b *Backend) getMinChainTimestamp() (uint64, bool) {
-	b.chainsMu.RLock()
-	defer b.chainsMu.RUnlock()
-
 	if len(b.chains) == 0 {
 		return 0, false
 	}
@@ -414,10 +408,7 @@ func (b *Backend) getMinChainTimestamp() (uint64, bool) {
 // execTimestamp is the timestamp when the executing message was processed
 // Uses the same linking rules as validateAccess (matching op-supervisor)
 func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, execTimestamp uint64) error {
-	b.chainsMu.RLock()
 	ingester, ok := b.chains[execMsg.ChainID]
-	b.chainsMu.RUnlock()
-
 	if !ok {
 		return fmt.Errorf("source chain %s: %w", execMsg.ChainID, types.ErrUnknownChain)
 	}
@@ -456,9 +447,6 @@ func (b *Backend) onReorg(chainID eth.ChainID) {
 
 // GetChainIDs returns the chain IDs of all configured chains
 func (b *Backend) GetChainIDs() []eth.ChainID {
-	b.chainsMu.RLock()
-	defer b.chainsMu.RUnlock()
-
 	chainIDs := make([]eth.ChainID, 0, len(b.chains))
 	for chainID := range b.chains {
 		chainIDs = append(chainIDs, chainID)
