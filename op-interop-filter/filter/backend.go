@@ -99,6 +99,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 			rpcURL,
 			cfg.DataDir,
 			cfg.BackfillDuration,
+			cfg.PollInterval,
 			b.onReorg,
 		)
 		if err != nil {
@@ -262,13 +263,11 @@ func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access,
 	return b.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
 }
 
-const validationInterval = 500 * time.Millisecond
-
 // runValidationLoop periodically validates cross-unsafe executing messages
 func (b *Backend) runValidationLoop() {
 	defer b.wg.Done()
 
-	ticker := time.NewTicker(validationInterval)
+	ticker := time.NewTicker(b.cfg.ValidationInterval)
 	defer ticker.Stop()
 
 	for {

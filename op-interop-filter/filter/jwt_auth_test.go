@@ -150,6 +150,8 @@ func TestJWTAuthenticationBehavior(t *testing.T) {
 				EnableAdmin: true,
 			},
 			MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
+			PollInterval:        2 * time.Second,
+			ValidationInterval:  500 * time.Millisecond,
 		}
 
 		svc, err := NewService(ctx, cfg, logger)
@@ -309,6 +311,8 @@ func TestJWTAuthenticationBehavior(t *testing.T) {
 				EnableAdmin: false, // admin disabled
 			},
 			MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
+			PollInterval:        2 * time.Second,
+			ValidationInterval:  500 * time.Millisecond,
 		}
 
 		svc, err := NewService(ctx, cfg, logger)

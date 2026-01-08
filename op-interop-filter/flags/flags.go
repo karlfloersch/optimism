@@ -52,6 +52,18 @@ var (
 		Value:     "",
 		TakesFile: true,
 	}
+	PollIntervalFlag = &cli.StringFlag{
+		Name:    "poll-interval",
+		Usage:   "Interval for polling new blocks from L2 RPCs (e.g., 2s, 500ms)",
+		EnvVars: prefixEnvVars("POLL_INTERVAL"),
+		Value:   "2s",
+	}
+	ValidationIntervalFlag = &cli.StringFlag{
+		Name:    "validation-interval",
+		Usage:   "Interval for cross-chain validation loop (e.g., 500ms, 1s)",
+		EnvVars: prefixEnvVars("VALIDATION_INTERVAL"),
+		Value:   "500ms",
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -63,6 +75,8 @@ var optionalFlags = []cli.Flag{
 	BackfillDurationFlag,
 	MessageExpiryWindowFlag,
 	JWTSecretFlag,
+	PollIntervalFlag,
+	ValidationIntervalFlag,
 }
 
 func init() {

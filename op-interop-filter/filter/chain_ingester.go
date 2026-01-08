@@ -22,9 +22,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-const (
-	pollInterval = 2 * time.Second
-)
 
 // blockTimestampFetcher fetches a block's timestamp by block number.
 // Returns (timestamp, error). Used for binary search to find blocks by timestamp.
@@ -109,6 +106,7 @@ type ChainIngester struct {
 	logsDB           *logs.DB
 	dataDir          string
 	backfillDuration time.Duration
+	pollInterval     time.Duration
 
 	ready   atomic.Bool
 	stopped atomic.Bool
@@ -130,6 +128,7 @@ func NewChainIngester(
 	rpcURL string,
 	dataDir string,
 	backfillDuration time.Duration,
+	pollInterval time.Duration,
 	onReorg reorgCallback,
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -173,6 +172,7 @@ func NewChainIngester(
 		ethClient:        ethClient,
 		dataDir:          dataDir,
 		backfillDuration: backfillDuration,
+		pollInterval:     pollInterval,
 		onReorg:          onReorg,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -228,11 +228,6 @@ func (c *ChainIngester) Stop() error {
 // Ready returns true if backfill is complete
 func (c *ChainIngester) Ready() bool {
 	return c.ready.Load()
-}
-
-// ChainID returns the chain ID
-func (c *ChainIngester) ChainID() eth.ChainID {
-	return c.chainID
 }
 
 // Contains checks if a log exists in the database
@@ -461,7 +456,7 @@ func (c *ChainIngester) backfill(startBlock, endBlock uint64) error {
 
 // pollLoop polls for new blocks
 func (c *ChainIngester) pollLoop() {
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
 	for {

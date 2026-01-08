@@ -25,6 +25,8 @@ type Config struct {
 	MessageExpiryWindowExplicit bool   // True if explicitly set via flag
 	JWTSecretPath               string
 	Version                     string
+	PollInterval                time.Duration // Interval for polling new blocks (default: 2s)
+	ValidationInterval          time.Duration // Interval for cross-chain validation (default: 500ms)
 
 	LogConfig     oplog.CLIConfig
 	MetricsConfig opmetrics.CLIConfig
@@ -47,6 +49,12 @@ func (c *Config) Check() error {
 	}
 	if c.MessageExpiryWindow == 0 {
 		result = errors.Join(result, errors.New("message-expiry-window must be positive"))
+	}
+	if c.PollInterval <= 0 {
+		result = errors.Join(result, errors.New("poll-interval must be positive"))
+	}
+	if c.ValidationInterval <= 0 {
+		result = errors.Join(result, errors.New("validation-interval must be positive"))
 	}
 	result = errors.Join(result, c.MetricsConfig.Check())
 	result = errors.Join(result, c.PprofConfig.Check())
@@ -71,6 +79,22 @@ func NewConfig(ctx *cli.Context, version string) (*Config, error) {
 		return nil, fmt.Errorf("message-expiry-window must be positive, got %s", messageExpiryWindow)
 	}
 
+	pollInterval, err := time.ParseDuration(ctx.String(flags.PollIntervalFlag.Name))
+	if err != nil {
+		return nil, fmt.Errorf("invalid poll-interval: %w", err)
+	}
+	if pollInterval <= 0 {
+		return nil, fmt.Errorf("poll-interval must be positive, got %s", pollInterval)
+	}
+
+	validationInterval, err := time.ParseDuration(ctx.String(flags.ValidationIntervalFlag.Name))
+	if err != nil {
+		return nil, fmt.Errorf("invalid validation-interval: %w", err)
+	}
+	if validationInterval <= 0 {
+		return nil, fmt.Errorf("validation-interval must be positive, got %s", validationInterval)
+	}
+
 	return &Config{
 		L2RPCs:                      ctx.StringSlice(flags.L2RPCsFlag.Name),
 		DataDir:                     ctx.String(flags.DataDirFlag.Name),
@@ -79,6 +103,8 @@ func NewConfig(ctx *cli.Context, version string) (*Config, error) {
 		MessageExpiryWindowExplicit: ctx.IsSet(flags.MessageExpiryWindowFlag.Name),
 		JWTSecretPath:               ctx.String(flags.JWTSecretFlag.Name),
 		Version:                     version,
+		PollInterval:                pollInterval,
+		ValidationInterval:          validationInterval,
 		LogConfig:                   oplog.ReadCLIConfig(ctx),
 		MetricsConfig:               opmetrics.ReadCLIConfig(ctx),
 		PprofConfig:                 oppprof.ReadCLIConfig(ctx),

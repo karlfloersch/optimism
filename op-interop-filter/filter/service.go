@@ -203,8 +203,8 @@ func (s *Service) Start(ctx context.Context) error {
 	// Start main RPC server (supervisor API)
 	if err := s.rpcServer.Start(); err != nil {
 		// Rollback: stop backend if RPC server fails to start
-		_ = s.backend.Stop(ctx)
-		return fmt.Errorf("failed to start RPC server: %w", err)
+		stopErr := s.backend.Stop(ctx)
+		return errors.Join(fmt.Errorf("failed to start RPC server: %w", err), stopErr)
 	}
 	s.log.Info("RPC server started", "endpoint", s.rpcServer.Endpoint())
 

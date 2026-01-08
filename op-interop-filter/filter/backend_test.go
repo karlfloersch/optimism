@@ -3,6 +3,7 @@ package filter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -107,10 +108,14 @@ func newTestBackend(t *testing.T) *Backend {
 	return &Backend{
 		log:     log.New(),
 		metrics: metrics.NoopMetrics,
-		cfg:     &Config{MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds())},
-		chains:  make(map[eth.ChainID]*ChainIngester),
-		ctx:     ctx,
-		cancel:  cancel,
+		cfg: &Config{
+			MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
+			ValidationInterval:  500 * time.Millisecond,
+			PollInterval:        2 * time.Second,
+		},
+		chains: make(map[eth.ChainID]*ChainIngester),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
