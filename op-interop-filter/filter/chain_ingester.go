@@ -96,9 +96,6 @@ func FindBlockByTimestamp(
 	return low, nil
 }
 
-// BlockProgressCallback is called when a new block is ingested
-type BlockProgressCallback func(chainID eth.ChainID, blockNum uint64, timestamp uint64)
-
 // ReorgCallback is called when a reorg is detected
 type ReorgCallback func(chainID eth.ChainID)
 
@@ -117,8 +114,7 @@ type ChainIngester struct {
 	ready   atomic.Bool
 	stopped atomic.Bool
 
-	onBlockProgress BlockProgressCallback
-	onReorg         ReorgCallback
+	onReorg ReorgCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -135,7 +131,6 @@ func NewChainIngester(
 	rpcURL string,
 	dataDir string,
 	backfillDuration time.Duration,
-	onBlockProgress BlockProgressCallback,
 	onReorg ReorgCallback,
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -179,7 +174,6 @@ func NewChainIngester(
 		ethClient:        ethClient,
 		dataDir:          dataDir,
 		backfillDuration: backfillDuration,
-		onBlockProgress:  onBlockProgress,
 		onReorg:          onReorg,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -569,11 +563,6 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 	c.metrics.RecordChainHead(chainIDUint64, blockNum)
 	c.metrics.RecordBlocksSealed(chainIDUint64, 1)
 	c.metrics.RecordLogsAdded(chainIDUint64, int64(result.logCount))
-
-	// Notify about block progress (callback runs without lock to avoid deadlock)
-	if c.onBlockProgress != nil {
-		c.onBlockProgress(c.chainID, blockNum, blockInfo.Time())
-	}
 
 	return nil
 }
