@@ -244,28 +244,9 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 // 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= execTimestamp + Timeout
 // 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
 func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
-	// Find the chain ingester for this access entry
-	ingester, ok := b.chains[access.ChainID]
-	if !ok {
-		return fmt.Errorf("chain %s: %w", access.ChainID, types.ErrUnknownChain)
-	}
-
-	// Initiating message timestamp must be strictly before execution timestamp
-	if access.Timestamp >= execDescriptor.Timestamp {
-		return fmt.Errorf("initiating message timestamp %d not before execution timestamp %d: %w",
-			access.Timestamp, execDescriptor.Timestamp, types.ErrConflict)
-	}
-
-	// Check expiry: message expires at initTimestamp + MessageExpiryWindow
-	expiresAt := saturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
-	if expiresAt < execDescriptor.Timestamp {
-		return fmt.Errorf("initiating message expired: init %d + expiry window %d = %d < exec %d: %w",
-			access.Timestamp, b.cfg.MessageExpiryWindow, expiresAt, execDescriptor.Timestamp, types.ErrConflict)
-	}
-
-	// If Timeout is set, also verify the message won't expire at execTimestamp + Timeout
-	// This ensures the message remains valid for the preverification window
+	// Check timeout expiry first
 	if execDescriptor.Timeout > 0 {
+		expiresAt := saturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
 		maxExecTimestamp := saturatingAdd(execDescriptor.Timestamp, execDescriptor.Timeout)
 		if expiresAt < maxExecTimestamp {
 			return fmt.Errorf("initiating message will expire before timeout: init %d + expiry %d = %d < exec %d + timeout %d = %d: %w",
@@ -274,17 +255,7 @@ func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSa
 		}
 	}
 
-	// Create query and check if log exists (LocalUnsafe check)
-	query := access.Query()
-	_, err := ingester.Contains(query)
-	if err != nil {
-		return fmt.Errorf("log validation failed for chain %s, block %d, index %d: %w",
-			access.ChainID, access.BlockNumber, access.LogIndex, err)
-	}
-
-	// For CrossUnsafe, also verify the message timestamp has been cross-chain validated
-	// This means all chains have caught up to this timestamp and any executing messages
-	// at this timestamp have been validated against their source chains
+	// Check cross-unsafe timestamp
 	if minSafety == types.CrossUnsafe {
 		crossUnsafeTs := b.crossUnsafeTimestamp.Load()
 		if access.Timestamp > crossUnsafeTs {
@@ -293,7 +264,15 @@ func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSa
 		}
 	}
 
-	return nil
+	// Validate core message rules (timestamp, expiry, log exists)
+	execMsg := &types.ExecutingMessage{
+		ChainID:   access.ChainID,
+		BlockNum:  access.BlockNumber,
+		LogIdx:    access.LogIndex,
+		Timestamp: access.Timestamp,
+		Checksum:  access.Checksum,
+	}
+	return b.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
 }
 
 // saturatingAdd adds two uint64 values, returning max uint64 on overflow

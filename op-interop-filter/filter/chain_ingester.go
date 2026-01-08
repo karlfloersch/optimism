@@ -568,13 +568,12 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 
 // blockLogsResult holds the result of processing block logs
 type blockLogsResult struct {
-	execMsgs   []*types.ExecutingMessage
 	logCount   uint32
 	needsReorg bool
 }
 
 // processBlockLogs processes all logs in a block and adds them to the DB
-// Returns the result containing executing messages found, log count, and reorg flag
+// Returns the result containing log count and reorg flag
 // Handles locking internally - caller should not hold the lock
 func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.BlockID,
 	receipts gethTypes.Receipts, blockNum uint64) (blockLogsResult, error) {
@@ -582,7 +581,6 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var execMsgs []*types.ExecutingMessage
 	var logIndex uint32
 
 	// Get parent block ID for AddLog
@@ -614,10 +612,6 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 				}
 				return blockLogsResult{}, fmt.Errorf("failed to add log: %w", err)
 			}
-
-			if execMsg != nil {
-				execMsgs = append(execMsgs, execMsg)
-			}
 			logIndex++
 		}
 	}
@@ -631,7 +625,7 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 		return blockLogsResult{}, fmt.Errorf("failed to seal block: %w", err)
 	}
 
-	return blockLogsResult{execMsgs: execMsgs, logCount: logIndex}, nil
+	return blockLogsResult{logCount: logIndex}, nil
 }
 
 // triggerReorg handles reorg detection
