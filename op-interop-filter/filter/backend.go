@@ -316,14 +316,11 @@ func (b *Backend) Rewind(ctx context.Context, chainID eth.ChainID, newHead eth.B
 		return err
 	}
 
-	// Reset cross-unsafe state since chain history changed
-	// Note: This is a simple reset; the validation loop will re-validate from scratch
-	for id := range b.chains {
-		b.validatedUpToBlockNum[id] = 0
-	}
+	// Reset cross-unsafe timestamp; the validation loop will detect the rewind
+	// and reset its per-chain state when it sees latestBlock < validatedUpToBlockNum
 	b.crossUnsafeTimestamp.Store(0)
 
-	b.log.Warn("Rewind complete, reset cross-unsafe state", "chain", chainID, "newHead", newHead)
+	b.log.Warn("Rewind complete, reset cross-unsafe timestamp", "chain", chainID, "newHead", newHead)
 	return nil
 }
 
@@ -360,6 +357,11 @@ func (b *Backend) tryValidateCrossUnsafe() {
 		latestBlock, ok := ingester.LatestBlock()
 		if !ok {
 			continue
+		}
+
+		// Detect rewind: if chain rewound past our validated point, reset
+		if b.validatedUpToBlockNum[chainID] > latestBlock.Number {
+			b.validatedUpToBlockNum[chainID] = 0
 		}
 
 		startBlock := b.validatedUpToBlockNum[chainID] + 1
