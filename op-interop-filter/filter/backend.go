@@ -16,11 +16,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// pendingExecMsg represents an executing message awaiting cross-unsafe validation
-type pendingExecMsg struct {
-	execChainID eth.ChainID             // Chain where the executing message was found
-	timestamp   uint64                  // Timestamp of the block containing the executing message
-	msg         *types.ExecutingMessage // The executing message itself (references source chain)
+// chainValidationState tracks cross-unsafe validation state per chain
+type chainValidationState struct {
+	latestBlockNum uint64 // Latest block number ingested by this chain
+	latestTimestamp uint64 // Timestamp of the latest block
 }
 
 // Backend coordinates chain ingesters, manages failsafe state, and handles CheckAccessList requests.
@@ -36,9 +35,12 @@ type Backend struct {
 	// Failsafe state
 	failsafe atomic.Bool
 
-	// Cross-unsafe validation state - flat list of pending executing messages
-	pendingExecMsgs []pendingExecMsg
-	pendingMu       sync.Mutex
+	// Cross-unsafe validation state per chain
+	chainStates map[eth.ChainID]*chainValidationState
+	stateMu     sync.Mutex
+
+	// Cross-unsafe validated block - highest block number per chain that has been validated
+	validatedUpToBlockNum map[eth.ChainID]uint64
 
 	// Cross-unsafe validated timestamp - highest timestamp where all chains have
 	// caught up and executing messages have been validated
@@ -54,12 +56,14 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	b := &Backend{
-		log:     logger,
-		metrics: m,
-		cfg:     cfg,
-		chains:  make(map[eth.ChainID]*ChainIngester),
-		ctx:     ctx,
-		cancel:  cancel,
+		log:                   logger,
+		metrics:               m,
+		cfg:                   cfg,
+		chains:                make(map[eth.ChainID]*ChainIngester),
+		chainStates:           make(map[eth.ChainID]*chainValidationState),
+		validatedUpToBlockNum: make(map[eth.ChainID]uint64),
+		ctx:                   ctx,
+		cancel:                cancel,
 	}
 
 	// Helper to cleanup on error
@@ -95,7 +99,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 			rpcURL,
 			cfg.DataDir,
 			cfg.BackfillDuration,
-			b.onExecutingMessages,
+			b.onBlockProgress,
 			b.onReorg,
 		)
 		if err != nil {
@@ -104,6 +108,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 		}
 
 		b.chains[chainID] = ingester
+		b.chainStates[chainID] = &chainValidationState{}
 	}
 
 	logger.Info("Created backend", "chains", len(b.chains))
@@ -315,34 +320,35 @@ func (b *Backend) Rewind(ctx context.Context, chainID eth.ChainID, newHead eth.B
 	}
 
 	// Reset cross-unsafe state since chain history changed
-	b.pendingMu.Lock()
-	b.pendingExecMsgs = nil
+	b.stateMu.Lock()
+	for id := range b.chainStates {
+		b.chainStates[id] = &chainValidationState{}
+		b.validatedUpToBlockNum[id] = 0
+	}
 	b.crossUnsafeTimestamp.Store(0)
-	b.pendingMu.Unlock()
+	b.stateMu.Unlock()
 
 	b.log.Warn("Rewind complete, reset cross-unsafe state", "chain", chainID, "newHead", newHead)
 	return nil
 }
 
-// onExecutingMessages is called when executing messages are detected during ingestion
-func (b *Backend) onExecutingMessages(chainID eth.ChainID, timestamp uint64, execMsgs []*types.ExecutingMessage) {
-	b.pendingMu.Lock()
-	defer b.pendingMu.Unlock()
+// onBlockProgress is called when a new block is ingested
+func (b *Backend) onBlockProgress(chainID eth.ChainID, blockNum uint64, timestamp uint64) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
 
-	// Append executing messages to pending list
-	for _, msg := range execMsgs {
-		b.pendingExecMsgs = append(b.pendingExecMsgs, pendingExecMsg{
-			execChainID: chainID,
-			timestamp:   timestamp,
-			msg:         msg,
-		})
-	}
+	// Update chain state
+	state := b.chainStates[chainID]
+	state.latestBlockNum = blockNum
+	state.latestTimestamp = timestamp
 
 	// Try to validate cross-unsafe messages
 	b.tryValidateCrossUnsafe()
 }
 
-// tryValidateCrossUnsafe validates executing messages when all chains have caught up
+// tryValidateCrossUnsafe validates executing messages when all chains have caught up.
+// Uses on-demand queries instead of maintaining a pending list.
+// Must be called with stateMu held.
 func (b *Backend) tryValidateCrossUnsafe() {
 	// Find minimum timestamp across all chains
 	minTimestamp, ok := b.getMinChainTimestamp()
@@ -350,53 +356,69 @@ func (b *Backend) tryValidateCrossUnsafe() {
 		return // Not all chains ready
 	}
 
-	// Validate and filter in one pass
-	remaining := b.pendingExecMsgs[:0] // reuse backing array
-	for _, pending := range b.pendingExecMsgs {
-		if pending.timestamp > minTimestamp {
-			// Not ready yet - keep for later
-			remaining = append(remaining, pending)
+	// For each chain, validate executing messages from blocks we haven't validated yet
+	for chainID, ingester := range b.chains {
+		startBlock := b.validatedUpToBlockNum[chainID] + 1
+		state := b.chainStates[chainID]
+		endBlock := state.latestBlockNum
+
+		if startBlock > endBlock {
+			continue // Already validated up to latest
+		}
+
+		// Query all blocks in the range
+		blocks, err := ingester.GetBlocksInRange(startBlock, endBlock)
+		if err != nil {
+			b.log.Error("Failed to query blocks", "chain", chainID, "err", err)
 			continue
 		}
 
-		// Validate this message
-		if err := b.validateExecutingMessage(pending.msg, pending.timestamp); err != nil {
-			b.log.Error("Cross-unsafe validation failed, enabling failsafe",
-				"execChain", pending.execChainID,
-				"sourceChain", pending.msg.ChainID,
-				"timestamp", pending.timestamp,
-				"err", err)
-			b.SetFailsafeEnabled(true)
-			return
+		// Validate each block's executing messages up to minTimestamp
+		for _, block := range blocks {
+			if block.Timestamp > minTimestamp {
+				break // Don't validate blocks past minTimestamp yet
+			}
+
+			// Validate any executing messages in this block
+			for _, execMsg := range block.ExecMsgs {
+				if err := b.validateExecutingMessage(execMsg, block.Timestamp); err != nil {
+					b.log.Error("Cross-unsafe validation failed, enabling failsafe",
+						"execChain", chainID,
+						"sourceChain", execMsg.ChainID,
+						"execBlock", block.BlockNum,
+						"timestamp", block.Timestamp,
+						"err", err)
+					b.SetFailsafeEnabled(true)
+					return
+				}
+			}
+
+			// Update validated block pointer
+			b.validatedUpToBlockNum[chainID] = block.BlockNum
 		}
 	}
-	b.pendingExecMsgs = remaining
 
-	// Update cross-unsafe timestamp - this is the highest timestamp where all chains
-	// have caught up and all executing messages have been validated
+	// Update cross-unsafe timestamp
 	b.crossUnsafeTimestamp.Store(minTimestamp)
-
-	// Record metrics
-	b.metrics.RecordPendingExecMsgs(int64(len(b.pendingExecMsgs)))
 	b.metrics.RecordCrossUnsafeValidatedTimestamp(minTimestamp)
 }
 
 // getMinChainTimestamp returns the minimum timestamp across all chains.
 // Returns false if any chain is not ready yet.
+// Must be called with stateMu held.
 func (b *Backend) getMinChainTimestamp() (uint64, bool) {
-	if len(b.chains) == 0 {
+	if len(b.chainStates) == 0 {
 		return 0, false
 	}
 
 	var minTimestamp uint64
 	first := true
-	for _, ingester := range b.chains {
-		ts, ok := ingester.LatestTimestamp()
-		if !ok {
+	for _, state := range b.chainStates {
+		if state.latestBlockNum == 0 {
 			return 0, false // Chain not ready
 		}
-		if first || ts < minTimestamp {
-			minTimestamp = ts
+		if first || state.latestTimestamp < minTimestamp {
+			minTimestamp = state.latestTimestamp
 			first = false
 		}
 	}

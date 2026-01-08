@@ -96,8 +96,8 @@ func FindBlockByTimestamp(
 	return low, nil
 }
 
-// ExecutingMessageCallback is called when executing messages are detected during ingestion
-type ExecutingMessageCallback func(chainID eth.ChainID, timestamp uint64, execMsgs []*types.ExecutingMessage)
+// BlockProgressCallback is called when a new block is ingested
+type BlockProgressCallback func(chainID eth.ChainID, blockNum uint64, timestamp uint64)
 
 // ReorgCallback is called when a reorg is detected
 type ReorgCallback func(chainID eth.ChainID)
@@ -117,8 +117,8 @@ type ChainIngester struct {
 	ready   atomic.Bool
 	stopped atomic.Bool
 
-	onExecMsg ExecutingMessageCallback
-	onReorg   ReorgCallback
+	onBlockProgress BlockProgressCallback
+	onReorg         ReorgCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -135,7 +135,7 @@ func NewChainIngester(
 	rpcURL string,
 	dataDir string,
 	backfillDuration time.Duration,
-	onExecMsg ExecutingMessageCallback,
+	onBlockProgress BlockProgressCallback,
 	onReorg ReorgCallback,
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -179,7 +179,7 @@ func NewChainIngester(
 		ethClient:        ethClient,
 		dataDir:          dataDir,
 		backfillDuration: backfillDuration,
-		onExecMsg:        onExecMsg,
+		onBlockProgress:  onBlockProgress,
 		onReorg:          onReorg,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -571,9 +571,8 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 	c.metrics.RecordLogsAdded(chainIDUint64, int64(result.logCount))
 
 	// Notify about block progress (callback runs without lock to avoid deadlock)
-	// Always call even with empty execMsgs so backend can update cross-unsafe timestamp
-	if c.onExecMsg != nil {
-		c.onExecMsg(c.chainID, blockInfo.Time(), result.execMsgs)
+	if c.onBlockProgress != nil {
+		c.onBlockProgress(c.chainID, blockNum, blockInfo.Time())
 	}
 
 	return nil
@@ -670,6 +669,48 @@ func (c *ChainIngester) Rewind(newHead eth.BlockID) error {
 	inv := &noopInvalidator{}
 
 	return c.logsDB.Rewind(inv, newHead)
+}
+
+// BlockExecMsgs contains executing messages from a single block
+type BlockExecMsgs struct {
+	BlockNum  uint64
+	Timestamp uint64
+	ExecMsgs  []*types.ExecutingMessage // May be nil/empty if block has no executing messages
+}
+
+// GetBlocksInRange returns block info for all blocks from startBlock to endBlock (inclusive).
+// This is used for on-demand cross-unsafe validation.
+func (c *ChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockExecMsgs, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.logsDB == nil {
+		return nil, types.ErrUninitialized
+	}
+
+	results := make([]BlockExecMsgs, 0, endBlock-startBlock+1)
+	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
+		ref, _, execMsgs, err := c.logsDB.OpenBlock(blockNum)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open block %d: %w", blockNum, err)
+		}
+
+		// Convert map to slice (may be empty)
+		var msgs []*types.ExecutingMessage
+		if len(execMsgs) > 0 {
+			msgs = make([]*types.ExecutingMessage, 0, len(execMsgs))
+			for _, msg := range execMsgs {
+				msgs = append(msgs, msg)
+			}
+		}
+		results = append(results, BlockExecMsgs{
+			BlockNum:  blockNum,
+			Timestamp: ref.Time,
+			ExecMsgs:  msgs,
+		})
+	}
+
+	return results, nil
 }
 
 // logsDBMetrics implements the logs.Metrics interface
