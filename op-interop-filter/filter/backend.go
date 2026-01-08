@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/safemath"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -232,8 +233,8 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	// Check timeout expiry first
 	if execDescriptor.Timeout > 0 {
-		expiresAt := saturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
-		maxExecTimestamp := saturatingAdd(execDescriptor.Timestamp, execDescriptor.Timeout)
+		expiresAt := safemath.SaturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
+		maxExecTimestamp := safemath.SaturatingAdd(execDescriptor.Timestamp, execDescriptor.Timeout)
 		if expiresAt < maxExecTimestamp {
 			return fmt.Errorf("initiating message will expire before timeout: init %d + expiry %d = %d < exec %d + timeout %d = %d: %w",
 				access.Timestamp, b.cfg.MessageExpiryWindow, expiresAt,
@@ -259,15 +260,6 @@ func (b *Backend) validateAccess(ctx context.Context, access types.Access, minSa
 		Checksum:  access.Checksum,
 	}
 	return b.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
-}
-
-// saturatingAdd adds two uint64 values, returning max uint64 on overflow
-func saturatingAdd(a, b uint64) uint64 {
-	result := a + b
-	if result < a { // overflow
-		return ^uint64(0) // max uint64
-	}
-	return result
 }
 
 const validationInterval = 500 * time.Millisecond
@@ -400,7 +392,7 @@ func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, exec
 	}
 
 	// Check expiry: message expires at initTimestamp + MessageExpiryWindow
-	expiresAt := saturatingAdd(execMsg.Timestamp, b.cfg.MessageExpiryWindow)
+	expiresAt := safemath.SaturatingAdd(execMsg.Timestamp, b.cfg.MessageExpiryWindow)
 	if expiresAt < execTimestamp {
 		return fmt.Errorf("initiating message expired: init %d + expiry window %d = %d < exec %d: %w",
 			execMsg.Timestamp, b.cfg.MessageExpiryWindow, expiresAt, execTimestamp, types.ErrConflict)
@@ -422,19 +414,4 @@ func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, exec
 func (b *Backend) onReorg(chainID eth.ChainID) {
 	b.log.Warn("Reorg detected, enabling failsafe", "chain", chainID)
 	b.SetFailsafeEnabled(true)
-}
-
-// GetChainIDs returns the chain IDs of all configured chains
-func (b *Backend) GetChainIDs() []eth.ChainID {
-	chainIDs := make([]eth.ChainID, 0, len(b.chains))
-	for chainID := range b.chains {
-		chainIDs = append(chainIDs, chainID)
-	}
-	return chainIDs
-}
-
-// CrossUnsafeTimestamp returns the highest timestamp that has been cross-chain validated.
-// Messages at or before this timestamp satisfy CrossUnsafe safety level.
-func (b *Backend) CrossUnsafeTimestamp() uint64 {
-	return b.crossUnsafeTimestamp.Load()
 }

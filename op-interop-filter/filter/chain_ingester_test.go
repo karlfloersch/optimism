@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFindBlockByTimestamp(t *testing.T) {
+func Test_findBlockByTimestamp(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty chain returns 1", func(t *testing.T) {
@@ -16,7 +16,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return 0, errors.New("should not be called")
 		}
 
-		result, err := FindBlockByTimestamp(ctx, 1000, 0, fetcher)
+		result, err := findBlockByTimestamp(ctx, 1000, 0, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), result)
 	})
@@ -27,7 +27,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return blockNum * 100, nil
 		}
 
-		result, err := FindBlockByTimestamp(ctx, 50, 3, fetcher)
+		result, err := findBlockByTimestamp(ctx, 50, 3, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), result)
 	})
@@ -38,7 +38,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return blockNum * 100, nil
 		}
 
-		result, err := FindBlockByTimestamp(ctx, 500, 3, fetcher)
+		result, err := findBlockByTimestamp(ctx, 500, 3, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), result)
 	})
@@ -49,7 +49,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return blockNum * 100, nil
 		}
 
-		result, err := FindBlockByTimestamp(ctx, 300, 5, fetcher)
+		result, err := findBlockByTimestamp(ctx, 300, 5, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), result)
 	})
@@ -61,7 +61,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return blockNum * 100, nil
 		}
 
-		result, err := FindBlockByTimestamp(ctx, 250, 5, fetcher)
+		result, err := findBlockByTimestamp(ctx, 250, 5, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), result)
 	})
@@ -74,7 +74,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 		}
 
 		// Find block at timestamp 1050
-		result, err := FindBlockByTimestamp(ctx, 1050, 100, fetcher)
+		result, err := findBlockByTimestamp(ctx, 1050, 100, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(51), result) // Block 51 has timestamp 1050
 	})
@@ -87,7 +87,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 		}
 
 		// Find block at timestamp 1050, should return block 26 (timestamp 1050)
-		result, err := FindBlockByTimestamp(ctx, 1050, 100, fetcher)
+		result, err := findBlockByTimestamp(ctx, 1050, 100, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(26), result)
 	})
@@ -113,7 +113,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 		}
 
 		// Find block at timestamp 160, should return block 5 (timestamp 200)
-		result, err := FindBlockByTimestamp(ctx, 160, 8, fetcher)
+		result, err := findBlockByTimestamp(ctx, 160, 8, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(5), result)
 	})
@@ -129,7 +129,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 		}
 
 		// Find block at timestamp 500000
-		result, err := FindBlockByTimestamp(ctx, 500000, chainLength, fetcher)
+		result, err := findBlockByTimestamp(ctx, 500000, chainLength, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(500000), result)
 
@@ -146,7 +146,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return 0, errors.New("rpc error")
 		}
 
-		_, err := FindBlockByTimestamp(ctx, 500, 10, fetcher)
+		_, err := findBlockByTimestamp(ctx, 500, 10, fetcher)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "rpc error")
 	})
@@ -163,7 +163,7 @@ func TestFindBlockByTimestamp(t *testing.T) {
 			return blockNum * 100, nil
 		}
 
-		_, err := FindBlockByTimestamp(ctx, 5000, 100, fetcher)
+		_, err := findBlockByTimestamp(ctx, 5000, 100, fetcher)
 		require.Error(t, err)
 		require.ErrorIs(t, err, context.Canceled)
 	})
@@ -174,17 +174,17 @@ func TestFindBlockByTimestamp(t *testing.T) {
 		}
 
 		// Target before the only block
-		result, err := FindBlockByTimestamp(ctx, 500, 1, fetcher)
+		result, err := findBlockByTimestamp(ctx, 500, 1, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), result)
 
 		// Target after the only block
-		result, err = FindBlockByTimestamp(ctx, 1500, 1, fetcher)
+		result, err = findBlockByTimestamp(ctx, 1500, 1, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), result)
 
 		// Target exactly at the only block
-		result, err = FindBlockByTimestamp(ctx, 1000, 1, fetcher)
+		result, err = findBlockByTimestamp(ctx, 1000, 1, fetcher)
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), result)
 	})

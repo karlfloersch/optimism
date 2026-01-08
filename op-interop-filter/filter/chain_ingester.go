@@ -26,11 +26,11 @@ const (
 	pollInterval = 2 * time.Second
 )
 
-// BlockTimestampFetcher fetches a block's timestamp by block number.
+// blockTimestampFetcher fetches a block's timestamp by block number.
 // Returns (timestamp, error). Used for binary search to find blocks by timestamp.
-type BlockTimestampFetcher func(ctx context.Context, blockNum uint64) (uint64, error)
+type blockTimestampFetcher func(ctx context.Context, blockNum uint64) (uint64, error)
 
-// FindBlockByTimestamp uses binary search to find the first block with timestamp >= targetTimestamp.
+// findBlockByTimestamp uses binary search to find the first block with timestamp >= targetTimestamp.
 // Parameters:
 //   - ctx: context for cancellation
 //   - targetTimestamp: the timestamp we're looking for
@@ -40,11 +40,11 @@ type BlockTimestampFetcher func(ctx context.Context, blockNum uint64) (uint64, e
 // Returns the block number of the first block at or after targetTimestamp.
 // If all blocks are after targetTimestamp, returns 1.
 // If all blocks are before targetTimestamp, returns latestBlockNum.
-func FindBlockByTimestamp(
+func findBlockByTimestamp(
 	ctx context.Context,
 	targetTimestamp uint64,
 	latestBlockNum uint64,
-	fetchTimestamp BlockTimestampFetcher,
+	fetchTimestamp blockTimestampFetcher,
 ) (uint64, error) {
 	if latestBlockNum == 0 {
 		return 1, nil
@@ -95,8 +95,8 @@ func FindBlockByTimestamp(
 	return low, nil
 }
 
-// ReorgCallback is called when a reorg is detected
-type ReorgCallback func(chainID eth.ChainID)
+// reorgCallback is called when a reorg is detected
+type reorgCallback func(chainID eth.ChainID)
 
 // ChainIngester handles block ingestion and log storage for a single chain
 type ChainIngester struct {
@@ -113,7 +113,7 @@ type ChainIngester struct {
 	ready   atomic.Bool
 	stopped atomic.Bool
 
-	onReorg ReorgCallback
+	onReorg reorgCallback
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -130,7 +130,7 @@ func NewChainIngester(
 	rpcURL string,
 	dataDir string,
 	backfillDuration time.Duration,
-	onReorg ReorgCallback,
+	onReorg reorgCallback,
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -371,7 +371,7 @@ func (c *ChainIngester) catchUp() error {
 			return info.Time(), nil
 		}
 
-		startBlock, err = FindBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
+		startBlock, err = findBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
 		if err != nil {
 			return fmt.Errorf("failed to find backfill start block: %w", err)
 		}
@@ -638,8 +638,8 @@ func (c *ChainIngester) triggerReorg() {
 	}
 }
 
-// BlockExecMsgs contains executing messages from a single block
-type BlockExecMsgs struct {
+// blockExecMsgs contains executing messages from a single block
+type blockExecMsgs struct {
 	BlockNum  uint64
 	Timestamp uint64
 	ExecMsgs  []*types.ExecutingMessage // May be nil/empty if block has no executing messages
@@ -647,7 +647,7 @@ type BlockExecMsgs struct {
 
 // GetBlocksInRange returns block info for all blocks from startBlock to endBlock (inclusive).
 // This is used for on-demand cross-unsafe validation.
-func (c *ChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockExecMsgs, error) {
+func (c *ChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]blockExecMsgs, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -655,7 +655,7 @@ func (c *ChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockEx
 		return nil, types.ErrUninitialized
 	}
 
-	results := make([]BlockExecMsgs, 0, endBlock-startBlock+1)
+	results := make([]blockExecMsgs, 0, endBlock-startBlock+1)
 	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
 		ref, _, execMsgs, err := c.logsDB.OpenBlock(blockNum)
 		if err != nil {
@@ -670,7 +670,7 @@ func (c *ChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockEx
 				msgs = append(msgs, msg)
 			}
 		}
-		results = append(results, BlockExecMsgs{
+		results = append(results, blockExecMsgs{
 			BlockNum:  blockNum,
 			Timestamp: ref.Time,
 			ExecMsgs:  msgs,
