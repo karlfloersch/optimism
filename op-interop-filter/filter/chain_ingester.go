@@ -324,11 +324,26 @@ func (c *ChainIngester) initLogsDB() error {
 func (c *ChainIngester) runIngestion() {
 	defer c.wg.Done()
 
-	// Get current head
+	if err := c.catchUp(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			c.log.Info("Catch up canceled")
+			return
+		}
+		c.log.Error("Failed to catch up", "err", err)
+		return
+	}
+
+	c.ready.Store(true)
+	c.log.Info("Caught up, starting live ingestion")
+	c.pollLoop()
+}
+
+// catchUp syncs from the last known block to the current chain head.
+// Returns nil if already caught up or after successful backfill.
+func (c *ChainIngester) catchUp() error {
 	head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
 	if err != nil {
-		c.log.Error("Failed to get current head", "err", err)
-		return
+		return fmt.Errorf("failed to get current head: %w", err)
 	}
 	c.log.Info("Current chain head", "block", head.NumberU64(), "hash", head.Hash())
 
@@ -339,16 +354,13 @@ func (c *ChainIngester) runIngestion() {
 
 	var startBlock uint64
 	if hasSealed {
-		// Resume from where we left off
 		startBlock = latestSealed.Number + 1
 		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", startBlock)
 
-		// If we're already caught up or ahead, just start polling
+		// Already caught up
 		if startBlock > head.NumberU64() {
-			c.log.Info("DB is up to date, starting live ingestion")
-			c.ready.Store(true)
-			c.pollLoop()
-			return
+			c.log.Info("DB is up to date")
+			return nil
 		}
 	} else {
 		// Fresh start - find the block at our target backfill timestamp using binary search
@@ -358,7 +370,6 @@ func (c *ChainIngester) runIngestion() {
 			targetTimestamp = head.Time() - backfillSeconds
 		} // else targetTimestamp = 0, backfill from genesis
 
-		// Create a fetcher that uses our ethClient
 		fetchTimestamp := func(ctx context.Context, blockNum uint64) (uint64, error) {
 			info, err := c.ethClient.InfoByNumber(ctx, blockNum)
 			if err != nil {
@@ -367,42 +378,30 @@ func (c *ChainIngester) runIngestion() {
 			return info.Time(), nil
 		}
 
-		foundBlock, err := FindBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
+		startBlock, err = FindBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
 		if err != nil {
-			c.log.Error("Failed to find backfill start block", "err", err)
-			return
+			return fmt.Errorf("failed to find backfill start block: %w", err)
 		}
-		startBlock = foundBlock
 
 		c.log.Info("Starting fresh backfill", "from", startBlock, "to", head.NumberU64(), "targetTimestamp", targetTimestamp, "blocks", head.NumberU64()-startBlock+1)
 
 		// Initialize the LogsDB with the parent block of the start block
-		// This is needed because the LogsDB requires a sealed parent block before adding logs
 		if startBlock > 0 {
 			if err := c.initializeAnchorBlock(startBlock - 1); err != nil {
-				c.log.Error("Failed to initialize anchor block", "err", err)
-				return
+				return fmt.Errorf("failed to initialize anchor block: %w", err)
 			}
 		}
 	}
 
-	// Backfill/catchup
+	// Backfill to head
 	if err := c.backfill(startBlock, head.NumberU64()); err != nil {
-		if errors.Is(err, context.Canceled) {
-			c.log.Info("Backfill canceled")
-			return
+		if !errors.Is(err, context.Canceled) {
+			c.triggerReorg()
 		}
-		c.log.Error("Backfill failed", "err", err)
-		c.triggerReorg()
-		return
+		return err
 	}
 
-	// Mark as ready
-	c.ready.Store(true)
-	c.log.Info("Backfill complete, starting live ingestion")
-
-	// Live polling loop
-	c.pollLoop()
+	return nil
 }
 
 // initializeAnchorBlock seals the anchor block in the LogsDB
