@@ -153,6 +153,12 @@ type ChainIngester struct {
 	// If non-zero, LatestTimestamp() returns this value instead of querying logsDB.
 	testLatestTimestamp atomic.Uint64
 
+	// earliestBlockNum tracks the earliest block number in the logsDB.
+	// Set when we seal the parent block during fresh backfill.
+	earliestBlockNum atomic.Uint64
+	// earliestBlockSet indicates whether earliestBlockNum has been set.
+	earliestBlockSet atomic.Bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -369,6 +375,37 @@ func (c *ChainIngester) LatestTimestamp() (uint64, bool) {
 	return seal.Timestamp, true
 }
 
+// EarliestBlockNum returns the earliest block number in the logsDB.
+// Returns 0, false if the earliest block has not been set (DB not initialized yet).
+func (c *ChainIngester) EarliestBlockNum() (uint64, bool) {
+	if !c.earliestBlockSet.Load() {
+		return 0, false
+	}
+	return c.earliestBlockNum.Load(), true
+}
+
+// findAndSetEarliestBlock walks backwards from latestBlock to find the earliest
+// sealed block in the DB. Used when resuming from existing persistent storage.
+func (c *ChainIngester) findAndSetEarliestBlock(latestBlock uint64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	earliest := latestBlock
+	for blockNum := latestBlock; blockNum > 0; blockNum-- {
+		_, err := c.logsDB.FindSealedBlock(blockNum - 1)
+		if err != nil {
+			// Found the boundary - blockNum is the earliest
+			earliest = blockNum
+			break
+		}
+		earliest = blockNum - 1
+	}
+
+	c.earliestBlockNum.Store(earliest)
+	c.earliestBlockSet.Store(true)
+	c.log.Info("Found earliest block in DB", "block", earliest)
+}
+
 // initLogsDB initializes the logs database
 func (c *ChainIngester) initLogsDB() error {
 	var dbPath string
@@ -483,6 +520,12 @@ func (c *ChainIngester) determineStartBlock(head eth.BlockInfo) (startBlock uint
 		startBlock = latestSealed.Number + 1
 		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", startBlock)
 
+		// Find earliest block by walking backwards from latest
+		// (we only walk back to find it once on startup)
+		if !c.earliestBlockSet.Load() {
+			c.findAndSetEarliestBlock(latestSealed.Number)
+		}
+
 		if startBlock > head.NumberU64() {
 			c.log.Info("DB is up to date")
 			return 0, false, nil // Already caught up
@@ -545,6 +588,11 @@ func (c *ChainIngester) sealParentBlock(blockNum uint64) error {
 	if err := c.logsDB.SealBlock(parentHash, blockID, blockInfo.Time()); err != nil {
 		return fmt.Errorf("failed to seal block: %w", err)
 	}
+
+	// Track earliest block with actual data for cross-validation.
+	// The parent block is just a starting point - actual data starts from blockNum + 1.
+	c.earliestBlockNum.Store(blockNum + 1)
+	c.earliestBlockSet.Store(true)
 
 	c.log.Info("Sealed parent block", "block", blockNum, "hash", blockID.Hash)
 	return nil

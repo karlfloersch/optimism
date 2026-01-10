@@ -34,6 +34,11 @@ type CrossSafeValidator struct {
 	// Key: chain ID, Value: timestamp
 	crossValidatedTs sync.Map // map[eth.ChainID]*atomic.Uint64
 
+	// Last validated block number per chain - tracks where we left off
+	// to avoid re-validating already validated blocks.
+	// Key: chain ID, Value: block number
+	lastValidatedBlockNum sync.Map // map[eth.ChainID]*atomic.Uint64
+
 	// Global cross-validated timestamp - minimum across all chains
 	globalCrossValidatedTs atomic.Uint64
 
@@ -62,10 +67,13 @@ func NewCrossSafeValidator(
 		cancel:  cancel,
 	}
 
-	// Initialize cross-validated timestamp for each chain
+	// Initialize cross-validated timestamp and last validated block for each chain
 	for chainID := range chains {
 		ts := &atomic.Uint64{}
 		v.crossValidatedTs.Store(chainID, ts)
+
+		blockNum := &atomic.Uint64{}
+		v.lastValidatedBlockNum.Store(chainID, blockNum)
 	}
 
 	return v
@@ -169,6 +177,9 @@ func (v *CrossSafeValidator) validateAllChains() {
 		if ingester.Error() != nil {
 			continue // Skip chains in error state
 		}
+		if !ingester.Ready() {
+			continue // Skip chains that haven't finished backfill
+		}
 
 		if err := v.validateChain(chainID, ingester, minIngestedTs); err != nil {
 			v.log.Error("Cross-validation failed",
@@ -183,19 +194,24 @@ func (v *CrossSafeValidator) validateAllChains() {
 }
 
 // validateChain validates all executing messages on a chain from its current
-// cross-validated timestamp up to maxTimestamp.
+// last validated block up to maxTimestamp.
 func (v *CrossSafeValidator) validateChain(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) error {
 	// Get current cross-validated timestamp for this chain
 	currentTs, _ := v.ChainCrossValidatedTimestamp(chainID)
 
-	// Get blocks from currentTs to maxTimestamp
-	blocks, err := v.getBlocksInTimestampRange(ingester, currentTs, maxTimestamp)
+	// Get blocks that need validation
+	blocks, err := v.getBlocksForValidation(chainID, ingester, maxTimestamp)
 	if err != nil {
 		return fmt.Errorf("failed to get blocks for validation: %w", err)
 	}
 
+	if len(blocks) == 0 {
+		return nil // Nothing to validate
+	}
+
 	// Validate each block's executing messages
 	var newValidatedTs uint64
+	var newValidatedBlockNum uint64
 	for _, block := range blocks {
 		for _, execMsg := range block.ExecMsgs {
 			// Validate the executing message
@@ -205,6 +221,13 @@ func (v *CrossSafeValidator) validateChain(chainID eth.ChainID, ingester *ChainI
 			}
 		}
 		newValidatedTs = block.Timestamp
+		newValidatedBlockNum = block.BlockNum
+	}
+
+	// Update last validated block number for this chain
+	if newValidatedBlockNum > 0 {
+		blockNumPtr, _ := v.lastValidatedBlockNum.Load(chainID)
+		blockNumPtr.(*atomic.Uint64).Store(newValidatedBlockNum)
 	}
 
 	// Update cross-validated timestamp for this chain
@@ -221,27 +244,53 @@ func (v *CrossSafeValidator) validateChain(chainID eth.ChainID, ingester *ChainI
 	return nil
 }
 
-// getBlocksInTimestampRange returns all blocks with timestamps in (startTs, endTs].
-func (v *CrossSafeValidator) getBlocksInTimestampRange(ingester *ChainIngester, startTs, endTs uint64) ([]blockExecMsgs, error) {
+// getBlocksForValidation returns blocks that need to be validated for a chain.
+// It starts from the last validated block (or earliest block if never validated)
+// and returns all blocks up to the latest block.
+func (v *CrossSafeValidator) getBlocksForValidation(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) ([]blockExecMsgs, error) {
 	// Get latest block from ingester
 	latestBlock, ok := ingester.LatestBlock()
 	if !ok {
 		return nil, nil // No blocks yet
 	}
 
-	// Find the block range to validate
-	// We need to find blocks with timestamp > startTs and <= endTs
-	var result []blockExecMsgs
+	// Get the earliest block number from the ingester
+	earliestBlockNum, ok := ingester.EarliestBlockNum()
+	if !ok {
+		return nil, nil // DB not initialized yet
+	}
 
-	// Start from where we left off - this is a simplified approach
-	// In production, we'd want to track the last validated block number
-	blocks, err := ingester.GetBlocksInRange(0, latestBlock.Number)
+	// Get last validated block number for this chain
+	var startBlockNum uint64
+	lastValidatedPtr, ok := v.lastValidatedBlockNum.Load(chainID)
+	if ok && lastValidatedPtr.(*atomic.Uint64).Load() > 0 {
+		// Start from the block after the last validated one
+		startBlockNum = lastValidatedPtr.(*atomic.Uint64).Load() + 1
+	} else {
+		// First time validating - start from the earliest block
+		startBlockNum = earliestBlockNum
+	}
+
+	// Don't try to validate blocks before the earliest one in the DB
+	if startBlockNum < earliestBlockNum {
+		startBlockNum = earliestBlockNum
+	}
+
+	// Nothing to validate if we've caught up
+	if startBlockNum > latestBlock.Number {
+		return nil, nil
+	}
+
+	// Get blocks in range
+	blocks, err := ingester.GetBlocksInRange(startBlockNum, latestBlock.Number)
 	if err != nil {
 		return nil, err
 	}
 
+	// Filter to only blocks up to maxTimestamp
+	var result []blockExecMsgs
 	for _, block := range blocks {
-		if block.Timestamp > startTs && block.Timestamp <= endTs {
+		if block.Timestamp <= maxTimestamp {
 			result = append(result, block)
 		}
 	}
@@ -249,8 +298,8 @@ func (v *CrossSafeValidator) getBlocksInTimestampRange(ingester *ChainIngester, 
 	return result, nil
 }
 
-// getMinIngestedTimestamp returns the minimum ingested timestamp across all chains.
-// Returns false if any chain is not ready.
+// getMinIngestedTimestamp returns the minimum ingested timestamp across all ready chains.
+// Returns false if no chains are ready yet.
 func (v *CrossSafeValidator) getMinIngestedTimestamp() (uint64, bool) {
 	if len(v.chains) == 0 {
 		return 0, false
@@ -259,14 +308,20 @@ func (v *CrossSafeValidator) getMinIngestedTimestamp() (uint64, bool) {
 	var minTs uint64
 	first := true
 	for _, ingester := range v.chains {
+		if !ingester.Ready() {
+			continue // Skip chains that haven't finished backfill
+		}
 		ts, ok := ingester.LatestTimestamp()
 		if !ok {
-			return 0, false // Chain not ready
+			continue // Skip chains without timestamp data
 		}
 		if first || ts < minTs {
 			minTs = ts
 			first = false
 		}
+	}
+	if first {
+		return 0, false // No ready chains found
 	}
 	return minTs, true
 }
