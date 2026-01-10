@@ -678,6 +678,22 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 		}
 	}
 
+	// Check if we can validate this block before inserting.
+	// If the block has executing messages, we need all chains to have caught up
+	// to ensure cross-unsafe validation can succeed.
+	if c.blockHasExecutingMessages(receipts) {
+		crossUnsafeTs, ok := c.getCrossUnsafeTimestamp()
+		if !ok || blockInfo.Time() > crossUnsafeTs {
+			// Can't validate yet - don't insert, try again on next poll
+			c.log.Debug("Waiting for other chains to catch up before inserting block",
+				"block", blockNum,
+				"blockTs", blockInfo.Time(),
+				"crossUnsafeTs", crossUnsafeTs,
+				"crossUnsafeOk", ok)
+			return nil
+		}
+	}
+
 	// Process logs and add to DB under lock
 	logCount, err := c.processBlockLogs(blockInfo, blockID, receipts, blockNum)
 	if err != nil {
@@ -748,6 +764,20 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 	}
 
 	return logIndex, nil
+}
+
+// blockHasExecutingMessages checks if any receipt contains executing message logs.
+// Used to determine if we need to wait for other chains before inserting a block.
+func (c *ChainIngester) blockHasExecutingMessages(receipts gethTypes.Receipts) bool {
+	for _, receipt := range receipts {
+		for _, l := range receipt.Logs {
+			execMsg, err := processors.DecodeExecutingMessageLog(l)
+			if err == nil && execMsg != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateBlockExecutingMessages validates all executing messages in a block.
