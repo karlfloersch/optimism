@@ -16,25 +16,39 @@ import (
 )
 
 func TestBackend_FailsafeEnabled(t *testing.T) {
-	backend := newTestBackend(t)
+	backend := newTestBackendWithMockChain(t)
+	chainID := eth.ChainIDFromUInt64(1)
 
 	// Failsafe should be disabled by default
 	require.False(t, backend.FailsafeEnabled())
 
-	// Enable failsafe
+	// Manual failsafe override
 	backend.SetFailsafeEnabled(true)
 	require.True(t, backend.FailsafeEnabled())
 
-	// Disable failsafe
+	// Disable manual failsafe
 	backend.SetFailsafeEnabled(false)
+	require.False(t, backend.FailsafeEnabled())
+
+	// Chain error also enables failsafe
+	backend.chains[chainID].setError(ErrorReorg, "test error")
+	require.True(t, backend.FailsafeEnabled())
+
+	// SetFailsafeEnabled(false) does NOT clear chain errors
+	backend.SetFailsafeEnabled(false)
+	require.True(t, backend.FailsafeEnabled()) // still true due to chain error
+
+	// Clear chain error directly
+	backend.chains[chainID].ClearError()
 	require.False(t, backend.FailsafeEnabled())
 }
 
 func TestBackend_CheckAccessList_FailsafeEnabled(t *testing.T) {
 	backend := newTestBackendWithMockChain(t)
+	chainID := eth.ChainIDFromUInt64(1)
 
-	// Enable failsafe
-	backend.SetFailsafeEnabled(true)
+	// Enable failsafe by setting a chain error
+	backend.chains[chainID].setError(ErrorReorg, "test reorg")
 
 	// CheckAccessList should return ErrFailsafeEnabled
 	err := backend.CheckAccessList(
@@ -73,17 +87,24 @@ func TestBackend_Ready_WithChains(t *testing.T) {
 	require.True(t, backend.Ready())
 }
 
-func TestBackend_OnReorg_EnablesFailsafe(t *testing.T) {
-	backend := newTestBackend(t)
+func TestBackend_ChainError_EnablesFailsafe(t *testing.T) {
+	backend := newTestBackendWithMockChain(t)
+	chainID := eth.ChainIDFromUInt64(1)
 
-	// Failsafe should be disabled initially
+	// Failsafe should be disabled initially (no chain errors)
 	require.False(t, backend.FailsafeEnabled())
 
-	// Simulate a reorg callback
-	backend.onReorg(eth.ChainIDFromUInt64(1))
+	// Set an error on the chain ingester
+	backend.chains[chainID].setError(ErrorReorg, "test reorg")
 
-	// Failsafe should now be enabled
+	// Failsafe should now be enabled (derived from chain error state)
 	require.True(t, backend.FailsafeEnabled())
+
+	// Clear the error
+	backend.chains[chainID].ClearError()
+
+	// Failsafe should be disabled again
+	require.False(t, backend.FailsafeEnabled())
 }
 
 func TestBackend_CheckAccessList_UnsupportedSafetyLevel(t *testing.T) {
@@ -133,19 +154,26 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 
 // mockChainIngester provides a minimal mock for testing
 type mockChainIngester struct {
-	ready  bool
-	logsDB *logs.DB
+	ready           bool
+	logsDB          *logs.DB
+	latestTimestamp uint64
 }
 
 // asChainIngester converts the mock into a real ChainIngester with only the ready field set
 // This is a workaround since we can't easily mock the ChainIngester struct
 func (m *mockChainIngester) asChainIngester() *ChainIngester {
-	c := &ChainIngester{}
+	c := &ChainIngester{
+		log:     log.New(),           // Required for setError() logging
+		metrics: metrics.NoopMetrics, // Required for setError() metrics
+	}
 	if m.ready {
 		c.ready.Store(true)
 	}
 	if m.logsDB != nil {
 		c.logsDB = m.logsDB
+	}
+	if m.latestTimestamp > 0 {
+		c.testLatestTimestamp.Store(m.latestTimestamp)
 	}
 	return c
 }
@@ -155,31 +183,31 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
-		name          string
-		initTimestamp uint64
-		execTimestamp uint64
-		wantErr       bool
-		errContains   string
+		name                      string
+		initTimestamp             uint64
+		execMsgInclusionTimestamp uint64
+		wantErr                   bool
+		errContains               string
 	}{
 		{
-			name:          "init before exec - valid",
-			initTimestamp: 100,
-			execTimestamp: 200,
-			wantErr:       false, // will fail on Contains, but timestamp check passes
+			name:                      "init before exec - valid",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 200,
+			wantErr:                   false, // will fail on Contains, but timestamp check passes
 		},
 		{
-			name:          "init equals exec - invalid",
-			initTimestamp: 100,
-			execTimestamp: 100,
-			wantErr:       true,
-			errContains:   "not before execution timestamp",
+			name:                      "init equals exec - invalid",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 100,
+			wantErr:                   true,
+			errContains:               "not before inclusion timestamp",
 		},
 		{
-			name:          "init after exec - invalid",
-			initTimestamp: 200,
-			execTimestamp: 100,
-			wantErr:       true,
-			errContains:   "not before execution timestamp",
+			name:                      "init after exec - invalid",
+			initTimestamp:             200,
+			execMsgInclusionTimestamp: 100,
+			wantErr:                   true,
+			errContains:               "not before inclusion timestamp",
 		},
 	}
 
@@ -190,7 +218,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.validateExecutingMessage(execMsg, tc.execTimestamp)
+			err := backend.validateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -200,7 +228,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 				// If timestamp check passes, it will fail on Contains (no logsDB)
 				// That's expected - we're only testing timestamp logic here
 				if err != nil {
-					require.NotContains(t, err.Error(), "not before execution timestamp")
+					require.NotContains(t, err.Error(), "not before inclusion timestamp")
 				}
 			}
 		})
@@ -213,37 +241,37 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
-		name          string
-		initTimestamp uint64
-		execTimestamp uint64
-		wantErr       bool
-		errContains   string
+		name                      string
+		initTimestamp             uint64
+		execMsgInclusionTimestamp uint64
+		wantErr                   bool
+		errContains               string
 	}{
 		{
-			name:          "within expiry window",
-			initTimestamp: 100,
-			execTimestamp: 150, // expires at 200, exec at 150 - OK
-			wantErr:       false,
+			name:                      "within expiry window",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 150, // expires at 200, exec at 150 - OK
+			wantErr:                   false,
 		},
 		{
-			name:          "at expiry boundary",
-			initTimestamp: 100,
-			execTimestamp: 200, // expires at 200, exec at 200 - OK (>=)
-			wantErr:       false,
+			name:                      "at expiry boundary",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 200, // expires at 200, exec at 200 - OK (>=)
+			wantErr:                   false,
 		},
 		{
-			name:          "just past expiry",
-			initTimestamp: 100,
-			execTimestamp: 201, // expires at 200, exec at 201 - expired
-			wantErr:       true,
-			errContains:   "expired",
+			name:                      "just past expiry",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 201, // expires at 200, exec at 201 - expired
+			wantErr:                   true,
+			errContains:               "expired",
 		},
 		{
-			name:          "well past expiry",
-			initTimestamp: 100,
-			execTimestamp: 500, // expires at 200, exec at 500 - expired
-			wantErr:       true,
-			errContains:   "expired",
+			name:                      "well past expiry",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 500, // expires at 200, exec at 500 - expired
+			wantErr:                   true,
+			errContains:               "expired",
 		},
 	}
 
@@ -254,7 +282,7 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.validateExecutingMessage(execMsg, tc.execTimestamp)
+			err := backend.validateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -290,41 +318,41 @@ func TestCheckAccessListEntry_TimeoutExpiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
-		name          string
-		initTimestamp uint64
-		execTimestamp uint64
-		timeout       uint64
-		wantErr       bool
-		errContains   string
+		name                      string
+		initTimestamp             uint64
+		execMsgInclusionTimestamp uint64
+		timeout                   uint64
+		wantErr                   bool
+		errContains               string
 	}{
 		{
-			name:          "no timeout - valid",
-			initTimestamp: 100,
-			execTimestamp: 150,
-			timeout:       0, // no timeout
-			wantErr:       false,
+			name:                      "no timeout - valid",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 150,
+			timeout:                   0, // no timeout
+			wantErr:                   false,
 		},
 		{
-			name:          "timeout within expiry",
-			initTimestamp: 100,
-			execTimestamp: 120,
-			timeout:       30, // exec + timeout = 150, expires at 200 - OK
-			wantErr:       false,
+			name:                      "timeout within expiry",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 120,
+			timeout:                   30, // exec + timeout = 150, expires at 200 - OK
+			wantErr:                   false,
 		},
 		{
-			name:          "timeout at expiry boundary",
-			initTimestamp: 100,
-			execTimestamp: 150,
-			timeout:       50, // exec + timeout = 200, expires at 200 - OK (>=)
-			wantErr:       false,
+			name:                      "timeout at expiry boundary",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 150,
+			timeout:                   50, // exec + timeout = 200, expires at 200 - OK (>=)
+			wantErr:                   false,
 		},
 		{
-			name:          "timeout past expiry",
-			initTimestamp: 100,
-			execTimestamp: 150,
-			timeout:       51, // exec + timeout = 201, expires at 200 - fail
-			wantErr:       true,
-			errContains:   "expire before timeout",
+			name:                      "timeout past expiry",
+			initTimestamp:             100,
+			execMsgInclusionTimestamp: 150,
+			timeout:                   51, // exec + timeout = 201, expires at 200 - fail
+			wantErr:                   true,
+			errContains:               "expire before timeout",
 		},
 	}
 
@@ -336,7 +364,7 @@ func TestCheckAccessListEntry_TimeoutExpiry(t *testing.T) {
 			}
 			execDescriptor := types.ExecutingDescriptor{
 				ChainID:   chainID,
-				Timestamp: tc.execTimestamp,
+				Timestamp: tc.execMsgInclusionTimestamp,
 				Timeout:   tc.timeout,
 			}
 
@@ -357,12 +385,13 @@ func TestCheckAccessListEntry_TimeoutExpiry(t *testing.T) {
 }
 
 func TestCheckAccessListEntry_CrossUnsafeTimestamp(t *testing.T) {
-	backend := newTestBackendWithMockChain(t)
+	backend := newTestBackend(t)
 	backend.cfg.MessageExpiryWindow = 1000
 	chainID := eth.ChainIDFromUInt64(1)
 
-	// Set cross-unsafe timestamp to 500
-	backend.crossUnsafeTimestamp.Store(500)
+	// Create a mock chain with latestTimestamp of 500 (this becomes cross-unsafe timestamp)
+	mockIngester := &mockChainIngester{ready: true, latestTimestamp: 500}
+	backend.chains[chainID] = mockIngester.asChainIngester()
 
 	tests := []struct {
 		name          string

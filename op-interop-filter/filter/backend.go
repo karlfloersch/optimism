@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -18,7 +16,27 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// Backend coordinates chain ingesters, manages failsafe state, and handles CheckAccessList requests.
+// ValidateMessageTiming validates timing constraints for cross-chain messages.
+// Checks:
+//   - initMsgTimestamp < inclusionTimestamp (init must be before execution)
+//   - initMsgTimestamp + expiryWindow >= inclusionTimestamp (not expired)
+func ValidateMessageTiming(initMsgTimestamp, inclusionTimestamp, expiryWindow uint64) error {
+	if !(initMsgTimestamp < inclusionTimestamp) {
+		return fmt.Errorf("initiating message timestamp %d not before inclusion timestamp %d: %w",
+			initMsgTimestamp, inclusionTimestamp, types.ErrConflict)
+	}
+
+	expiresAt := safemath.SaturatingAdd(initMsgTimestamp, expiryWindow)
+	if expiresAt < inclusionTimestamp {
+		return fmt.Errorf("initiating message expired: init %d + expiry window %d = %d < inclusion %d: %w",
+			initMsgTimestamp, expiryWindow, expiresAt, inclusionTimestamp, types.ErrConflict)
+	}
+
+	return nil
+}
+
+// Backend coordinates chain ingesters and handles CheckAccessList requests.
+// Failsafe is enabled if manually set OR if any chain ingester has an error.
 type Backend struct {
 	log     log.Logger
 	metrics metrics.Metricer
@@ -28,21 +46,13 @@ type Backend struct {
 	// Immutable after NewBackend returns; safe for concurrent reads.
 	chains map[eth.ChainID]*ChainIngester
 
-	// Failsafe state
-	failsafe atomic.Bool
-
-	// Cross-unsafe validated block - highest block number per chain that has been validated
-	// Only accessed by the validation loop goroutine, no lock needed.
-	validatedUpToBlockNum map[eth.ChainID]uint64
-
-	// Cross-unsafe validated timestamp - highest timestamp where all chains have
-	// caught up and executing messages have been validated
-	crossUnsafeTimestamp atomic.Uint64
+	// Manual failsafe override - when set, failsafe is enabled regardless of chain state.
+	// Uses atomic.Bool for thread-safe access from concurrent goroutines.
+	manualFailsafe atomic.Bool
 
 	// Context for shutdown
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
 }
 
 // NewBackend creates a new Backend instance
@@ -50,13 +60,12 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	b := &Backend{
-		log:                   logger,
-		metrics:               m,
-		cfg:                   cfg,
-		chains:                make(map[eth.ChainID]*ChainIngester),
-		validatedUpToBlockNum: make(map[eth.ChainID]uint64),
-		ctx:                   ctx,
-		cancel:                cancel,
+		log:     logger,
+		metrics: m,
+		cfg:     cfg,
+		chains:  make(map[eth.ChainID]*ChainIngester),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 
 	// Helper to cleanup on error
@@ -100,7 +109,8 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 			cfg.DataDir,
 			cfg.BackfillDuration,
 			cfg.PollInterval,
-			b.onReorg,
+			b.validateExecutingMessage,
+			b.getMinChainTimestamp,
 		)
 		if err != nil {
 			cleanup()
@@ -114,7 +124,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 	return b, nil
 }
 
-// Start starts all chain ingesters and the validation loop
+// Start starts all chain ingesters
 func (b *Backend) Start(ctx context.Context) error {
 	b.log.Info("Starting backend")
 
@@ -124,20 +134,13 @@ func (b *Backend) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start validation loop
-	b.wg.Add(1)
-	go b.runValidationLoop()
-
 	return nil
 }
 
-// Stop stops all chain ingesters and the validation loop
+// Stop stops all chain ingesters
 func (b *Backend) Stop(ctx context.Context) error {
 	b.log.Info("Stopping backend")
 	b.cancel()
-
-	// Wait for validation loop to stop
-	b.wg.Wait()
 
 	var result error
 	for chainID, ingester := range b.chains {
@@ -149,16 +152,29 @@ func (b *Backend) Stop(ctx context.Context) error {
 	return result
 }
 
-// FailsafeEnabled returns whether failsafe is enabled
+// FailsafeEnabled returns true if failsafe is manually enabled OR any chain has an error.
 func (b *Backend) FailsafeEnabled() bool {
-	return b.failsafe.Load()
+	return b.manualFailsafe.Load() || len(b.GetChainErrors()) > 0
 }
 
-// SetFailsafeEnabled sets the failsafe state
+// SetFailsafeEnabled sets the manual failsafe override.
+// When enabled=true, failsafe is enabled regardless of chain state.
+// When enabled=false, only clears the manual override (chain errors remain).
+// Use ClearChainErrors() to clear chain ingester errors.
 func (b *Backend) SetFailsafeEnabled(enabled bool) {
-	b.failsafe.Store(enabled)
-	b.metrics.RecordFailsafeEnabled(enabled)
-	b.log.Info("Failsafe state changed", "enabled", enabled)
+	b.manualFailsafe.Store(enabled)
+	b.metrics.RecordFailsafeEnabled(b.FailsafeEnabled())
+}
+
+// GetChainErrors returns all chains that are in an error state
+func (b *Backend) GetChainErrors() map[eth.ChainID]*IngesterError {
+	errors := make(map[eth.ChainID]*IngesterError)
+	for chainID, ingester := range b.chains {
+		if err := ingester.Error(); err != nil {
+			errors[chainID] = err
+		}
+	}
+	return errors
 }
 
 // Ready returns true if all chains have completed backfill
@@ -176,8 +192,8 @@ func (b *Backend) Ready() bool {
 func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
 	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 
-	// Check failsafe first
-	if b.failsafe.Load() {
+	// Check failsafe first (derived from chain error states)
+	if b.FailsafeEnabled() {
 		b.metrics.RecordCheckAccessList(false)
 		return types.ErrFailsafeEnabled
 	}
@@ -189,8 +205,7 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	}
 
 	// We support LocalUnsafe and CrossUnsafe (we don't track derivation for Safe/Finalized)
-	// CrossUnsafe is supported because we perform cross-chain validation in tryValidateCrossUnsafe()
-	// and enable failsafe if any validation fails
+	// CrossUnsafe is validated by chain ingesters during block ingestion
 	if minSafety != types.LocalUnsafe && minSafety != types.CrossUnsafe {
 		b.metrics.RecordCheckAccessList(false)
 		return fmt.Errorf("unsupported safety level %s: only %s and %s are supported",
@@ -227,9 +242,9 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 
 // checkAccessListEntry checks a single access list entry against linking rules.
 // This follows simplified linking rules (no cycle detection):
-// 1. initTimestamp < execTimestamp (must be strictly earlier to avoid cycles)
-// 2. initTimestamp + MessageExpiryWindow >= execTimestamp (message not expired)
-// 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= execTimestamp + Timeout
+// 1. initTimestamp < inclusionTimestamp (must be strictly earlier to avoid cycles)
+// 2. initTimestamp + MessageExpiryWindow >= inclusionTimestamp (message not expired)
+// 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= inclusionTimestamp + Timeout
 // 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
 func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	// Check timeout expiry first
@@ -243,9 +258,13 @@ func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access,
 		}
 	}
 
-	// Check cross-unsafe timestamp
+	// Check cross-unsafe timestamp - message must be at or before the minimum timestamp
+	// across all chains (meaning all chains have caught up past this timestamp)
 	if minSafety == types.CrossUnsafe {
-		crossUnsafeTs := b.crossUnsafeTimestamp.Load()
+		crossUnsafeTs, ok := b.getMinChainTimestamp()
+		if !ok {
+			return fmt.Errorf("cross-unsafe timestamp not available: %w", types.ErrOutOfScope)
+		}
 		if access.Timestamp > crossUnsafeTs {
 			return fmt.Errorf("message at timestamp %d not yet cross-unsafe validated (current cross-unsafe timestamp: %d): %w",
 				access.Timestamp, crossUnsafeTs, types.ErrOutOfScope)
@@ -261,99 +280,6 @@ func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access,
 		Checksum:  access.Checksum,
 	}
 	return b.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
-}
-
-// runValidationLoop periodically validates cross-unsafe executing messages
-func (b *Backend) runValidationLoop() {
-	defer b.wg.Done()
-
-	ticker := time.NewTicker(b.cfg.ValidationInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-b.ctx.Done():
-			return
-		case <-ticker.C:
-			b.tryValidateCrossUnsafe()
-		}
-	}
-}
-
-// tryValidateCrossUnsafe validates executing messages when all chains have caught up.
-// Queries chain ingesters directly for their latest state.
-func (b *Backend) tryValidateCrossUnsafe() {
-	// Don't validate while failsafe is enabled
-	if b.failsafe.Load() {
-		return
-	}
-
-	// Find minimum timestamp across all chains
-	minTimestamp, ok := b.getMinChainTimestamp()
-	if !ok {
-		return // Not all chains ready
-	}
-
-	// For each chain, validate executing messages from blocks we haven't validated yet
-	for chainID, ingester := range b.chains {
-		latestBlock, ok := ingester.LatestBlock()
-		if !ok {
-			continue
-		}
-
-		// Initialize or detect rewind: trust existing blocks, only validate new ones
-		// On first encounter (startup) or rewind, set to current latest block
-		if _, exists := b.validatedUpToBlockNum[chainID]; !exists ||
-			b.validatedUpToBlockNum[chainID] > latestBlock.Number {
-			b.validatedUpToBlockNum[chainID] = latestBlock.Number
-			continue // Trust existing, will validate from next block onwards
-		}
-
-		startBlock := b.validatedUpToBlockNum[chainID] + 1
-		endBlock := latestBlock.Number
-
-		if startBlock > endBlock {
-			continue // Already validated up to latest
-		}
-
-		// Query all blocks in the range
-		blocks, err := ingester.GetBlocksInRange(startBlock, endBlock)
-		if err != nil {
-			b.log.Error("Failed to query blocks", "chain", chainID, "err", err)
-			continue
-		}
-
-		// Validate each block's executing messages up to minTimestamp
-		for _, block := range blocks {
-			if block.Timestamp > minTimestamp {
-				break // Don't validate blocks past minTimestamp yet
-			}
-
-			// Validate any executing messages in this block
-			for _, execMsg := range block.ExecMsgs {
-				if err := b.validateExecutingMessage(execMsg, block.Timestamp); err != nil {
-					b.log.Error("Cross-unsafe validation failed, enabling failsafe",
-						"execChain", chainID,
-						"sourceChain", execMsg.ChainID,
-						"execBlock", block.BlockNum,
-						"timestamp", block.Timestamp,
-						"err", err)
-					b.SetFailsafeEnabled(true)
-					return
-				}
-			}
-
-			// Update validated block pointer
-			b.validatedUpToBlockNum[chainID] = block.BlockNum
-		}
-	}
-
-	// Update cross-unsafe timestamp
-	oldTimestamp := b.crossUnsafeTimestamp.Swap(minTimestamp)
-	if minTimestamp != oldTimestamp {
-		b.log.Debug("Cross-unsafe timestamp advanced", "from", oldTimestamp, "to", minTimestamp)
-	}
-	b.metrics.RecordCrossUnsafeValidatedTimestamp(minTimestamp)
 }
 
 // getMinChainTimestamp returns the minimum timestamp across all chains.
@@ -378,26 +304,17 @@ func (b *Backend) getMinChainTimestamp() (uint64, bool) {
 	return minTimestamp, true
 }
 
-// validateExecutingMessage validates a single executing message against the source chain
-// execTimestamp is the timestamp when the executing message was processed
-// Uses the same linking rules as checkAccessListEntry (matching op-supervisor)
-func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, execTimestamp uint64) error {
+// validateExecutingMessage validates a single executing message against the source chain.
+// inclusionTimestamp is the timestamp of the block containing this executing message.
+func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error {
 	ingester, ok := b.chains[execMsg.ChainID]
 	if !ok {
 		return fmt.Errorf("source chain %s: %w", execMsg.ChainID, types.ErrUnknownChain)
 	}
 
-	// Initiating message timestamp must be strictly before execution timestamp
-	if execMsg.Timestamp >= execTimestamp {
-		return fmt.Errorf("initiating message timestamp %d not before execution timestamp %d: %w",
-			execMsg.Timestamp, execTimestamp, types.ErrConflict)
-	}
-
-	// Check expiry: message expires at initTimestamp + MessageExpiryWindow
-	expiresAt := safemath.SaturatingAdd(execMsg.Timestamp, b.cfg.MessageExpiryWindow)
-	if expiresAt < execTimestamp {
-		return fmt.Errorf("initiating message expired: init %d + expiry window %d = %d < exec %d: %w",
-			execMsg.Timestamp, b.cfg.MessageExpiryWindow, expiresAt, execTimestamp, types.ErrConflict)
+	// Validate timing constraints (execMsg.Timestamp is the initiating message's timestamp)
+	if err := ValidateMessageTiming(execMsg.Timestamp, inclusionTimestamp, b.cfg.MessageExpiryWindow); err != nil {
+		return err
 	}
 
 	// Check log exists in source chain
@@ -407,13 +324,6 @@ func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, exec
 		LogIdx:    execMsg.LogIdx,
 		Checksum:  execMsg.Checksum,
 	}
-
 	_, err := ingester.Contains(query)
 	return err
-}
-
-// onReorg is called when a reorg is detected on a chain
-func (b *Backend) onReorg(chainID eth.ChainID) {
-	b.log.Warn("Reorg detected, enabling failsafe", "chain", chainID)
-	b.SetFailsafeEnabled(true)
 }

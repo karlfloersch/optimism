@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	gethTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 
@@ -91,8 +92,42 @@ func findBlockByTimestamp(
 	return low, nil
 }
 
-// reorgCallback is called when a reorg is detected
-type reorgCallback func(chainID eth.ChainID)
+// IngesterErrorReason indicates why an ingester entered an error state
+type IngesterErrorReason int
+
+const (
+	// ErrorReorg indicates a true chain reorganization was detected
+	ErrorReorg IngesterErrorReason = iota
+	// ErrorConflict indicates a database conflict (app-level failure)
+	ErrorConflict
+	// ErrorValidationFailed indicates cross-unsafe validation failed
+	ErrorValidationFailed
+)
+
+// String returns a human-readable name for the error reason
+func (r IngesterErrorReason) String() string {
+	switch r {
+	case ErrorReorg:
+		return "reorg"
+	case ErrorConflict:
+		return "conflict"
+	case ErrorValidationFailed:
+		return "validation_failed"
+	default:
+		return "unknown"
+	}
+}
+
+// IngesterError represents an error state in a ChainIngester
+type IngesterError struct {
+	Reason    IngesterErrorReason
+	Message   string
+	Timestamp time.Time
+}
+
+func (e *IngesterError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Reason, e.Message)
+}
 
 // ChainIngester handles block ingestion and log storage for a single chain
 type ChainIngester struct {
@@ -110,7 +145,17 @@ type ChainIngester struct {
 	ready   atomic.Bool
 	stopped atomic.Bool
 
-	onReorg reorgCallback
+	// Error state - set when ingester encounters an unrecoverable error.
+	// When set, the ingester halts processing.
+	errorState atomic.Pointer[IngesterError]
+
+	// testLatestTimestamp is used by tests to override LatestTimestamp().
+	// If non-zero, LatestTimestamp() returns this value instead of querying logsDB.
+	testLatestTimestamp atomic.Uint64
+
+	// Cross-chain validation functions
+	validateMessage         func(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error
+	getCrossUnsafeTimestamp func() (uint64, bool)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -128,7 +173,8 @@ func NewChainIngester(
 	dataDir string,
 	backfillDuration time.Duration,
 	pollInterval time.Duration,
-	onReorg reorgCallback,
+	validateMessage func(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error,
+	getCrossUnsafeTimestamp func() (uint64, bool),
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -159,22 +205,24 @@ func NewChainIngester(
 		},
 	)
 	if err != nil {
+		rpcClient.Close()
 		cancel()
 		return nil, fmt.Errorf("failed to create eth client for chain %s: %w", chainID, err)
 	}
 
 	return &ChainIngester{
-		log:              logger,
-		metrics:          m,
-		chainID:          chainID,
-		rpcClient:        rpcClient,
-		ethClient:        ethClient,
-		dataDir:          dataDir,
-		backfillDuration: backfillDuration,
-		pollInterval:     pollInterval,
-		onReorg:          onReorg,
-		ctx:              ctx,
-		cancel:           cancel,
+		log:                     logger,
+		metrics:                 m,
+		chainID:                 chainID,
+		rpcClient:               rpcClient,
+		ethClient:               ethClient,
+		dataDir:                 dataDir,
+		backfillDuration:        backfillDuration,
+		pollInterval:            pollInterval,
+		validateMessage:         validateMessage,
+		getCrossUnsafeTimestamp: getCrossUnsafeTimestamp,
+		ctx:                     ctx,
+		cancel:                  cancel,
 	}, nil
 }
 
@@ -229,6 +277,35 @@ func (c *ChainIngester) Ready() bool {
 	return c.ready.Load()
 }
 
+// setError sets the error state, logs the error, and records metrics.
+// Once set, the ingester will halt processing.
+func (c *ChainIngester) setError(reason IngesterErrorReason, msg string) {
+	err := &IngesterError{
+		Reason:    reason,
+		Message:   msg,
+		Timestamp: time.Now(),
+	}
+	c.errorState.Store(err)
+	c.log.Error("Ingester halted", "reason", reason.String(), "msg", msg)
+
+	// Record metrics based on reason
+	chainIDUint64, _ := c.chainID.Uint64()
+	if reason == ErrorReorg || reason == ErrorConflict {
+		c.metrics.RecordReorgDetected(chainIDUint64)
+	}
+}
+
+// Error returns the current error state, or nil if no error.
+func (c *ChainIngester) Error() *IngesterError {
+	return c.errorState.Load()
+}
+
+// ClearError clears the error state, allowing the ingester to resume processing.
+func (c *ChainIngester) ClearError() {
+	c.errorState.Store(nil)
+	c.log.Info("Ingester error state cleared")
+}
+
 // Contains checks if a log exists in the database
 func (c *ChainIngester) Contains(query types.ContainsQuery) (types.BlockSeal, error) {
 	c.mu.RLock()
@@ -253,8 +330,31 @@ func (c *ChainIngester) LatestBlock() (eth.BlockID, bool) {
 	return c.logsDB.LatestSealedBlock()
 }
 
+// BlockHashAt returns the hash of the sealed block at the given height.
+// Returns false if the block is not found or DB is not initialized.
+func (c *ChainIngester) BlockHashAt(blockNum uint64) (common.Hash, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.logsDB == nil {
+		return common.Hash{}, false
+	}
+
+	seal, err := c.logsDB.FindSealedBlock(blockNum)
+	if err != nil {
+		return common.Hash{}, false
+	}
+
+	return seal.Hash, true
+}
+
 // LatestTimestamp returns the timestamp of the latest sealed block
 func (c *ChainIngester) LatestTimestamp() (uint64, bool) {
+	// Check test override first
+	if ts := c.testLatestTimestamp.Load(); ts > 0 {
+		return ts, true
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -322,7 +422,24 @@ func (c *ChainIngester) runIngestion() {
 
 	c.ready.Store(true)
 	c.log.Info("Caught up, starting live ingestion")
-	c.pollLoop()
+
+	// Poll for new blocks
+	ticker := time.NewTicker(c.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.pollNewBlocks(); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				c.log.Error("Failed to poll new blocks", "err", err)
+			}
+		}
+	}
 }
 
 // catchUp syncs from the last known block to the current chain head.
@@ -474,29 +591,13 @@ func (c *ChainIngester) backfill(startBlock, endBlock uint64) error {
 	return nil
 }
 
-// pollLoop polls for new blocks
-func (c *ChainIngester) pollLoop() {
-	ticker := time.NewTicker(c.pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := c.pollNewBlocks(); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				c.log.Error("Failed to poll new blocks", "err", err)
-				// Don't trigger failsafe on transient errors
-			}
-		}
-	}
-}
-
 // pollNewBlocks checks for and ingests new blocks
 func (c *ChainIngester) pollNewBlocks() error {
+	// Check if we're in an error state - halt if so
+	if c.Error() != nil {
+		return nil
+	}
+
 	head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
 	if err != nil {
 		return fmt.Errorf("failed to get head: %w", err)
@@ -507,12 +608,25 @@ func (c *ChainIngester) pollNewBlocks() error {
 		return fmt.Errorf("no latest block in DB")
 	}
 
-	// Check for reorg
+	// Handle head moving backward - could be network propagation issue or real reorg
 	if head.NumberU64() < latestBlock.Number {
-		c.log.Warn("Detected reorg: head is behind latest block",
-			"head", head.NumberU64(),
-			"latest", latestBlock.Number)
-		c.triggerReorg()
+		dbHash, ok := c.BlockHashAt(head.NumberU64())
+		if !ok {
+			c.log.Warn("Head moved backward, couldn't verify block hash",
+				"head", head.NumberU64(), "latest", latestBlock.Number)
+			return nil
+		}
+
+		if dbHash == head.Hash() {
+			c.log.Debug("Head temporarily behind, same hash - skipping",
+				"head", head.NumberU64(), "latest", latestBlock.Number)
+			return nil
+		}
+
+		c.log.Warn("Detected reorg: different block at same height",
+			"height", head.NumberU64(), "db_hash", dbHash, "head_hash", head.Hash())
+		c.setError(ErrorReorg, fmt.Sprintf("reorg at height %d: db has %s, chain has %s",
+			head.NumberU64(), dbHash, head.Hash()))
 		return nil
 	}
 
@@ -528,6 +642,11 @@ func (c *ChainIngester) pollNewBlocks() error {
 
 // ingestBlock ingests a single block
 func (c *ChainIngester) ingestBlock(blockNum uint64) error {
+	// Check if we're in an error state - halt if so
+	if c.Error() != nil {
+		return nil
+	}
+
 	// Fetch block info
 	blockInfo, err := c.ethClient.InfoByNumber(c.ctx, blockNum)
 	if err != nil {
@@ -554,44 +673,44 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 				"block", blockNum,
 				"expected_parent", latestBlock.Hash,
 				"actual_parent", blockInfo.ParentHash())
-			c.triggerReorg()
+			c.setError(ErrorReorg, fmt.Sprintf("parent hash mismatch at block %d", blockNum))
 			return nil
 		}
 	}
 
 	// Process logs and add to DB under lock
-	// We explicitly manage lock/unlock to avoid fragile defer patterns
-	result, err := c.processBlockLogs(blockInfo, blockID, receipts, blockNum)
+	logCount, err := c.processBlockLogs(blockInfo, blockID, receipts, blockNum)
 	if err != nil {
+		if errors.Is(err, types.ErrConflict) {
+			c.setError(ErrorConflict, fmt.Sprintf("database conflict at block %d", blockNum))
+			return nil
+		}
 		return err
-	}
-
-	// Handle reorg detection (callback runs without lock)
-	if result.needsReorg {
-		c.triggerReorg()
-		return nil
 	}
 
 	// Update metrics (no lock needed)
 	chainIDUint64, _ := c.chainID.Uint64()
 	c.metrics.RecordChainHead(chainIDUint64, blockNum)
 	c.metrics.RecordBlocksSealed(chainIDUint64, 1)
-	c.metrics.RecordLogsAdded(chainIDUint64, int64(result.logCount))
+	c.metrics.RecordLogsAdded(chainIDUint64, int64(logCount))
+
+	// Validate executing messages in this block (if cross-unsafe ready)
+	if err := c.validateBlockExecutingMessages(blockNum, blockInfo.Time()); err != nil {
+		c.setError(ErrorValidationFailed, err.Error())
+		c.log.Error("Cross-unsafe validation failed",
+			"block", blockNum,
+			"timestamp", blockInfo.Time(),
+			"err", err)
+		return nil // Don't return error - we've recorded the state
+	}
 
 	return nil
 }
 
-// blockLogsResult holds the result of processing block logs
-type blockLogsResult struct {
-	logCount   uint32
-	needsReorg bool
-}
-
-// processBlockLogs processes all logs in a block and adds them to the DB
-// Returns the result containing log count and reorg flag
-// Handles locking internally - caller should not hold the lock
+// processBlockLogs processes all logs in a block and adds them to the DB.
+// Returns the log count and any error (including types.ErrConflict for DB conflicts).
 func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.BlockID,
-	receipts gethTypes.Receipts, blockNum uint64) (blockLogsResult, error) {
+	receipts gethTypes.Receipts, blockNum uint64) (uint32, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -610,22 +729,14 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 			logHash := processors.LogToLogHash(l)
 
 			// Check if this is an executing message
-			// Note: DecodeExecutingMessageLog returns (nil, nil) for non-executing-message logs,
-			// but returns an error if a log LOOKS like an executing message but can't be decoded.
-			// Per supervisor behavior, we treat decode errors as hard failures.
 			execMsg, err := processors.DecodeExecutingMessageLog(l)
 			if err != nil {
-				return blockLogsResult{}, fmt.Errorf("invalid log %d in block %d: %w", l.Index, blockNum, err)
+				return 0, fmt.Errorf("invalid log %d in block %d: %w", l.Index, blockNum, err)
 			}
 
 			// Add log to DB
 			if err := c.logsDB.AddLog(logHash, parentBlock, logIndex, execMsg); err != nil {
-				// Check for conflict (reorg indicator)
-				if errors.Is(err, types.ErrConflict) {
-					c.log.Warn("Conflict adding log, detected reorg", "err", err)
-					return blockLogsResult{needsReorg: true}, nil
-				}
-				return blockLogsResult{}, fmt.Errorf("failed to add log: %w", err)
+				return 0, fmt.Errorf("failed to add log: %w", err)
 			}
 			logIndex++
 		}
@@ -633,24 +744,52 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 
 	// Seal the block
 	if err := c.logsDB.SealBlock(blockInfo.ParentHash(), blockID, blockInfo.Time()); err != nil {
-		if errors.Is(err, types.ErrConflict) {
-			c.log.Warn("Conflict sealing block, detected reorg", "err", err)
-			return blockLogsResult{needsReorg: true}, nil
-		}
-		return blockLogsResult{}, fmt.Errorf("failed to seal block: %w", err)
+		return 0, fmt.Errorf("failed to seal block: %w", err)
 	}
 
-	return blockLogsResult{logCount: logIndex}, nil
+	return logIndex, nil
 }
 
-// triggerReorg handles reorg detection
-func (c *ChainIngester) triggerReorg() {
-	c.log.Warn("Reorg detected, triggering failsafe")
-	chainIDUint64, _ := c.chainID.Uint64()
-	c.metrics.RecordReorgDetected(chainIDUint64)
-	if c.onReorg != nil {
-		c.onReorg(c.chainID)
+// validateBlockExecutingMessages validates all executing messages in a block.
+// This is called after a block is sealed to perform cross-unsafe validation.
+// Returns nil if:
+//   - The block has no executing messages
+//   - The block is not yet ready for cross-unsafe validation (timestamp > crossUnsafeTimestamp)
+//   - All executing messages are valid
+func (c *ChainIngester) validateBlockExecutingMessages(blockNum uint64, blockTimestamp uint64) error {
+	if c.validateMessage == nil {
+		return nil // No cross-chain validation configured
 	}
+
+	// Check if this block is ready for cross-unsafe validation
+	crossUnsafeTs, ok := c.getCrossUnsafeTimestamp()
+	if !ok || blockTimestamp > crossUnsafeTs {
+		// Not yet ready for validation - other chains haven't caught up
+		return nil
+	}
+
+	// Get the executing messages for this block
+	blocks, err := c.GetBlocksInRange(blockNum, blockNum)
+	if err != nil {
+		return fmt.Errorf("failed to get block %d for validation: %w", blockNum, err)
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	block := blocks[0]
+	if len(block.ExecMsgs) == 0 {
+		return nil // No executing messages to validate
+	}
+
+	// Validate each executing message
+	for _, execMsg := range block.ExecMsgs {
+		if err := c.validateMessage(execMsg, blockTimestamp); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // blockExecMsgs contains executing messages from a single block
