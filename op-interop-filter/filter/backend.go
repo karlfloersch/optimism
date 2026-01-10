@@ -46,6 +46,10 @@ type Backend struct {
 	// Immutable after NewBackend returns; safe for concurrent reads.
 	chains map[eth.ChainID]*ChainIngester
 
+	// Cross-safe validator handles all cross-chain message validation.
+	// Runs a validation loop and tracks the cross-validated timestamp.
+	crossSafeValidator *CrossSafeValidator
+
 	// Manual failsafe override - when set, failsafe is enabled regardless of chain state.
 	// Uses atomic.Bool for thread-safe access from concurrent goroutines.
 	manualFailsafe atomic.Bool
@@ -109,8 +113,6 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 			cfg.DataDir,
 			cfg.BackfillDuration,
 			cfg.PollInterval,
-			b.validateExecutingMessage,
-			b.getMinChainTimestamp,
 		)
 		if err != nil {
 			cleanup()
@@ -120,11 +122,14 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 		b.chains[chainID] = ingester
 	}
 
+	// Create cross-safe validator after all chain ingesters are created
+	b.crossSafeValidator = NewCrossSafeValidator(ctx, logger, m, cfg, b.chains)
+
 	logger.Info("Created backend", "chains", len(b.chains))
 	return b, nil
 }
 
-// Start starts all chain ingesters
+// Start starts all chain ingesters and the cross-safe validator
 func (b *Backend) Start(ctx context.Context) error {
 	b.log.Info("Starting backend")
 
@@ -134,15 +139,26 @@ func (b *Backend) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start cross-safe validator after chain ingesters
+	if err := b.crossSafeValidator.Start(); err != nil {
+		return fmt.Errorf("failed to start cross-safe validator: %w", err)
+	}
+
 	return nil
 }
 
-// Stop stops all chain ingesters
+// Stop stops all chain ingesters and the cross-safe validator
 func (b *Backend) Stop(ctx context.Context) error {
 	b.log.Info("Stopping backend")
 	b.cancel()
 
 	var result error
+
+	// Stop cross-safe validator first
+	if err := b.crossSafeValidator.Stop(); err != nil {
+		result = errors.Join(result, fmt.Errorf("failed to stop cross-safe validator: %w", err))
+	}
+
 	for chainID, ingester := range b.chains {
 		if err := ingester.Stop(); err != nil {
 			result = errors.Join(result, fmt.Errorf("failed to stop chain ingester for chain %s: %w", chainID, err))
@@ -258,16 +274,16 @@ func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access,
 		}
 	}
 
-	// Check cross-unsafe timestamp - message must be at or before the minimum timestamp
-	// across all chains (meaning all chains have caught up past this timestamp)
+	// Check cross-unsafe timestamp - message must be at or before the cross-validated
+	// timestamp (the point up to which all executing messages have been verified)
 	if minSafety == types.CrossUnsafe {
-		crossUnsafeTs, ok := b.getMinChainTimestamp()
+		crossValidatedTs, ok := b.crossSafeValidator.CrossValidatedTimestamp()
 		if !ok {
-			return fmt.Errorf("cross-unsafe timestamp not available: %w", types.ErrOutOfScope)
+			return fmt.Errorf("cross-validated timestamp not available: %w", types.ErrOutOfScope)
 		}
-		if access.Timestamp > crossUnsafeTs {
-			return fmt.Errorf("message at timestamp %d not yet cross-unsafe validated (current cross-unsafe timestamp: %d): %w",
-				access.Timestamp, crossUnsafeTs, types.ErrOutOfScope)
+		if access.Timestamp > crossValidatedTs {
+			return fmt.Errorf("message at timestamp %d not yet cross-unsafe validated (current cross-validated timestamp: %d): %w",
+				access.Timestamp, crossValidatedTs, types.ErrOutOfScope)
 		}
 	}
 
@@ -279,51 +295,5 @@ func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access,
 		Timestamp: access.Timestamp,
 		Checksum:  access.Checksum,
 	}
-	return b.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
-}
-
-// getMinChainTimestamp returns the minimum timestamp across all chains.
-// Returns false if any chain is not ready yet.
-func (b *Backend) getMinChainTimestamp() (uint64, bool) {
-	if len(b.chains) == 0 {
-		return 0, false
-	}
-
-	var minTimestamp uint64
-	first := true
-	for _, ingester := range b.chains {
-		ts, ok := ingester.LatestTimestamp()
-		if !ok {
-			return 0, false // Chain not ready
-		}
-		if first || ts < minTimestamp {
-			minTimestamp = ts
-			first = false
-		}
-	}
-	return minTimestamp, true
-}
-
-// validateExecutingMessage validates a single executing message against the source chain.
-// inclusionTimestamp is the timestamp of the block containing this executing message.
-func (b *Backend) validateExecutingMessage(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error {
-	ingester, ok := b.chains[execMsg.ChainID]
-	if !ok {
-		return fmt.Errorf("source chain %s: %w", execMsg.ChainID, types.ErrUnknownChain)
-	}
-
-	// Validate timing constraints (execMsg.Timestamp is the initiating message's timestamp)
-	if err := ValidateMessageTiming(execMsg.Timestamp, inclusionTimestamp, b.cfg.MessageExpiryWindow); err != nil {
-		return err
-	}
-
-	// Check log exists in source chain
-	query := types.ContainsQuery{
-		Timestamp: execMsg.Timestamp,
-		BlockNum:  execMsg.BlockNum,
-		LogIdx:    execMsg.LogIdx,
-		Checksum:  execMsg.Checksum,
-	}
-	_, err := ingester.Contains(query)
-	return err
+	return b.crossSafeValidator.ValidateExecutingMessage(execMsg, execDescriptor.Timestamp)
 }

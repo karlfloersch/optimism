@@ -2,6 +2,7 @@ package filter
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,29 +128,58 @@ func newTestBackend(t *testing.T) *Backend {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	return &Backend{
+	cfg := &Config{
+		MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
+		ValidationInterval:  500 * time.Millisecond,
+		PollInterval:        2 * time.Second,
+	}
+	chains := make(map[eth.ChainID]*ChainIngester)
+
+	b := &Backend{
 		log:     log.New(),
 		metrics: metrics.NoopMetrics,
-		cfg: &Config{
-			MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
-			ValidationInterval:  500 * time.Millisecond,
-			PollInterval:        2 * time.Second,
-		},
-		chains: make(map[eth.ChainID]*ChainIngester),
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:     cfg,
+		chains:  chains,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
+
+	// Create cross-safe validator (with empty chains initially)
+	b.crossSafeValidator = NewCrossSafeValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+
+	return b
 }
 
 func newTestBackendWithMockChain(t *testing.T) *Backend {
-	backend := newTestBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cfg := &Config{
+		MessageExpiryWindow: uint64(DefaultMessageExpiryWindow.Seconds()),
+		ValidationInterval:  500 * time.Millisecond,
+		PollInterval:        2 * time.Second,
+	}
 
 	// Add a mock chain ingester that reports as ready
 	chainID := eth.ChainIDFromUInt64(1)
 	mockIngester := &mockChainIngester{ready: true}
-	backend.chains[chainID] = mockIngester.asChainIngester()
+	chains := map[eth.ChainID]*ChainIngester{
+		chainID: mockIngester.asChainIngester(),
+	}
 
-	return backend
+	b := &Backend{
+		log:     log.New(),
+		metrics: metrics.NoopMetrics,
+		cfg:     cfg,
+		chains:  chains,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+
+	// Create cross-safe validator with the mock chain
+	b.crossSafeValidator = NewCrossSafeValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+
+	return b
 }
 
 // mockChainIngester provides a minimal mock for testing
@@ -218,7 +248,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.validateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := backend.crossSafeValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -237,7 +267,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 
 func TestValidateExecutingMessage_Expiry(t *testing.T) {
 	backend := newTestBackendWithMockChain(t)
-	backend.cfg.MessageExpiryWindow = 100 // 100 seconds for easy math
+	backend.crossSafeValidator.cfg.MessageExpiryWindow = 100 // 100 seconds for easy math
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
@@ -282,7 +312,7 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.validateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := backend.crossSafeValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -307,7 +337,7 @@ func TestValidateExecutingMessage_UnknownChain(t *testing.T) {
 		Timestamp: 100,
 	}
 
-	err := backend.validateExecutingMessage(execMsg, 200)
+	err := backend.crossSafeValidator.ValidateExecutingMessage(execMsg, 200)
 	require.Error(t, err)
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 }
@@ -385,13 +415,37 @@ func TestCheckAccessListEntry_TimeoutExpiry(t *testing.T) {
 }
 
 func TestCheckAccessListEntry_CrossUnsafeTimestamp(t *testing.T) {
-	backend := newTestBackend(t)
-	backend.cfg.MessageExpiryWindow = 1000
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cfg := &Config{
+		MessageExpiryWindow: 1000,
+		ValidationInterval:  500 * time.Millisecond,
+		PollInterval:        2 * time.Second,
+	}
 	chainID := eth.ChainIDFromUInt64(1)
 
-	// Create a mock chain with latestTimestamp of 500 (this becomes cross-unsafe timestamp)
+	// Create a mock chain with latestTimestamp of 500
 	mockIngester := &mockChainIngester{ready: true, latestTimestamp: 500}
-	backend.chains[chainID] = mockIngester.asChainIngester()
+	chains := map[eth.ChainID]*ChainIngester{
+		chainID: mockIngester.asChainIngester(),
+	}
+
+	backend := &Backend{
+		log:     log.New(),
+		metrics: metrics.NoopMetrics,
+		cfg:     cfg,
+		chains:  chains,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+
+	// Create cross-safe validator with the mock chain AND set a cross-validated timestamp
+	backend.crossSafeValidator = NewCrossSafeValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	// Manually set the cross-validated timestamp to match latestTimestamp for testing
+	tsPtr, _ := backend.crossSafeValidator.crossValidatedTs.Load(chainID)
+	tsPtr.(*atomic.Uint64).Store(500)
+	backend.crossSafeValidator.globalCrossValidatedTs.Store(500)
 
 	tests := []struct {
 		name          string
@@ -402,25 +456,25 @@ func TestCheckAccessListEntry_CrossUnsafeTimestamp(t *testing.T) {
 	}{
 		{
 			name:          "LocalUnsafe ignores cross-unsafe timestamp",
-			initTimestamp: 600, // past cross-unsafe, but LocalUnsafe doesn't check
+			initTimestamp: 600, // past cross-validated, but LocalUnsafe doesn't check
 			safetyLevel:   types.LocalUnsafe,
 			wantErr:       false,
 		},
 		{
 			name:          "CrossUnsafe at boundary",
-			initTimestamp: 500, // equals cross-unsafe timestamp - OK
+			initTimestamp: 500, // equals cross-validated timestamp - OK
 			safetyLevel:   types.CrossUnsafe,
 			wantErr:       false,
 		},
 		{
 			name:          "CrossUnsafe before boundary",
-			initTimestamp: 400, // before cross-unsafe timestamp - OK
+			initTimestamp: 400, // before cross-validated timestamp - OK
 			safetyLevel:   types.CrossUnsafe,
 			wantErr:       false,
 		},
 		{
 			name:          "CrossUnsafe past boundary",
-			initTimestamp: 501, // past cross-unsafe timestamp - fail
+			initTimestamp: 501, // past cross-validated timestamp - fail
 			safetyLevel:   types.CrossUnsafe,
 			wantErr:       true,
 			errContains:   "not yet cross-unsafe validated",

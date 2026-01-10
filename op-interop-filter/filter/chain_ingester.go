@@ -153,17 +153,15 @@ type ChainIngester struct {
 	// If non-zero, LatestTimestamp() returns this value instead of querying logsDB.
 	testLatestTimestamp atomic.Uint64
 
-	// Cross-chain validation functions
-	validateMessage         func(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error
-	getCrossUnsafeTimestamp func() (uint64, bool)
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	mu     sync.RWMutex // protects logsDB access during rewind
 }
 
-// NewChainIngester creates a new ChainIngester for the given chain
+// NewChainIngester creates a new ChainIngester for the given chain.
+// The ChainIngester only handles block ingestion and log storage.
+// Cross-chain validation is handled separately by CrossSafeValidator.
 func NewChainIngester(
 	parentCtx context.Context,
 	logger log.Logger,
@@ -173,8 +171,6 @@ func NewChainIngester(
 	dataDir string,
 	backfillDuration time.Duration,
 	pollInterval time.Duration,
-	validateMessage func(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error,
-	getCrossUnsafeTimestamp func() (uint64, bool),
 ) (*ChainIngester, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -211,18 +207,16 @@ func NewChainIngester(
 	}
 
 	return &ChainIngester{
-		log:                     logger,
-		metrics:                 m,
-		chainID:                 chainID,
-		rpcClient:               rpcClient,
-		ethClient:               ethClient,
-		dataDir:                 dataDir,
-		backfillDuration:        backfillDuration,
-		pollInterval:            pollInterval,
-		validateMessage:         validateMessage,
-		getCrossUnsafeTimestamp: getCrossUnsafeTimestamp,
-		ctx:                     ctx,
-		cancel:                  cancel,
+		log:              logger,
+		metrics:          m,
+		chainID:          chainID,
+		rpcClient:        rpcClient,
+		ethClient:        ethClient,
+		dataDir:          dataDir,
+		backfillDuration: backfillDuration,
+		pollInterval:     pollInterval,
+		ctx:              ctx,
+		cancel:           cancel,
 	}, nil
 }
 
@@ -678,22 +672,6 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 		}
 	}
 
-	// Check if we can validate this block before inserting.
-	// If the block has executing messages, we need all chains to have caught up
-	// to ensure cross-unsafe validation can succeed.
-	if c.blockHasExecutingMessages(receipts) {
-		crossUnsafeTs, ok := c.getCrossUnsafeTimestamp()
-		if !ok || blockInfo.Time() > crossUnsafeTs {
-			// Can't validate yet - don't insert, try again on next poll
-			c.log.Debug("Waiting for other chains to catch up before inserting block",
-				"block", blockNum,
-				"blockTs", blockInfo.Time(),
-				"crossUnsafeTs", crossUnsafeTs,
-				"crossUnsafeOk", ok)
-			return nil
-		}
-	}
-
 	// Process logs and add to DB under lock
 	logCount, err := c.processBlockLogs(blockInfo, blockID, receipts, blockNum)
 	if err != nil {
@@ -709,16 +687,6 @@ func (c *ChainIngester) ingestBlock(blockNum uint64) error {
 	c.metrics.RecordChainHead(chainIDUint64, blockNum)
 	c.metrics.RecordBlocksSealed(chainIDUint64, 1)
 	c.metrics.RecordLogsAdded(chainIDUint64, int64(logCount))
-
-	// Validate executing messages in this block (if cross-unsafe ready)
-	if err := c.validateBlockExecutingMessages(blockNum, blockInfo.Time()); err != nil {
-		c.setError(ErrorValidationFailed, err.Error())
-		c.log.Error("Cross-unsafe validation failed",
-			"block", blockNum,
-			"timestamp", blockInfo.Time(),
-			"err", err)
-		return nil // Don't return error - we've recorded the state
-	}
 
 	return nil
 }
@@ -764,62 +732,6 @@ func (c *ChainIngester) processBlockLogs(blockInfo eth.BlockInfo, blockID eth.Bl
 	}
 
 	return logIndex, nil
-}
-
-// blockHasExecutingMessages checks if any receipt contains executing message logs.
-// Used to determine if we need to wait for other chains before inserting a block.
-func (c *ChainIngester) blockHasExecutingMessages(receipts gethTypes.Receipts) bool {
-	for _, receipt := range receipts {
-		for _, l := range receipt.Logs {
-			execMsg, err := processors.DecodeExecutingMessageLog(l)
-			if err == nil && execMsg != nil {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// validateBlockExecutingMessages validates all executing messages in a block.
-// This is called after a block is sealed to perform cross-unsafe validation.
-// Returns nil if:
-//   - The block has no executing messages
-//   - The block is not yet ready for cross-unsafe validation (timestamp > crossUnsafeTimestamp)
-//   - All executing messages are valid
-func (c *ChainIngester) validateBlockExecutingMessages(blockNum uint64, blockTimestamp uint64) error {
-	if c.validateMessage == nil {
-		return nil // No cross-chain validation configured
-	}
-
-	// Check if this block is ready for cross-unsafe validation
-	crossUnsafeTs, ok := c.getCrossUnsafeTimestamp()
-	if !ok || blockTimestamp > crossUnsafeTs {
-		// Not yet ready for validation - other chains haven't caught up
-		return nil
-	}
-
-	// Get the executing messages for this block
-	blocks, err := c.GetBlocksInRange(blockNum, blockNum)
-	if err != nil {
-		return fmt.Errorf("failed to get block %d for validation: %w", blockNum, err)
-	}
-	if len(blocks) == 0 {
-		return nil
-	}
-
-	block := blocks[0]
-	if len(block.ExecMsgs) == 0 {
-		return nil // No executing messages to validate
-	}
-
-	// Validate each executing message
-	for _, execMsg := range block.ExecMsgs {
-		if err := c.validateMessage(execMsg, blockTimestamp); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // blockExecMsgs contains executing messages from a single block
