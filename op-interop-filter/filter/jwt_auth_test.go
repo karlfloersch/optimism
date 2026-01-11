@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,10 +104,22 @@ func mockL2Server(t *testing.T) *httptest.Server {
 			result = "0x100"
 		case "eth_getBlockByNumber":
 			result = map[string]interface{}{
-				"number":     "0x100",
-				"hash":       "0x" + "00"[0:1] + string(make([]byte, 63)),
-				"parentHash": "0x" + "00"[0:1] + string(make([]byte, 63)),
-				"timestamp":  "0x60000000",
+				"number":           "0x100",
+				"hash":             "0x0000000000000000000000000000000000000000000000000000000000000001",
+				"parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
+				"timestamp":        "0x60000000",
+				"stateRoot":        "0x0000000000000000000000000000000000000000000000000000000000000000",
+				"receiptsRoot":     "0x0000000000000000000000000000000000000000000000000000000000000000",
+				"transactionsRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+				"sha3Uncles":       "0x0000000000000000000000000000000000000000000000000000000000000000",
+				"logsBloom":        "0x" + strings.Repeat("00", 256),
+				"miner":            "0x0000000000000000000000000000000000000000",
+				"difficulty":       "0x0",
+				"gasLimit":         "0x1000000",
+				"gasUsed":          "0x0",
+				"extraData":        "0x",
+				"nonce":            "0x0000000000000000",
+				"mixHash":          "0x0000000000000000000000000000000000000000000000000000000000000000",
 			}
 		default:
 			result = nil

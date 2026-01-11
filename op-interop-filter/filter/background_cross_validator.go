@@ -38,7 +38,8 @@ type BackgroundCrossValidator struct {
 }
 
 // NewBackgroundCrossValidator creates a new BackgroundCrossValidator.
-// Call SetStartTimestamp after chains are ready to set the initial timestamp.
+// startTimestamp is the initial cross-validated timestamp (typically the
+// chain head timestamp at startup, before backfill begins).
 func NewBackgroundCrossValidator(
 	parentCtx context.Context,
 	logger log.Logger,
@@ -46,10 +47,11 @@ func NewBackgroundCrossValidator(
 	messageExpiryWindow uint64,
 	validationInterval time.Duration,
 	chains map[eth.ChainID]ChainIngester,
+	startTimestamp uint64,
 ) *BackgroundCrossValidator {
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	return &BackgroundCrossValidator{
+	v := &BackgroundCrossValidator{
 		log:                 logger.New("component", "cross-validator"),
 		metrics:             m,
 		messageExpiryWindow: messageExpiryWindow,
@@ -58,6 +60,8 @@ func NewBackgroundCrossValidator(
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
+	v.crossValidatedTs.Store(startTimestamp)
+	return v
 }
 
 // Start starts the validation loop
@@ -85,13 +89,6 @@ func (v *BackgroundCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 		return 0, false
 	}
 	return ts, true
-}
-
-// SetStartTimestamp sets the initial cross-validated timestamp.
-// Called by the backend once chains are ready after backfill.
-func (v *BackgroundCrossValidator) SetStartTimestamp(ts uint64) {
-	v.crossValidatedTs.Store(ts)
-	v.log.Info("Set cross-validated start timestamp", "timestamp", ts)
 }
 
 // ValidateAccessEntry validates a single access list entry against all message validity rules.
@@ -194,13 +191,6 @@ func (v *BackgroundCrossValidator) advanceValidation() {
 	}
 
 	currentTs := v.crossValidatedTs.Load()
-
-	// Initialize on first run: start at current chain head (after backfill)
-	if currentTs == 0 {
-		v.crossValidatedTs.Store(minIngestedTs)
-		v.log.Info("Initialized cross-validated timestamp", "timestamp", minIngestedTs)
-		return
-	}
 
 	// Try to advance one timestamp at a time until we catch up or hit an error
 	for {

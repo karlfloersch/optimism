@@ -156,28 +156,43 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 		}
 	}
 
+	// Track minimum head timestamp across chains for cross-validator start
+	var minHeadTimestamp uint64
+
 	// Create chain ingesters for each L2 RPC
 	for _, rpcURL := range cfg.L2RPCs {
-		// Query chain ID from the RPC
+		// Query chain ID and head timestamp from the RPC
 		ethClient, err := ethclient.Dial(rpcURL)
 		if err != nil {
 			cleanup()
 			return fmt.Errorf("failed to connect to %s: %w", rpcURL, err)
 		}
 		chainIDBig, err := ethClient.ChainID(ctx)
-		ethClient.Close()
 		if err != nil {
+			ethClient.Close()
 			cleanup()
 			return fmt.Errorf("failed to query chain ID from %s: %w", rpcURL, err)
 		}
+		header, err := ethClient.HeaderByNumber(ctx, nil) // nil = latest
+		ethClient.Close()
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("failed to query head block from %s: %w", rpcURL, err)
+		}
 		chainID := eth.ChainIDFromBig(chainIDBig)
+		headTimestamp := header.Time
+
+		// Track min head timestamp
+		if minHeadTimestamp == 0 || headTimestamp < minHeadTimestamp {
+			minHeadTimestamp = headTimestamp
+		}
 
 		if _, exists := chains[chainID]; exists {
 			cleanup()
 			return fmt.Errorf("duplicate chain ID %s: multiple RPCs return the same chain ID", chainID)
 		}
 
-		s.log.Info("Creating chain ingester", "chain", chainID, "rpc", rpcURL)
+		s.log.Info("Creating chain ingester", "chain", chainID, "rpc", rpcURL, "headTimestamp", headTimestamp)
 
 		ingester, err := NewLogsDBChainIngester(
 			ctx,
@@ -198,7 +213,9 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 		chainLifecycle = append(chainLifecycle, ingester)
 	}
 
-	// Create cross-validator
+	s.log.Info("Cross-validator will start at timestamp", "timestamp", minHeadTimestamp)
+
+	// Create cross-validator with known start timestamp
 	crossValidator := NewBackgroundCrossValidator(
 		ctx,
 		s.log,
@@ -206,6 +223,7 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 		cfg.MessageExpiryWindow,
 		cfg.ValidationInterval,
 		chains,
+		minHeadTimestamp,
 	)
 
 	s.backend = NewBackend(ctx, BackendParams{
