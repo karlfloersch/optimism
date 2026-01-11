@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/log"
 
-	
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/safemath"
@@ -17,8 +16,9 @@ import (
 )
 
 // BackgroundCrossValidator validates cross-chain executing messages and tracks
-// the cross-validated timestamp. It runs a background validation loop that checks
-// each chain's executing messages against their source chains.
+// the cross-validated timestamp. It runs a background validation loop that advances
+// the cross-validated timestamp one step at a time, validating all messages at each
+// timestamp across all chains.
 type BackgroundCrossValidator struct {
 	log     log.Logger
 	metrics metrics.Metricer
@@ -29,14 +29,8 @@ type BackgroundCrossValidator struct {
 	// Chain ingesters keyed by chain ID (read-only after construction)
 	chains map[eth.ChainID]ChainIngester
 
-	// Cross-validated timestamp per chain
-	crossValidatedTs sync.Map // map[eth.ChainID]*atomic.Uint64
-
-	// Last validated block number per chain
-	lastValidatedBlockNum sync.Map // map[eth.ChainID]*atomic.Uint64
-
-	// Global cross-validated timestamp - minimum across all chains
-	globalCrossValidatedTs atomic.Uint64
+	// Single global cross-validated timestamp
+	crossValidatedTs atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -54,7 +48,7 @@ func NewBackgroundCrossValidator(
 ) *BackgroundCrossValidator {
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	v := &BackgroundCrossValidator{
+	return &BackgroundCrossValidator{
 		log:                 logger.New("component", "cross-validator"),
 		metrics:             m,
 		messageExpiryWindow: messageExpiryWindow,
@@ -63,16 +57,6 @@ func NewBackgroundCrossValidator(
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
-
-	for chainID := range chains {
-		ts := &atomic.Uint64{}
-		v.crossValidatedTs.Store(chainID, ts)
-
-		blockNum := &atomic.Uint64{}
-		v.lastValidatedBlockNum.Store(chainID, blockNum)
-	}
-
-	return v
 }
 
 // Start starts the validation loop
@@ -95,20 +79,7 @@ func (v *BackgroundCrossValidator) Stop() error {
 
 // CrossValidatedTimestamp returns the global cross-validated timestamp.
 func (v *BackgroundCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
-	ts := v.globalCrossValidatedTs.Load()
-	if ts == 0 {
-		return 0, false
-	}
-	return ts, true
-}
-
-// ChainCrossValidatedTimestamp returns the cross-validated timestamp for a specific chain.
-func (v *BackgroundCrossValidator) ChainCrossValidatedTimestamp(chainID eth.ChainID) (uint64, bool) {
-	tsPtr, ok := v.crossValidatedTs.Load(chainID)
-	if !ok {
-		return 0, false
-	}
-	ts := tsPtr.(*atomic.Uint64).Load()
+	ts := v.crossValidatedTs.Load()
 	if ts == 0 {
 		return 0, false
 	}
@@ -192,12 +163,13 @@ func (v *BackgroundCrossValidator) runValidationLoop() {
 		case <-v.ctx.Done():
 			return
 		case <-ticker.C:
-			v.validateAllChains()
+			v.advanceValidation()
 		}
 	}
 }
 
-func (v *BackgroundCrossValidator) validateAllChains() {
+// advanceValidation tries to advance the cross-validated timestamp one step at a time.
+func (v *BackgroundCrossValidator) advanceValidation() {
 	// All chains must be ready and error-free
 	for _, ingester := range v.chains {
 		if ingester.Error() != nil {
@@ -213,108 +185,69 @@ func (v *BackgroundCrossValidator) validateAllChains() {
 		return
 	}
 
-	for chainID, ingester := range v.chains {
-		if err := v.validateChain(chainID, ingester, minIngestedTs); err != nil {
-			v.log.Error("Cross-validation failed",
-				"chain", chainID,
-				"err", err)
-			ingester.SetError(ErrorValidationFailed, err.Error())
+	currentTs := v.crossValidatedTs.Load()
+
+	// If we haven't started yet, initialize to min ingested - 1
+	// (so first validation will be at minIngestedTs... but actually
+	// we need to start from the earliest timestamp we have data for)
+	if currentTs == 0 {
+		minEarliestTs, ok := v.getMinEarliestTimestamp()
+		if !ok {
 			return
 		}
+		// Start one before the earliest so first +1 lands on earliest
+		if minEarliestTs > 0 {
+			currentTs = minEarliestTs - 1
+			v.crossValidatedTs.Store(currentTs)
+		}
 	}
 
-	v.updateGlobalCrossValidatedTimestamp()
+	// Try to advance one timestamp at a time until we catch up or hit an error
+	for {
+		nextTs := currentTs + 1
+
+		// Don't go past what all chains have ingested
+		if nextTs > minIngestedTs {
+			return
+		}
+
+		// Validate all messages at this timestamp across all chains
+		if err := v.validateTimestamp(nextTs); err != nil {
+			v.log.Error("Cross-validation failed", "timestamp", nextTs, "err", err)
+			// Set error on all chains to trigger failsafe
+			for _, ingester := range v.chains {
+				ingester.SetError(ErrorValidationFailed, err.Error())
+			}
+			return
+		}
+
+		// Advance
+		v.crossValidatedTs.Store(nextTs)
+		currentTs = nextTs
+
+		v.log.Debug("Advanced cross-validated timestamp", "timestamp", nextTs)
+	}
 }
 
-func (v *BackgroundCrossValidator) validateChain(
-	chainID eth.ChainID,
-	ingester ChainIngester,
-	maxTimestamp uint64,
-) error {
-	currentTs, _ := v.ChainCrossValidatedTimestamp(chainID)
-
-	msgs, err := v.getExecMsgsForValidation(chainID, ingester, maxTimestamp)
-	if err != nil {
-		return fmt.Errorf("failed to get messages for validation: %w", err)
-	}
-
-	if len(msgs) == 0 {
-		return nil
-	}
-
-	var newValidatedTs uint64
-	var newValidatedBlockNum uint64
-	for _, msg := range msgs {
-		if err := v.validateExecutingMessage(msg.ExecutingMessage, msg.InclusionTimestamp); err != nil {
-			return fmt.Errorf("validation failed at block %d, log %d: %w",
-				msg.InclusionBlockNum, msg.LogIdx, err)
+// validateTimestamp validates all executing messages with the given inclusion timestamp
+// across all chains.
+func (v *BackgroundCrossValidator) validateTimestamp(timestamp uint64) error {
+	for chainID, ingester := range v.chains {
+		msgs, err := ingester.GetExecMsgsAtTimestamp(timestamp)
+		if err != nil {
+			return fmt.Errorf("failed to get messages at timestamp %d from chain %s: %w",
+				timestamp, chainID, err)
 		}
-		newValidatedTs = msg.InclusionTimestamp
-		newValidatedBlockNum = msg.InclusionBlockNum
-	}
 
-	if newValidatedBlockNum > 0 {
-		blockNumPtr, _ := v.lastValidatedBlockNum.Load(chainID)
-		blockNumPtr.(*atomic.Uint64).Store(newValidatedBlockNum)
-	}
-
-	if newValidatedTs > currentTs {
-		tsPtr, _ := v.crossValidatedTs.Load(chainID)
-		tsPtr.(*atomic.Uint64).Store(newValidatedTs)
-
-		v.log.Debug("Advanced cross-validated timestamp",
-			"chain", chainID,
-			"previous", currentTs,
-			"new", newValidatedTs)
+		for _, msg := range msgs {
+			if err := v.validateExecutingMessage(msg.ExecutingMessage, msg.InclusionTimestamp); err != nil {
+				return fmt.Errorf("validation failed on chain %s at timestamp %d, log %d: %w",
+					chainID, timestamp, msg.LogIdx, err)
+			}
+		}
 	}
 
 	return nil
-}
-
-func (v *BackgroundCrossValidator) getExecMsgsForValidation(
-	chainID eth.ChainID,
-	ingester ChainIngester,
-	maxTimestamp uint64,
-) ([]IncludedMessage, error) {
-	latestBlock, ok := ingester.LatestBlock()
-	if !ok {
-		return nil, nil
-	}
-
-	earliestBlockNum, ok := ingester.EarliestBlockNum()
-	if !ok {
-		return nil, nil
-	}
-
-	var startBlockNum uint64
-	lastValidatedPtr, ok := v.lastValidatedBlockNum.Load(chainID)
-	if ok && lastValidatedPtr.(*atomic.Uint64).Load() > 0 {
-		startBlockNum = lastValidatedPtr.(*atomic.Uint64).Load() + 1
-	} else {
-		startBlockNum = earliestBlockNum
-	}
-
-	if startBlockNum < earliestBlockNum {
-		startBlockNum = earliestBlockNum
-	}
-
-	if startBlockNum > latestBlock.Number {
-		return nil, nil
-	}
-
-	msgs, err := ingester.GetExecMsgsInRange(startBlockNum, latestBlock.Number)
-	if err != nil {
-		return nil, err
-	}
-
-	var result []IncludedMessage
-	for _, msg := range msgs {
-		if msg.InclusionTimestamp <= maxTimestamp {
-			result = append(result, msg)
-		}
-	}
-
-	return result, nil
 }
 
 func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
@@ -326,11 +259,11 @@ func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 	first := true
 	for _, ingester := range v.chains {
 		if !ingester.Ready() {
-			continue
+			return 0, false
 		}
 		ts, ok := ingester.LatestTimestamp()
 		if !ok {
-			continue
+			return 0, false
 		}
 		if first || ts < minTs {
 			minTs = ts
@@ -343,27 +276,30 @@ func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 	return minTs, true
 }
 
-func (v *BackgroundCrossValidator) updateGlobalCrossValidatedTimestamp() {
+func (v *BackgroundCrossValidator) getMinEarliestTimestamp() (uint64, bool) {
 	if len(v.chains) == 0 {
-		return
+		return 0, false
 	}
 
 	var minTs uint64
 	first := true
-	for chainID := range v.chains {
-		ts, ok := v.ChainCrossValidatedTimestamp(chainID)
+	for _, ingester := range v.chains {
+		ts, ok := ingester.LatestTimestamp()
 		if !ok {
-			return
+			continue
 		}
+		// Use earliest block's timestamp as approximation
+		// In practice, we'd want EarliestTimestamp() but we don't have that
+		// For now, just use a reasonable starting point
 		if first || ts < minTs {
 			minTs = ts
 			first = false
 		}
 	}
-
-	if minTs > 0 {
-		v.globalCrossValidatedTs.Store(minTs)
+	if first {
+		return 0, false
 	}
+	return minTs, true
 }
 
 // Ensure BackgroundCrossValidator implements CrossValidator

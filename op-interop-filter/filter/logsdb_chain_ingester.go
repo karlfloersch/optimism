@@ -315,8 +315,8 @@ func (c *LogsDBChainIngester) EarliestBlockNum() (uint64, bool) {
 	return c.earliestBlockNum.Load(), true
 }
 
-// GetExecMsgsInRange returns executing messages in the given block range.
-func (c *LogsDBChainIngester) GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error) {
+// GetExecMsgsAtTimestamp returns executing messages with the given inclusion timestamp.
+func (c *LogsDBChainIngester) GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -324,19 +324,32 @@ func (c *LogsDBChainIngester) GetExecMsgsInRange(startBlock, endBlock uint64) ([
 		return nil, types.ErrUninitialized
 	}
 
+	earliest := c.earliestBlockNum.Load()
+	latestBlock, ok := c.logsDB.LatestSealedBlock()
+	if earliest == 0 || !ok {
+		return nil, nil
+	}
+
 	var results []IncludedMessage
-	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
+	for blockNum := earliest; blockNum <= latestBlock.Number; blockNum++ {
 		ref, _, execMsgs, err := c.logsDB.OpenBlock(blockNum)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open block %d: %w", blockNum, err)
 		}
 
-		for _, msg := range execMsgs {
-			results = append(results, IncludedMessage{
-				ExecutingMessage:   msg,
-				InclusionBlockNum:  blockNum,
-				InclusionTimestamp: ref.Time,
-			})
+		if ref.Time == timestamp {
+			for _, msg := range execMsgs {
+				results = append(results, IncludedMessage{
+					ExecutingMessage:   msg,
+					InclusionBlockNum:  blockNum,
+					InclusionTimestamp: ref.Time,
+				})
+			}
+		}
+
+		// Timestamps increase, so we can stop early
+		if ref.Time > timestamp {
+			break
 		}
 	}
 

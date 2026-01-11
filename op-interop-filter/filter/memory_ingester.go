@@ -142,14 +142,14 @@ func (m *MemoryChainIngester) EarliestBlockNum() (uint64, bool) {
 	return m.earliestBlockNum, true
 }
 
-// GetExecMsgsInRange implements ChainIngester.
-func (m *MemoryChainIngester) GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error) {
+// GetExecMsgsAtTimestamp implements ChainIngester.
+func (m *MemoryChainIngester) GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var result []IncludedMessage
 	for _, msg := range m.execMsgs {
-		if msg.InclusionBlockNum >= startBlock && msg.InclusionBlockNum <= endBlock {
+		if msg.InclusionTimestamp == timestamp {
 			result = append(result, msg)
 		}
 	}

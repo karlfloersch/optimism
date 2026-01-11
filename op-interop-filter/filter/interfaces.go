@@ -31,8 +31,8 @@ type ChainIngester interface {
 	// EarliestBlockNum returns the earliest block number in the database.
 	EarliestBlockNum() (uint64, bool)
 
-	// GetExecMsgsInRange returns executing messages in the given block range.
-	GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error)
+	// GetExecMsgsAtTimestamp returns executing messages with the given inclusion timestamp.
+	GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error)
 
 	// Ready returns true if the ingester has completed initial sync.
 	Ready() bool
