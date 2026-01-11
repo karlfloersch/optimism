@@ -46,7 +46,6 @@ type Backend struct {
 	// Manual failsafe override
 	manualFailsafe atomic.Bool
 
-	ctx    context.Context
 	cancel context.CancelFunc
 }
 
@@ -64,7 +63,7 @@ type BackendParams struct {
 
 // NewBackend creates a new Backend instance with the provided components.
 func NewBackend(parentCtx context.Context, params BackendParams) *Backend {
-	ctx, cancel := context.WithCancel(parentCtx)
+	_, cancel := context.WithCancel(parentCtx)
 
 	return &Backend{
 		log:                     params.Logger,
@@ -74,7 +73,6 @@ func NewBackend(parentCtx context.Context, params BackendParams) *Backend {
 		chainLifecycle:          params.ChainLifecycle,
 		crossValidator:          params.CrossValidator,
 		crossValidatorLifecycle: params.CrossValidatorLifecycle,
-		ctx:                     ctx,
 		cancel:                  cancel,
 	}
 }

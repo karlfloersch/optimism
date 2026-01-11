@@ -97,9 +97,6 @@ type LogsDBChainIngester struct {
 
 	errorState atomic.Pointer[IngesterError]
 
-	// testLatestTimestamp is used by tests to override LatestTimestamp().
-	testLatestTimestamp atomic.Uint64
-
 	earliestBlockNum atomic.Uint64
 	earliestBlockSet atomic.Bool
 
@@ -283,10 +280,6 @@ func (c *LogsDBChainIngester) BlockHashAt(blockNum uint64) (common.Hash, bool) {
 
 // LatestTimestamp returns the timestamp of the latest sealed block
 func (c *LogsDBChainIngester) LatestTimestamp() (uint64, bool) {
-	if ts := c.testLatestTimestamp.Load(); ts > 0 {
-		return ts, true
-	}
-
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
