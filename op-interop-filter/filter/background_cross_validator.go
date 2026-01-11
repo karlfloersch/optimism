@@ -37,7 +37,8 @@ type BackgroundCrossValidator struct {
 	wg     sync.WaitGroup
 }
 
-// NewBackgroundCrossValidator creates a new BackgroundCrossValidator
+// NewBackgroundCrossValidator creates a new BackgroundCrossValidator.
+// Call SetStartTimestamp after chains are ready to set the initial timestamp.
 func NewBackgroundCrossValidator(
 	parentCtx context.Context,
 	logger log.Logger,
@@ -84,6 +85,13 @@ func (v *BackgroundCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 		return 0, false
 	}
 	return ts, true
+}
+
+// SetStartTimestamp sets the initial cross-validated timestamp.
+// Called by the backend once chains are ready after backfill.
+func (v *BackgroundCrossValidator) SetStartTimestamp(ts uint64) {
+	v.crossValidatedTs.Store(ts)
+	v.log.Info("Set cross-validated start timestamp", "timestamp", ts)
 }
 
 // ValidateAccessEntry validates a single access list entry against all message validity rules.
@@ -187,19 +195,11 @@ func (v *BackgroundCrossValidator) advanceValidation() {
 
 	currentTs := v.crossValidatedTs.Load()
 
-	// If we haven't started yet, initialize to min ingested - 1
-	// (so first validation will be at minIngestedTs... but actually
-	// we need to start from the earliest timestamp we have data for)
+	// Initialize on first run: start at current chain head (after backfill)
 	if currentTs == 0 {
-		minEarliestTs, ok := v.getMinEarliestTimestamp()
-		if !ok {
-			return
-		}
-		// Start one before the earliest so first +1 lands on earliest
-		if minEarliestTs > 0 {
-			currentTs = minEarliestTs - 1
-			v.crossValidatedTs.Store(currentTs)
-		}
+		v.crossValidatedTs.Store(minIngestedTs)
+		v.log.Info("Initialized cross-validated timestamp", "timestamp", minIngestedTs)
+		return
 	}
 
 	// Try to advance one timestamp at a time until we catch up or hit an error
@@ -265,32 +265,6 @@ func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 		if !ok {
 			return 0, false
 		}
-		if first || ts < minTs {
-			minTs = ts
-			first = false
-		}
-	}
-	if first {
-		return 0, false
-	}
-	return minTs, true
-}
-
-func (v *BackgroundCrossValidator) getMinEarliestTimestamp() (uint64, bool) {
-	if len(v.chains) == 0 {
-		return 0, false
-	}
-
-	var minTs uint64
-	first := true
-	for _, ingester := range v.chains {
-		ts, ok := ingester.LatestTimestamp()
-		if !ok {
-			continue
-		}
-		// Use earliest block's timestamp as approximation
-		// In practice, we'd want EarliestTimestamp() but we don't have that
-		// For now, just use a reasonable starting point
 		if first || ts < minTs {
 			minTs = ts
 			first = false
