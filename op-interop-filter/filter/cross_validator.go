@@ -228,27 +228,32 @@ func (v *CrossValidator) runValidationLoop() {
 // validateAllChains validates executing messages on all chains up to the
 // minimum ingested timestamp (so we know source chains have the data).
 func (v *CrossValidator) validateAllChains() {
-	// First, get the minimum ingested timestamp across all chains.
+	// All chains must be ready and error-free to validate.
+	// We can't safely validate cross-chain messages if any chain is unavailable.
+	for _, ingester := range v.chains {
+		if ingester.Error() != nil {
+			return // Can't validate if any chain has an error
+		}
+		if !ingester.Ready() {
+			return // Can't validate if any chain hasn't finished backfill
+		}
+	}
+
+	// Get the minimum ingested timestamp across all chains.
 	// This is the furthest we can validate (all chains have data up to here).
 	minIngestedTs, ok := v.getMinIngestedTimestamp()
 	if !ok {
-		return // Not all chains ready yet
+		return // Not all chains have timestamp data yet
 	}
 
 	// Validate each chain up to minIngestedTs
 	for chainID, ingester := range v.chains {
-		if ingester.Error() != nil {
-			continue // Skip chains in error state
-		}
-		if !ingester.Ready() {
-			continue // Skip chains that haven't finished backfill
-		}
-
 		if err := v.validateChain(chainID, ingester, minIngestedTs); err != nil {
 			v.log.Error("Cross-validation failed",
 				"chain", chainID,
 				"err", err)
 			ingester.setError(ErrorValidationFailed, err.Error())
+			return // Stop validation if any chain fails
 		}
 	}
 
