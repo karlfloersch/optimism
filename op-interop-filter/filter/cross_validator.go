@@ -34,14 +34,14 @@ func ValidateMessageTiming(initMsgTimestamp, inclusionTimestamp, expiryWindow ui
 	return nil
 }
 
-// CrossMessageValidator validates cross-chain executing messages and tracks
+// CrossValidator validates cross-chain executing messages and tracks
 // the cross-validated timestamp. It runs a validation loop that checks
 // each chain's executing messages against their source chains.
 //
 // This is separate from ChainIngester which only handles block ingestion.
 // The cross-validated timestamp represents the point up to which ALL
 // executing messages have been verified.
-type CrossMessageValidator struct {
+type CrossValidator struct {
 	log     log.Logger
 	metrics metrics.Metricer
 	cfg     *Config
@@ -68,18 +68,18 @@ type CrossMessageValidator struct {
 	wg     sync.WaitGroup
 }
 
-// NewCrossMessageValidator creates a new CrossMessageValidator
-func NewCrossMessageValidator(
+// NewCrossValidator creates a new CrossValidator
+func NewCrossValidator(
 	parentCtx context.Context,
 	logger log.Logger,
 	m metrics.Metricer,
 	cfg *Config,
 	chains map[eth.ChainID]*ChainIngester,
-) *CrossMessageValidator {
+) *CrossValidator {
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	v := &CrossMessageValidator{
-		log:     logger.New("component", "cross-message-validator"),
+	v := &CrossValidator{
+		log:     logger.New("component", "cross-validator"),
 		metrics: m,
 		cfg:     cfg,
 		chains:  chains,
@@ -100,7 +100,7 @@ func NewCrossMessageValidator(
 }
 
 // Start starts the validation loop
-func (v *CrossMessageValidator) Start() error {
+func (v *CrossValidator) Start() error {
 	v.log.Info("Starting cross-message validator", "chains", len(v.chains))
 
 	v.wg.Add(1)
@@ -110,7 +110,7 @@ func (v *CrossMessageValidator) Start() error {
 }
 
 // Stop stops the validation loop
-func (v *CrossMessageValidator) Stop() error {
+func (v *CrossValidator) Stop() error {
 	v.log.Info("Stopping cross-message validator")
 	v.cancel()
 	v.wg.Wait()
@@ -120,7 +120,7 @@ func (v *CrossMessageValidator) Stop() error {
 // CrossValidatedTimestamp returns the global cross-validated timestamp.
 // This is the minimum cross-validated timestamp across all chains.
 // Returns 0, false if not all chains have been validated yet.
-func (v *CrossMessageValidator) CrossValidatedTimestamp() (uint64, bool) {
+func (v *CrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 	ts := v.globalCrossValidatedTs.Load()
 	if ts == 0 {
 		return 0, false
@@ -129,7 +129,7 @@ func (v *CrossMessageValidator) CrossValidatedTimestamp() (uint64, bool) {
 }
 
 // ChainCrossValidatedTimestamp returns the cross-validated timestamp for a specific chain.
-func (v *CrossMessageValidator) ChainCrossValidatedTimestamp(chainID eth.ChainID) (uint64, bool) {
+func (v *CrossValidator) ChainCrossValidatedTimestamp(chainID eth.ChainID) (uint64, bool) {
 	tsPtr, ok := v.crossValidatedTs.Load(chainID)
 	if !ok {
 		return 0, false
@@ -148,7 +148,7 @@ func (v *CrossMessageValidator) ChainCrossValidatedTimestamp(chainID eth.ChainID
 // 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= inclusionTimestamp + Timeout
 // 4. If CrossUnsafe: initTimestamp <= crossValidatedTimestamp (cross-chain validated)
 // 5. Log exists in source chain
-func (v *CrossMessageValidator) ValidateAccessEntry(access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
+func (v *CrossValidator) ValidateAccessEntry(access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	// Check timeout expiry first
 	if execDescriptor.Timeout > 0 {
 		expiresAt := safemath.SaturatingAdd(access.Timestamp, v.cfg.MessageExpiryWindow)
@@ -186,7 +186,7 @@ func (v *CrossMessageValidator) ValidateAccessEntry(access types.Access, minSafe
 
 // ValidateExecutingMessage validates a single executing message against its source chain.
 // This is called by ValidateAccessEntry and during the validation loop.
-func (v *CrossMessageValidator) ValidateExecutingMessage(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error {
+func (v *CrossValidator) ValidateExecutingMessage(execMsg *types.ExecutingMessage, inclusionTimestamp uint64) error {
 	ingester, ok := v.chains[execMsg.ChainID]
 	if !ok {
 		return fmt.Errorf("source chain %s: %w", execMsg.ChainID, types.ErrUnknownChain)
@@ -209,7 +209,7 @@ func (v *CrossMessageValidator) ValidateExecutingMessage(execMsg *types.Executin
 }
 
 // runValidationLoop periodically validates executing messages on all chains
-func (v *CrossMessageValidator) runValidationLoop() {
+func (v *CrossValidator) runValidationLoop() {
 	defer v.wg.Done()
 
 	ticker := time.NewTicker(v.cfg.ValidationInterval)
@@ -227,7 +227,7 @@ func (v *CrossMessageValidator) runValidationLoop() {
 
 // validateAllChains validates executing messages on all chains up to the
 // minimum ingested timestamp (so we know source chains have the data).
-func (v *CrossMessageValidator) validateAllChains() {
+func (v *CrossValidator) validateAllChains() {
 	// First, get the minimum ingested timestamp across all chains.
 	// This is the furthest we can validate (all chains have data up to here).
 	minIngestedTs, ok := v.getMinIngestedTimestamp()
@@ -258,7 +258,7 @@ func (v *CrossMessageValidator) validateAllChains() {
 
 // validateChain validates all executing messages on a chain from its current
 // last validated block up to maxTimestamp.
-func (v *CrossMessageValidator) validateChain(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) error {
+func (v *CrossValidator) validateChain(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) error {
 	// Get current cross-validated timestamp for this chain
 	currentTs, _ := v.ChainCrossValidatedTimestamp(chainID)
 
@@ -310,7 +310,7 @@ func (v *CrossMessageValidator) validateChain(chainID eth.ChainID, ingester *Cha
 // getBlocksForValidation returns blocks that need to be validated for a chain.
 // It starts from the last validated block (or earliest block if never validated)
 // and returns all blocks up to the latest block.
-func (v *CrossMessageValidator) getBlocksForValidation(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) ([]blockExecMsgs, error) {
+func (v *CrossValidator) getBlocksForValidation(chainID eth.ChainID, ingester *ChainIngester, maxTimestamp uint64) ([]blockExecMsgs, error) {
 	// Get latest block from ingester
 	latestBlock, ok := ingester.LatestBlock()
 	if !ok {
@@ -363,7 +363,7 @@ func (v *CrossMessageValidator) getBlocksForValidation(chainID eth.ChainID, inge
 
 // getMinIngestedTimestamp returns the minimum ingested timestamp across all ready chains.
 // Returns false if no chains are ready yet.
-func (v *CrossMessageValidator) getMinIngestedTimestamp() (uint64, bool) {
+func (v *CrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 	if len(v.chains) == 0 {
 		return 0, false
 	}
@@ -391,7 +391,7 @@ func (v *CrossMessageValidator) getMinIngestedTimestamp() (uint64, bool) {
 
 // updateGlobalCrossValidatedTimestamp updates the global cross-validated timestamp
 // to be the minimum across all chains.
-func (v *CrossMessageValidator) updateGlobalCrossValidatedTimestamp() {
+func (v *CrossValidator) updateGlobalCrossValidatedTimestamp() {
 	if len(v.chains) == 0 {
 		return
 	}

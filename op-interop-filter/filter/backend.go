@@ -28,7 +28,7 @@ type Backend struct {
 
 	// Cross-message validator handles all cross-chain message validation.
 	// Runs a validation loop and tracks the cross-validated timestamp.
-	crossMessageValidator *CrossMessageValidator
+	crossMessageValidator *CrossValidator
 
 	// Manual failsafe override - when set, failsafe is enabled regardless of chain state.
 	// Uses atomic.Bool for thread-safe access from concurrent goroutines.
@@ -103,7 +103,7 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 	}
 
 	// Create cross-message validator after all chain ingesters are created
-	b.crossMessageValidator = NewCrossMessageValidator(ctx, logger, m, cfg, b.chains)
+	b.crossMessageValidator = NewCrossValidator(ctx, logger, m, cfg, b.chains)
 
 	logger.Info("Created backend", "chains", len(b.chains))
 	return b, nil

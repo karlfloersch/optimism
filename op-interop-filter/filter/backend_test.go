@@ -145,7 +145,7 @@ func newTestBackend(t *testing.T) *Backend {
 	}
 
 	// Create cross-message validator (with empty chains initially)
-	b.crossMessageValidator = NewCrossMessageValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	b.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 
 	return b
 }
@@ -177,7 +177,7 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 	}
 
 	// Create cross-message validator with the mock chain
-	b.crossMessageValidator = NewCrossMessageValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	b.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 
 	return b
 }
@@ -441,7 +441,7 @@ func TestValidateAccessEntry_CrossUnsafeTimestamp(t *testing.T) {
 	}
 
 	// Create cross-message validator with the mock chain AND set a cross-validated timestamp
-	backend.crossMessageValidator = NewCrossMessageValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	backend.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 	// Manually set the cross-validated timestamp to match latestTimestamp for testing
 	tsPtr, _ := backend.crossMessageValidator.crossValidatedTs.Load(chainID)
 	tsPtr.(*atomic.Uint64).Store(500)
