@@ -12,28 +12,8 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-service/safemath"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
-
-// ValidateMessageTiming validates timing constraints for cross-chain messages.
-// Checks:
-//   - initMsgTimestamp < inclusionTimestamp (init must be before execution)
-//   - initMsgTimestamp + expiryWindow >= inclusionTimestamp (not expired)
-func ValidateMessageTiming(initMsgTimestamp, inclusionTimestamp, expiryWindow uint64) error {
-	if !(initMsgTimestamp < inclusionTimestamp) {
-		return fmt.Errorf("initiating message timestamp %d not before inclusion timestamp %d: %w",
-			initMsgTimestamp, inclusionTimestamp, types.ErrConflict)
-	}
-
-	expiresAt := safemath.SaturatingAdd(initMsgTimestamp, expiryWindow)
-	if expiresAt < inclusionTimestamp {
-		return fmt.Errorf("initiating message expired: init %d + expiry window %d = %d < inclusion %d: %w",
-			initMsgTimestamp, expiryWindow, expiresAt, inclusionTimestamp, types.ErrConflict)
-	}
-
-	return nil
-}
 
 // Backend coordinates chain ingesters and handles CheckAccessList requests.
 // Failsafe is enabled if manually set OR if any chain ingester has an error.
@@ -46,9 +26,9 @@ type Backend struct {
 	// Immutable after NewBackend returns; safe for concurrent reads.
 	chains map[eth.ChainID]*ChainIngester
 
-	// Cross-safe validator handles all cross-chain message validation.
+	// Cross-message validator handles all cross-chain message validation.
 	// Runs a validation loop and tracks the cross-validated timestamp.
-	crossSafeValidator *CrossSafeValidator
+	crossMessageValidator *CrossMessageValidator
 
 	// Manual failsafe override - when set, failsafe is enabled regardless of chain state.
 	// Uses atomic.Bool for thread-safe access from concurrent goroutines.
@@ -122,14 +102,14 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 		b.chains[chainID] = ingester
 	}
 
-	// Create cross-safe validator after all chain ingesters are created
-	b.crossSafeValidator = NewCrossSafeValidator(ctx, logger, m, cfg, b.chains)
+	// Create cross-message validator after all chain ingesters are created
+	b.crossMessageValidator = NewCrossMessageValidator(ctx, logger, m, cfg, b.chains)
 
 	logger.Info("Created backend", "chains", len(b.chains))
 	return b, nil
 }
 
-// Start starts all chain ingesters and the cross-safe validator
+// Start starts all chain ingesters and the cross-message validator
 func (b *Backend) Start(ctx context.Context) error {
 	b.log.Info("Starting backend")
 
@@ -139,24 +119,24 @@ func (b *Backend) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start cross-safe validator after chain ingesters
-	if err := b.crossSafeValidator.Start(); err != nil {
-		return fmt.Errorf("failed to start cross-safe validator: %w", err)
+	// Start cross-message validator after chain ingesters
+	if err := b.crossMessageValidator.Start(); err != nil {
+		return fmt.Errorf("failed to start cross-message validator: %w", err)
 	}
 
 	return nil
 }
 
-// Stop stops all chain ingesters and the cross-safe validator
+// Stop stops all chain ingesters and the cross-message validator
 func (b *Backend) Stop(ctx context.Context) error {
 	b.log.Info("Stopping backend")
 	b.cancel()
 
 	var result error
 
-	// Stop cross-safe validator first
-	if err := b.crossSafeValidator.Stop(); err != nil {
-		result = errors.Join(result, fmt.Errorf("failed to stop cross-safe validator: %w", err))
+	// Stop cross-message validator first
+	if err := b.crossMessageValidator.Stop(); err != nil {
+		result = errors.Join(result, fmt.Errorf("failed to stop cross-message validator: %w", err))
 	}
 
 	for chainID, ingester := range b.chains {
@@ -221,7 +201,6 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	}
 
 	// We support LocalUnsafe and CrossUnsafe (we don't track derivation for Safe/Finalized)
-	// CrossUnsafe is validated by chain ingesters during block ingestion
 	if minSafety != types.LocalUnsafe && minSafety != types.CrossUnsafe {
 		b.metrics.RecordCheckAccessList(false)
 		return fmt.Errorf("unsupported safety level %s: only %s and %s are supported",
@@ -245,8 +224,8 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 			return fmt.Errorf("failed to parse access entry: %w", err)
 		}
 
-		// Validate the access entry
-		if err := b.checkAccessListEntry(ctx, access, minSafety, execDescriptor); err != nil {
+		// Validate the access entry using the cross-message validator
+		if err := b.crossMessageValidator.ValidateAccessEntry(access, minSafety, execDescriptor); err != nil {
 			b.metrics.RecordCheckAccessList(false)
 			return err
 		}
@@ -254,46 +233,4 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 
 	b.metrics.RecordCheckAccessList(true)
 	return nil
-}
-
-// checkAccessListEntry checks a single access list entry against linking rules.
-// This follows simplified linking rules (no cycle detection):
-// 1. initTimestamp < inclusionTimestamp (must be strictly earlier to avoid cycles)
-// 2. initTimestamp + MessageExpiryWindow >= inclusionTimestamp (message not expired)
-// 3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= inclusionTimestamp + Timeout
-// 4. If CrossUnsafe: initTimestamp <= crossUnsafeTimestamp (cross-chain validated)
-func (b *Backend) checkAccessListEntry(ctx context.Context, access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
-	// Check timeout expiry first
-	if execDescriptor.Timeout > 0 {
-		expiresAt := safemath.SaturatingAdd(access.Timestamp, b.cfg.MessageExpiryWindow)
-		maxExecTimestamp := safemath.SaturatingAdd(execDescriptor.Timestamp, execDescriptor.Timeout)
-		if expiresAt < maxExecTimestamp {
-			return fmt.Errorf("initiating message will expire before timeout: init %d + expiry %d = %d < exec %d + timeout %d = %d: %w",
-				access.Timestamp, b.cfg.MessageExpiryWindow, expiresAt,
-				execDescriptor.Timestamp, execDescriptor.Timeout, maxExecTimestamp, types.ErrConflict)
-		}
-	}
-
-	// Check cross-unsafe timestamp - message must be at or before the cross-validated
-	// timestamp (the point up to which all executing messages have been verified)
-	if minSafety == types.CrossUnsafe {
-		crossValidatedTs, ok := b.crossSafeValidator.CrossValidatedTimestamp()
-		if !ok {
-			return fmt.Errorf("cross-validated timestamp not available: %w", types.ErrOutOfScope)
-		}
-		if access.Timestamp > crossValidatedTs {
-			return fmt.Errorf("message at timestamp %d not yet cross-unsafe validated (current cross-validated timestamp: %d): %w",
-				access.Timestamp, crossValidatedTs, types.ErrOutOfScope)
-		}
-	}
-
-	// Validate core message rules (timestamp, expiry, log exists)
-	execMsg := &types.ExecutingMessage{
-		ChainID:   access.ChainID,
-		BlockNum:  access.BlockNumber,
-		LogIdx:    access.LogIndex,
-		Timestamp: access.Timestamp,
-		Checksum:  access.Checksum,
-	}
-	return b.crossSafeValidator.ValidateExecutingMessage(execMsg, execDescriptor.Timestamp)
 }
