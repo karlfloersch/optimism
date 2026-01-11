@@ -7,12 +7,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 
 	opservice "github.com/ethereum-optimism/optimism/op-service"
 	"github.com/ethereum-optimism/optimism/op-service/cliapp"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/httputil"
 	oplog "github.com/ethereum-optimism/optimism/op-service/log"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
@@ -144,11 +146,79 @@ func (s *Service) initMetricsServer(cfg *Config) error {
 }
 
 func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
-	backend, err := NewBackend(ctx, s.log, s.metrics, cfg)
-	if err != nil {
-		return err
+	chains := make(map[eth.ChainID]ChainIngester)
+	var chainLifecycle []interface{ Startable; Stoppable }
+
+	// Helper to cleanup on error
+	cleanup := func() {
+		for _, lc := range chainLifecycle {
+			_ = lc.Stop()
+		}
 	}
-	s.backend = backend
+
+	// Create chain ingesters for each L2 RPC
+	for _, rpcURL := range cfg.L2RPCs {
+		// Query chain ID from the RPC
+		ethClient, err := ethclient.Dial(rpcURL)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("failed to connect to %s: %w", rpcURL, err)
+		}
+		chainIDBig, err := ethClient.ChainID(ctx)
+		ethClient.Close()
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("failed to query chain ID from %s: %w", rpcURL, err)
+		}
+		chainID := eth.ChainIDFromBig(chainIDBig)
+
+		if _, exists := chains[chainID]; exists {
+			cleanup()
+			return fmt.Errorf("duplicate chain ID %s: multiple RPCs return the same chain ID", chainID)
+		}
+
+		s.log.Info("Creating chain ingester", "chain", chainID, "rpc", rpcURL)
+
+		ingester, err := NewLogsDBChainIngester(
+			ctx,
+			s.log,
+			s.metrics,
+			chainID,
+			rpcURL,
+			cfg.DataDir,
+			cfg.BackfillDuration,
+			cfg.PollInterval,
+		)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("failed to create chain ingester for chain %s: %w", chainID, err)
+		}
+
+		chains[chainID] = ingester
+		chainLifecycle = append(chainLifecycle, ingester)
+	}
+
+	// Create cross-validator
+	crossValidator := NewBackgroundCrossValidator(
+		ctx,
+		s.log,
+		s.metrics,
+		cfg.MessageExpiryWindow,
+		cfg.ValidationInterval,
+		chains,
+	)
+
+	s.backend = NewBackend(ctx, BackendParams{
+		Logger:                  s.log,
+		Metrics:                 s.metrics,
+		Config:                  cfg,
+		Chains:                  chains,
+		ChainLifecycle:          chainLifecycle,
+		CrossValidator:          crossValidator,
+		CrossValidatorLifecycle: crossValidator,
+	})
+
+	s.log.Info("Created backend", "chains", len(chains))
 	return nil
 }
 

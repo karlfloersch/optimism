@@ -2,7 +2,6 @@ package filter
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-interop-filter/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -32,7 +30,7 @@ func TestBackend_FailsafeEnabled(t *testing.T) {
 	require.False(t, backend.FailsafeEnabled())
 
 	// Chain error also enables failsafe
-	backend.chains[chainID].setError(ErrorReorg, "test error")
+	backend.chains[chainID].SetError(ErrorReorg, "test error")
 	require.True(t, backend.FailsafeEnabled())
 
 	// SetFailsafeEnabled(false) does NOT clear chain errors
@@ -49,7 +47,7 @@ func TestBackend_CheckAccessList_FailsafeEnabled(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 
 	// Enable failsafe by setting a chain error
-	backend.chains[chainID].setError(ErrorReorg, "test reorg")
+	backend.chains[chainID].SetError(ErrorReorg, "test reorg")
 
 	// CheckAccessList should return ErrFailsafeEnabled
 	err := backend.CheckAccessList(
@@ -96,7 +94,7 @@ func TestBackend_ChainError_EnablesFailsafe(t *testing.T) {
 	require.False(t, backend.FailsafeEnabled())
 
 	// Set an error on the chain ingester
-	backend.chains[chainID].setError(ErrorReorg, "test reorg")
+	backend.chains[chainID].SetError(ErrorReorg, "test reorg")
 
 	// Failsafe should now be enabled (derived from chain error state)
 	require.True(t, backend.FailsafeEnabled())
@@ -133,21 +131,20 @@ func newTestBackend(t *testing.T) *Backend {
 		ValidationInterval:  500 * time.Millisecond,
 		PollInterval:        2 * time.Second,
 	}
-	chains := make(map[eth.ChainID]*ChainIngester)
+	chains := make(map[eth.ChainID]ChainIngester)
 
-	b := &Backend{
-		log:     log.New(),
-		metrics: metrics.NoopMetrics,
-		cfg:     cfg,
-		chains:  chains,
-		ctx:     ctx,
-		cancel:  cancel,
-	}
+	// Create simple cross-validator
+	validator := NewSimpleCrossValidator(chains, cfg.MessageExpiryWindow)
 
-	// Create cross-validator (with empty chains initially)
-	b.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
-
-	return b
+	return NewBackend(ctx, BackendParams{
+		Logger:                  log.New(),
+		Metrics:                 metrics.NoopMetrics,
+		Config:                  cfg,
+		Chains:                  chains,
+		ChainLifecycle:          nil,
+		CrossValidator:          validator,
+		CrossValidatorLifecycle: &noopLifecycle{},
+	})
 }
 
 func newTestBackendWithMockChain(t *testing.T) *Backend {
@@ -160,57 +157,38 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 		PollInterval:        2 * time.Second,
 	}
 
-	// Add a mock chain ingester that reports as ready
+	// Add a memory chain ingester that reports as ready
 	chainID := eth.ChainIDFromUInt64(1)
-	mockIngester := &mockChainIngester{ready: true}
-	chains := map[eth.ChainID]*ChainIngester{
-		chainID: mockIngester.asChainIngester(),
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{
+		chainID: ingester,
 	}
 
-	b := &Backend{
-		log:     log.New(),
-		metrics: metrics.NoopMetrics,
-		cfg:     cfg,
-		chains:  chains,
-		ctx:     ctx,
-		cancel:  cancel,
-	}
+	// Create simple cross-validator
+	validator := NewSimpleCrossValidator(chains, cfg.MessageExpiryWindow)
 
-	// Create cross-validator with the mock chain
-	b.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
-
-	return b
+	return NewBackend(ctx, BackendParams{
+		Logger:                  log.New(),
+		Metrics:                 metrics.NoopMetrics,
+		Config:                  cfg,
+		Chains:                  chains,
+		ChainLifecycle:          nil,
+		CrossValidator:          validator,
+		CrossValidatorLifecycle: &noopLifecycle{},
+	})
 }
 
-// mockChainIngester provides a minimal mock for testing
-type mockChainIngester struct {
-	ready           bool
-	logsDB          *logs.DB
-	latestTimestamp uint64
-}
+// noopLifecycle implements Startable and Stoppable for testing
+type noopLifecycle struct{}
 
-// asChainIngester converts the mock into a real ChainIngester with only the ready field set
-// This is a workaround since we can't easily mock the ChainIngester struct
-func (m *mockChainIngester) asChainIngester() *ChainIngester {
-	c := &ChainIngester{
-		log:     log.New(),           // Required for setError() logging
-		metrics: metrics.NoopMetrics, // Required for setError() metrics
-	}
-	if m.ready {
-		c.ready.Store(true)
-	}
-	if m.logsDB != nil {
-		c.logsDB = m.logsDB
-	}
-	if m.latestTimestamp > 0 {
-		c.testLatestTimestamp.Store(m.latestTimestamp)
-	}
-	return c
-}
+func (n *noopLifecycle) Start() error { return nil }
+func (n *noopLifecycle) Stop() error  { return nil }
 
-func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
-	backend := newTestBackendWithMockChain(t)
+func TestSimpleCrossValidator_TimestampOrdering(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+	validator := NewSimpleCrossValidator(chains, 100)
 
 	tests := []struct {
 		name                      string
@@ -243,20 +221,23 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			execMsg := &types.ExecutingMessage{
+			access := types.Access{
 				ChainID:   chainID,
 				Timestamp: tc.initTimestamp,
 			}
+			execDescriptor := types.ExecutingDescriptor{
+				ChainID:   chainID,
+				Timestamp: tc.execMsgInclusionTimestamp,
+			}
 
-			err := backend.crossValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := validator.ValidateAccessEntry(access, types.LocalUnsafe, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)
 				require.ErrorIs(t, err, types.ErrConflict)
 				require.Contains(t, err.Error(), tc.errContains)
 			} else {
-				// If timestamp check passes, it will fail on Contains (no logsDB)
-				// That's expected - we're only testing timestamp logic here
+				// If timestamp check passes, it will fail on Contains (no logs in memory)
 				if err != nil {
 					require.NotContains(t, err.Error(), "not before inclusion timestamp")
 				}
@@ -265,10 +246,11 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 	}
 }
 
-func TestValidateExecutingMessage_Expiry(t *testing.T) {
-	backend := newTestBackendWithMockChain(t)
-	backend.crossValidator.cfg.MessageExpiryWindow = 100 // 100 seconds for easy math
+func TestSimpleCrossValidator_Expiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+	validator := NewSimpleCrossValidator(chains, 100) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -307,19 +289,23 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			execMsg := &types.ExecutingMessage{
+			access := types.Access{
 				ChainID:   chainID,
 				Timestamp: tc.initTimestamp,
 			}
+			execDescriptor := types.ExecutingDescriptor{
+				ChainID:   chainID,
+				Timestamp: tc.execMsgInclusionTimestamp,
+			}
 
-			err := backend.crossValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := validator.ValidateAccessEntry(access, types.LocalUnsafe, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)
 				require.ErrorIs(t, err, types.ErrConflict)
 				require.Contains(t, err.Error(), tc.errContains)
 			} else {
-				// If expiry check passes, it will fail on Contains (no logsDB)
+				// If expiry check passes, it will fail on Contains (no logs)
 				if err != nil {
 					require.NotContains(t, err.Error(), "expired")
 				}
@@ -328,24 +314,32 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 	}
 }
 
-func TestValidateExecutingMessage_UnknownChain(t *testing.T) {
-	backend := newTestBackendWithMockChain(t) // has chain 1
+func TestSimpleCrossValidator_UnknownChain(t *testing.T) {
+	chainID := eth.ChainIDFromUInt64(1)
 	unknownChainID := eth.ChainIDFromUInt64(999)
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+	validator := NewSimpleCrossValidator(chains, 100)
 
-	execMsg := &types.ExecutingMessage{
+	access := types.Access{
 		ChainID:   unknownChainID,
 		Timestamp: 100,
 	}
+	execDescriptor := types.ExecutingDescriptor{
+		ChainID:   chainID,
+		Timestamp: 200,
+	}
 
-	err := backend.crossValidator.ValidateExecutingMessage(execMsg, 200)
+	err := validator.ValidateAccessEntry(access, types.LocalUnsafe, execDescriptor)
 	require.Error(t, err)
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 }
 
-func TestValidateAccessEntry_TimeoutExpiry(t *testing.T) {
-	backend := newTestBackendWithMockChain(t)
-	backend.crossValidator.cfg.MessageExpiryWindow = 100
+func TestSimpleCrossValidator_TimeoutExpiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+	validator := NewSimpleCrossValidator(chains, 100) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -398,7 +392,7 @@ func TestValidateAccessEntry_TimeoutExpiry(t *testing.T) {
 				Timeout:   tc.timeout,
 			}
 
-			err := backend.crossValidator.ValidateAccessEntry(access,types.LocalUnsafe, execDescriptor)
+			err := validator.ValidateAccessEntry(access, types.LocalUnsafe, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -414,38 +408,14 @@ func TestValidateAccessEntry_TimeoutExpiry(t *testing.T) {
 	}
 }
 
-func TestValidateAccessEntry_CrossUnsafeTimestamp(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cfg := &Config{
-		MessageExpiryWindow: 1000,
-		ValidationInterval:  500 * time.Millisecond,
-		PollInterval:        2 * time.Second,
-	}
+func TestSimpleCrossValidator_CrossUnsafeTimestamp(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
+	ingester := NewMemoryChainIngester()
+	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+	validator := NewSimpleCrossValidator(chains, 1000)
 
-	// Create a mock chain with latestTimestamp of 500
-	mockIngester := &mockChainIngester{ready: true, latestTimestamp: 500}
-	chains := map[eth.ChainID]*ChainIngester{
-		chainID: mockIngester.asChainIngester(),
-	}
-
-	backend := &Backend{
-		log:     log.New(),
-		metrics: metrics.NoopMetrics,
-		cfg:     cfg,
-		chains:  chains,
-		ctx:     ctx,
-		cancel:  cancel,
-	}
-
-	// Create cross-validator with the mock chain AND set a cross-validated timestamp
-	backend.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
-	// Manually set the cross-validated timestamp to match latestTimestamp for testing
-	tsPtr, _ := backend.crossValidator.crossValidatedTs.Load(chainID)
-	tsPtr.(*atomic.Uint64).Store(500)
-	backend.crossValidator.globalCrossValidatedTs.Store(500)
+	// Set cross-validated timestamp to 500
+	validator.SetCrossValidatedTimestamp(500)
 
 	tests := []struct {
 		name          string
@@ -492,7 +462,7 @@ func TestValidateAccessEntry_CrossUnsafeTimestamp(t *testing.T) {
 				Timestamp: tc.initTimestamp + 100, // always valid exec timestamp
 			}
 
-			err := backend.crossValidator.ValidateAccessEntry(access,tc.safetyLevel, execDescriptor)
+			err := validator.ValidateAccessEntry(access, tc.safetyLevel, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)
