@@ -144,8 +144,8 @@ func newTestBackend(t *testing.T) *Backend {
 		cancel:  cancel,
 	}
 
-	// Create cross-message validator (with empty chains initially)
-	b.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	// Create cross-validator (with empty chains initially)
+	b.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 
 	return b
 }
@@ -176,8 +176,8 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 		cancel:  cancel,
 	}
 
-	// Create cross-message validator with the mock chain
-	b.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	// Create cross-validator with the mock chain
+	b.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 
 	return b
 }
@@ -248,7 +248,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.crossMessageValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := backend.crossValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -267,7 +267,7 @@ func TestValidateExecutingMessage_TimestampOrdering(t *testing.T) {
 
 func TestValidateExecutingMessage_Expiry(t *testing.T) {
 	backend := newTestBackendWithMockChain(t)
-	backend.crossMessageValidator.cfg.MessageExpiryWindow = 100 // 100 seconds for easy math
+	backend.crossValidator.cfg.MessageExpiryWindow = 100 // 100 seconds for easy math
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
@@ -312,7 +312,7 @@ func TestValidateExecutingMessage_Expiry(t *testing.T) {
 				Timestamp: tc.initTimestamp,
 			}
 
-			err := backend.crossMessageValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
+			err := backend.crossValidator.ValidateExecutingMessage(execMsg, tc.execMsgInclusionTimestamp)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -337,14 +337,14 @@ func TestValidateExecutingMessage_UnknownChain(t *testing.T) {
 		Timestamp: 100,
 	}
 
-	err := backend.crossMessageValidator.ValidateExecutingMessage(execMsg, 200)
+	err := backend.crossValidator.ValidateExecutingMessage(execMsg, 200)
 	require.Error(t, err)
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 }
 
 func TestValidateAccessEntry_TimeoutExpiry(t *testing.T) {
 	backend := newTestBackendWithMockChain(t)
-	backend.crossMessageValidator.cfg.MessageExpiryWindow = 100
+	backend.crossValidator.cfg.MessageExpiryWindow = 100
 	chainID := eth.ChainIDFromUInt64(1)
 
 	tests := []struct {
@@ -398,7 +398,7 @@ func TestValidateAccessEntry_TimeoutExpiry(t *testing.T) {
 				Timeout:   tc.timeout,
 			}
 
-			err := backend.crossMessageValidator.ValidateAccessEntry(access,types.LocalUnsafe, execDescriptor)
+			err := backend.crossValidator.ValidateAccessEntry(access,types.LocalUnsafe, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -440,12 +440,12 @@ func TestValidateAccessEntry_CrossUnsafeTimestamp(t *testing.T) {
 		cancel:  cancel,
 	}
 
-	// Create cross-message validator with the mock chain AND set a cross-validated timestamp
-	backend.crossMessageValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
+	// Create cross-validator with the mock chain AND set a cross-validated timestamp
+	backend.crossValidator = NewCrossValidator(ctx, log.New(), metrics.NoopMetrics, cfg, chains)
 	// Manually set the cross-validated timestamp to match latestTimestamp for testing
-	tsPtr, _ := backend.crossMessageValidator.crossValidatedTs.Load(chainID)
+	tsPtr, _ := backend.crossValidator.crossValidatedTs.Load(chainID)
 	tsPtr.(*atomic.Uint64).Store(500)
-	backend.crossMessageValidator.globalCrossValidatedTs.Store(500)
+	backend.crossValidator.globalCrossValidatedTs.Store(500)
 
 	tests := []struct {
 		name          string
@@ -492,7 +492,7 @@ func TestValidateAccessEntry_CrossUnsafeTimestamp(t *testing.T) {
 				Timestamp: tc.initTimestamp + 100, // always valid exec timestamp
 			}
 
-			err := backend.crossMessageValidator.ValidateAccessEntry(access,tc.safetyLevel, execDescriptor)
+			err := backend.crossValidator.ValidateAccessEntry(access,tc.safetyLevel, execDescriptor)
 
 			if tc.wantErr {
 				require.Error(t, err)

@@ -26,9 +26,9 @@ type Backend struct {
 	// Immutable after NewBackend returns; safe for concurrent reads.
 	chains map[eth.ChainID]*ChainIngester
 
-	// Cross-message validator handles all cross-chain message validation.
+	// Cross-validator handles all cross-chain message validation.
 	// Runs a validation loop and tracks the cross-validated timestamp.
-	crossMessageValidator *CrossValidator
+	crossValidator *CrossValidator
 
 	// Manual failsafe override - when set, failsafe is enabled regardless of chain state.
 	// Uses atomic.Bool for thread-safe access from concurrent goroutines.
@@ -102,14 +102,14 @@ func NewBackend(parentCtx context.Context, logger log.Logger, m metrics.Metricer
 		b.chains[chainID] = ingester
 	}
 
-	// Create cross-message validator after all chain ingesters are created
-	b.crossMessageValidator = NewCrossValidator(ctx, logger, m, cfg, b.chains)
+	// Create cross-validator after all chain ingesters are created
+	b.crossValidator = NewCrossValidator(ctx, logger, m, cfg, b.chains)
 
 	logger.Info("Created backend", "chains", len(b.chains))
 	return b, nil
 }
 
-// Start starts all chain ingesters and the cross-message validator
+// Start starts all chain ingesters and the cross-validator
 func (b *Backend) Start(ctx context.Context) error {
 	b.log.Info("Starting backend")
 
@@ -119,24 +119,24 @@ func (b *Backend) Start(ctx context.Context) error {
 		}
 	}
 
-	// Start cross-message validator after chain ingesters
-	if err := b.crossMessageValidator.Start(); err != nil {
-		return fmt.Errorf("failed to start cross-message validator: %w", err)
+	// Start cross-validator after chain ingesters
+	if err := b.crossValidator.Start(); err != nil {
+		return fmt.Errorf("failed to start cross-validator: %w", err)
 	}
 
 	return nil
 }
 
-// Stop stops all chain ingesters and the cross-message validator
+// Stop stops all chain ingesters and the cross-validator
 func (b *Backend) Stop(ctx context.Context) error {
 	b.log.Info("Stopping backend")
 	b.cancel()
 
 	var result error
 
-	// Stop cross-message validator first
-	if err := b.crossMessageValidator.Stop(); err != nil {
-		result = errors.Join(result, fmt.Errorf("failed to stop cross-message validator: %w", err))
+	// Stop cross-validator first
+	if err := b.crossValidator.Stop(); err != nil {
+		result = errors.Join(result, fmt.Errorf("failed to stop cross-validator: %w", err))
 	}
 
 	for chainID, ingester := range b.chains {
@@ -224,8 +224,8 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 			return fmt.Errorf("failed to parse access entry: %w", err)
 		}
 
-		// Validate the access entry using the cross-message validator
-		if err := b.crossMessageValidator.ValidateAccessEntry(access, minSafety, execDescriptor); err != nil {
+		// Validate the access entry using the cross-validator
+		if err := b.crossValidator.ValidateAccessEntry(access, minSafety, execDescriptor); err != nil {
 			b.metrics.RecordCheckAccessList(false)
 			return err
 		}

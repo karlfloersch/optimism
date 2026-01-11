@@ -101,7 +101,7 @@ func NewCrossValidator(
 
 // Start starts the validation loop
 func (v *CrossValidator) Start() error {
-	v.log.Info("Starting cross-message validator", "chains", len(v.chains))
+	v.log.Info("Starting cross-validator", "chains", len(v.chains))
 
 	v.wg.Add(1)
 	go v.runValidationLoop()
@@ -111,7 +111,7 @@ func (v *CrossValidator) Start() error {
 
 // Stop stops the validation loop
 func (v *CrossValidator) Stop() error {
-	v.log.Info("Stopping cross-message validator")
+	v.log.Info("Stopping cross-validator")
 	v.cancel()
 	v.wg.Wait()
 	return nil
