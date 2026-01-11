@@ -15,8 +15,8 @@ type MemoryChainIngester struct {
 	// Logs stored by their identifying query
 	logs map[logKey]types.BlockSeal
 
-	// Blocks with their executing messages
-	blocks []BlockExecMsgs
+	// Executing messages with their inclusion context
+	execMsgs []IncludedMessage
 
 	// State
 	ready            bool
@@ -37,9 +37,9 @@ type logKey struct {
 // NewMemoryChainIngester creates a new in-memory chain ingester.
 func NewMemoryChainIngester() *MemoryChainIngester {
 	return &MemoryChainIngester{
-		logs:   make(map[logKey]types.BlockSeal),
-		blocks: make([]BlockExecMsgs, 0),
-		ready:  true, // Default to ready for simple tests
+		logs:     make(map[logKey]types.BlockSeal),
+		execMsgs: make([]IncludedMessage, 0),
+		ready:    true, // Default to ready for simple tests
 	}
 }
 
@@ -66,20 +66,20 @@ func (m *MemoryChainIngester) AddLog(timestamp, blockNum uint64, logIdx uint32, 
 	}
 }
 
-// AddBlock adds a block with its executing messages.
-func (m *MemoryChainIngester) AddBlock(block BlockExecMsgs) {
+// AddExecMsg adds an executing message with its inclusion context.
+func (m *MemoryChainIngester) AddExecMsg(msg IncludedMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.blocks = append(m.blocks, block)
+	m.execMsgs = append(m.execMsgs, msg)
 
 	// Update latest block/timestamp if needed
-	if block.BlockNum > m.latestBlock.Number {
-		m.latestBlock = eth.BlockID{Number: block.BlockNum}
-		m.latestTimestamp = block.Timestamp
+	if msg.InclusionBlockNum > m.latestBlock.Number {
+		m.latestBlock = eth.BlockID{Number: msg.InclusionBlockNum}
+		m.latestTimestamp = msg.InclusionTimestamp
 	}
-	if m.earliestBlockNum == 0 || block.BlockNum < m.earliestBlockNum {
-		m.earliestBlockNum = block.BlockNum
+	if m.earliestBlockNum == 0 || msg.InclusionBlockNum < m.earliestBlockNum {
+		m.earliestBlockNum = msg.InclusionBlockNum
 	}
 }
 
@@ -142,15 +142,15 @@ func (m *MemoryChainIngester) EarliestBlockNum() (uint64, bool) {
 	return m.earliestBlockNum, true
 }
 
-// GetBlocksInRange implements ChainIngester.
-func (m *MemoryChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockExecMsgs, error) {
+// GetExecMsgsInRange implements ChainIngester.
+func (m *MemoryChainIngester) GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var result []BlockExecMsgs
-	for _, block := range m.blocks {
-		if block.BlockNum >= startBlock && block.BlockNum <= endBlock {
-			result = append(result, block)
+	var result []IncludedMessage
+	for _, msg := range m.execMsgs {
+		if msg.InclusionBlockNum >= startBlock && msg.InclusionBlockNum <= endBlock {
+			result = append(result, msg)
 		}
 	}
 	return result, nil

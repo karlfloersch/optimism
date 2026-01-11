@@ -315,8 +315,8 @@ func (c *LogsDBChainIngester) EarliestBlockNum() (uint64, bool) {
 	return c.earliestBlockNum.Load(), true
 }
 
-// GetBlocksInRange returns block info for all blocks from startBlock to endBlock (inclusive).
-func (c *LogsDBChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]BlockExecMsgs, error) {
+// GetExecMsgsInRange returns executing messages in the given block range.
+func (c *LogsDBChainIngester) GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -324,25 +324,20 @@ func (c *LogsDBChainIngester) GetBlocksInRange(startBlock, endBlock uint64) ([]B
 		return nil, types.ErrUninitialized
 	}
 
-	results := make([]BlockExecMsgs, 0, endBlock-startBlock+1)
+	var results []IncludedMessage
 	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
 		ref, _, execMsgs, err := c.logsDB.OpenBlock(blockNum)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open block %d: %w", blockNum, err)
 		}
 
-		var msgs []*types.ExecutingMessage
-		if len(execMsgs) > 0 {
-			msgs = make([]*types.ExecutingMessage, 0, len(execMsgs))
-			for _, msg := range execMsgs {
-				msgs = append(msgs, msg)
-			}
+		for _, msg := range execMsgs {
+			results = append(results, IncludedMessage{
+				ExecutingMessage:   msg,
+				InclusionBlockNum:  blockNum,
+				InclusionTimestamp: ref.Time,
+			})
 		}
-		results = append(results, BlockExecMsgs{
-			BlockNum:  blockNum,
-			Timestamp: ref.Time,
-			ExecMsgs:  msgs,
-		})
 	}
 
 	return results, nil

@@ -233,26 +233,24 @@ func (v *BackgroundCrossValidator) validateChain(
 ) error {
 	currentTs, _ := v.ChainCrossValidatedTimestamp(chainID)
 
-	blocks, err := v.getBlocksForValidation(chainID, ingester, maxTimestamp)
+	msgs, err := v.getExecMsgsForValidation(chainID, ingester, maxTimestamp)
 	if err != nil {
-		return fmt.Errorf("failed to get blocks for validation: %w", err)
+		return fmt.Errorf("failed to get messages for validation: %w", err)
 	}
 
-	if len(blocks) == 0 {
+	if len(msgs) == 0 {
 		return nil
 	}
 
 	var newValidatedTs uint64
 	var newValidatedBlockNum uint64
-	for _, block := range blocks {
-		for _, execMsg := range block.ExecMsgs {
-			if err := v.validateExecutingMessage(execMsg, block.Timestamp); err != nil {
-				return fmt.Errorf("validation failed at block %d, log %d: %w",
-					block.BlockNum, execMsg.LogIdx, err)
-			}
+	for _, msg := range msgs {
+		if err := v.validateExecutingMessage(msg.ExecutingMessage, msg.InclusionTimestamp); err != nil {
+			return fmt.Errorf("validation failed at block %d, log %d: %w",
+				msg.InclusionBlockNum, msg.LogIdx, err)
 		}
-		newValidatedTs = block.Timestamp
-		newValidatedBlockNum = block.BlockNum
+		newValidatedTs = msg.InclusionTimestamp
+		newValidatedBlockNum = msg.InclusionBlockNum
 	}
 
 	if newValidatedBlockNum > 0 {
@@ -273,11 +271,11 @@ func (v *BackgroundCrossValidator) validateChain(
 	return nil
 }
 
-func (v *BackgroundCrossValidator) getBlocksForValidation(
+func (v *BackgroundCrossValidator) getExecMsgsForValidation(
 	chainID eth.ChainID,
 	ingester ChainIngester,
 	maxTimestamp uint64,
-) ([]BlockExecMsgs, error) {
+) ([]IncludedMessage, error) {
 	latestBlock, ok := ingester.LatestBlock()
 	if !ok {
 		return nil, nil
@@ -304,15 +302,15 @@ func (v *BackgroundCrossValidator) getBlocksForValidation(
 		return nil, nil
 	}
 
-	blocks, err := ingester.GetBlocksInRange(startBlockNum, latestBlock.Number)
+	msgs, err := ingester.GetExecMsgsInRange(startBlockNum, latestBlock.Number)
 	if err != nil {
 		return nil, err
 	}
 
-	var result []BlockExecMsgs
-	for _, block := range blocks {
-		if block.Timestamp <= maxTimestamp {
-			result = append(result, block)
+	var result []IncludedMessage
+	for _, msg := range msgs {
+		if msg.InclusionTimestamp <= maxTimestamp {
+			result = append(result, msg)
 		}
 	}
 

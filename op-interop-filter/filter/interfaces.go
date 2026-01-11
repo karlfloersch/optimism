@@ -5,11 +5,13 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// BlockExecMsgs contains a block's executing messages for validation.
-type BlockExecMsgs struct {
-	BlockNum  uint64
-	Timestamp uint64
-	ExecMsgs  []*types.ExecutingMessage
+// IncludedMessage wraps an executing message with its inclusion context.
+// The ExecutingMessage contains the initiating message's data (source chain),
+// while InclusionBlockNum/Timestamp indicate when it was executed (this chain).
+type IncludedMessage struct {
+	*types.ExecutingMessage
+	InclusionBlockNum  uint64
+	InclusionTimestamp uint64
 }
 
 // ChainIngester provides access to chain logs and state.
@@ -29,8 +31,8 @@ type ChainIngester interface {
 	// EarliestBlockNum returns the earliest block number in the database.
 	EarliestBlockNum() (uint64, bool)
 
-	// GetBlocksInRange returns blocks with their executing messages.
-	GetBlocksInRange(startBlock, endBlock uint64) ([]BlockExecMsgs, error)
+	// GetExecMsgsInRange returns executing messages in the given block range.
+	GetExecMsgsInRange(startBlock, endBlock uint64) ([]IncludedMessage, error)
 
 	// Ready returns true if the ingester has completed initial sync.
 	Ready() bool
