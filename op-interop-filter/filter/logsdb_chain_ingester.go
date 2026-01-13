@@ -536,10 +536,8 @@ func (c *LogsDBChainIngester) initIngestion() (uint64, error) {
 	}
 
 	// Fresh start: seal parent block as anchor
-	if startingBlock > 0 {
-		if err := c.sealParentBlock(startingBlock - 1); err != nil {
-			return 0, fmt.Errorf("failed to seal parent block: %w", err)
-		}
+	if err := c.sealParentBlock(startingBlock - 1); err != nil {
+		return 0, fmt.Errorf("failed to seal parent block: %w", err)
 	}
 
 	c.log.Info("Starting fresh ingestion",
