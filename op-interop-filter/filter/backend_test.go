@@ -133,8 +133,10 @@ func newTestBackend(t *testing.T) *Backend {
 	}
 	chains := make(map[eth.ChainID]ChainIngester)
 
-	// Create simple cross-validator
-	validator := NewMockCrossValidator(chains, cfg.MessageExpiryWindow)
+	validator := NewLockstepCrossValidator(
+		ctx, log.New(), metrics.NoopMetrics,
+		cfg.MessageExpiryWindow, time.Hour, chains, 0,
+	)
 
 	return NewBackend(ctx, BackendParams{
 		Logger:         log.New(),
@@ -142,6 +144,15 @@ func newTestBackend(t *testing.T) *Backend {
 		Chains:         chains,
 		CrossValidator: validator,
 	})
+}
+
+// newTestCrossValidator creates a LockstepCrossValidator for testing.
+// Uses time.Hour interval so validation loop never ticks during tests.
+func newTestCrossValidator(chains map[eth.ChainID]ChainIngester, expiryWindow uint64, crossValidatedTs uint64) *LockstepCrossValidator {
+	return NewLockstepCrossValidator(
+		context.Background(), log.New(), metrics.NoopMetrics,
+		expiryWindow, time.Hour, chains, crossValidatedTs,
+	)
 }
 
 func newTestBackendWithMockChain(t *testing.T) *Backend {
@@ -161,8 +172,10 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 		chainID: ingester,
 	}
 
-	// Create simple cross-validator
-	validator := NewMockCrossValidator(chains, cfg.MessageExpiryWindow)
+	validator := NewLockstepCrossValidator(
+		ctx, log.New(), metrics.NoopMetrics,
+		cfg.MessageExpiryWindow, time.Hour, chains, 0,
+	)
 
 	return NewBackend(ctx, BackendParams{
 		Logger:         log.New(),
@@ -172,11 +185,11 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 	})
 }
 
-func TestMockCrossValidator_TimestampOrdering(t *testing.T) {
+func TestCrossValidator_TimestampOrdering(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewMockCrossValidator(chains, 100)
+	validator := newTestCrossValidator(chains, 100, 0)
 
 	tests := []struct {
 		name                      string
@@ -234,11 +247,11 @@ func TestMockCrossValidator_TimestampOrdering(t *testing.T) {
 	}
 }
 
-func TestMockCrossValidator_Expiry(t *testing.T) {
+func TestCrossValidator_Expiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewMockCrossValidator(chains, 100) // 100 seconds expiry
+	validator := newTestCrossValidator(chains, 100, 0) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -302,12 +315,12 @@ func TestMockCrossValidator_Expiry(t *testing.T) {
 	}
 }
 
-func TestMockCrossValidator_UnknownChain(t *testing.T) {
+func TestCrossValidator_UnknownChain(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	unknownChainID := eth.ChainIDFromUInt64(999)
 	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewMockCrossValidator(chains, 100)
+	validator := newTestCrossValidator(chains, 100, 0)
 
 	access := types.Access{
 		ChainID:   unknownChainID,
@@ -323,11 +336,11 @@ func TestMockCrossValidator_UnknownChain(t *testing.T) {
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 }
 
-func TestMockCrossValidator_TimeoutExpiry(t *testing.T) {
+func TestCrossValidator_TimeoutExpiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewMockCrossValidator(chains, 100) // 100 seconds expiry
+	validator := newTestCrossValidator(chains, 100, 0) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -401,11 +414,6 @@ type ValidatorFactory func(chains map[eth.ChainID]ChainIngester, expiryWindow ui
 
 // validatorFactories contains factories for all CrossValidator implementations.
 var validatorFactories = map[string]ValidatorFactory{
-	"MockCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
-		v := NewMockCrossValidator(chains, expiry)
-		v.SetCrossValidatedTimestamp(crossTs)
-		return v
-	},
 	"LockstepCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
 		return NewLockstepCrossValidator(
 			context.Background(),
@@ -615,14 +623,11 @@ func runPortableValidationTests(t *testing.T, createValidator ValidatorFactory) 
 	})
 }
 
-func TestMockCrossValidator_CrossUnsafeTimestamp(t *testing.T) {
+func TestCrossValidator_CrossUnsafeTimestamp(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewMockCrossValidator(chains, 1000)
-
-	// Set cross-validated timestamp to 500
-	validator.SetCrossValidatedTimestamp(500)
+	validator := newTestCrossValidator(chains, 1000, 500) // cross-validated timestamp = 500
 
 	tests := []struct {
 		name          string
