@@ -182,3 +182,47 @@ func ValidateGraph(g *DependencyGraph) error {
 
 	return nil
 }
+
+// ValidateInteropTimeMatch validates that a chain's first dependency_updates timestamp
+// matches its interop_time from the hardforks section.
+// This ensures the dependency set activates exactly when interop activates.
+func ValidateInteropTimeMatch(cfg *ChainDependencyConfigWithInteropTime) error {
+	if len(cfg.DependencyUpdates) == 0 {
+		return &ValidationError{
+			ChainID: &cfg.ChainID,
+			Message: "chain has interop_time but no dependency_updates",
+		}
+	}
+
+	firstUpdate := cfg.DependencyUpdates[0]
+	if firstUpdate.Timestamp != cfg.InteropTime {
+		return &ValidationError{
+			ChainID:   &cfg.ChainID,
+			Timestamp: firstUpdate.Timestamp,
+			Message: fmt.Sprintf(
+				"first dependency_updates timestamp (%d) must match interop_time (%d)",
+				firstUpdate.Timestamp, cfg.InteropTime,
+			),
+		}
+	}
+
+	return nil
+}
+
+// ValidateAllInteropTimes validates that all chains' first dependency_updates timestamps
+// match their respective interop_times.
+func ValidateAllInteropTimes(configs []ChainDependencyConfigWithInteropTime) error {
+	var errs []error
+
+	for _, cfg := range configs {
+		if err := ValidateInteropTimeMatch(&cfg); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return nil
+}

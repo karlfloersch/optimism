@@ -33,6 +33,16 @@ type TemporalDependencyConfig struct {
 	Chains []ChainDependencyConfig `json:"chains" toml:"chains"`
 }
 
+// ChainDependencyConfigWithInteropTime pairs a chain's dependency config with its interop activation time.
+// This is used for validation to ensure the first dependency_updates timestamp matches interop_time.
+type ChainDependencyConfigWithInteropTime struct {
+	ChainDependencyConfig
+
+	// InteropTime is the timestamp when interop activates for this chain (from hardforks section).
+	// The first DependencyUpdate timestamp must match this value.
+	InteropTime uint64 `json:"interop_time" toml:"interop_time"`
+}
+
 // ChainIDs returns the list of all chain IDs in the configuration.
 func (c *TemporalDependencyConfig) ChainIDs() []eth.ChainID {
 	ids := make([]eth.ChainID, len(c.Chains))

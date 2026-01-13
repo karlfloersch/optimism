@@ -487,3 +487,104 @@ func TestNewValidatedTemporalDependencySet_Invalid(t *testing.T) {
 	_, err := NewValidatedTemporalDependencySet(cfg)
 	require.Error(t, err)
 }
+
+// --- Interop Time Validation Tests ---
+
+func TestValidateInteropTimeMatch_Valid(t *testing.T) {
+	cfg := &ChainDependencyConfigWithInteropTime{
+		ChainDependencyConfig: ChainDependencyConfig{
+			ChainID: chainID(1),
+			DependencyUpdates: []DependencyUpdate{
+				{Timestamp: 1000, Dependencies: []eth.ChainID{chainID(2)}},
+				{Timestamp: 2000, Dependencies: []eth.ChainID{chainID(2), chainID(3)}},
+			},
+		},
+		InteropTime: 1000, // Matches first dependency_updates timestamp
+	}
+
+	err := ValidateInteropTimeMatch(cfg)
+	require.NoError(t, err)
+}
+
+func TestValidateInteropTimeMatch_Mismatch(t *testing.T) {
+	cfg := &ChainDependencyConfigWithInteropTime{
+		ChainDependencyConfig: ChainDependencyConfig{
+			ChainID: chainID(1),
+			DependencyUpdates: []DependencyUpdate{
+				{Timestamp: 1000, Dependencies: []eth.ChainID{chainID(2)}},
+			},
+		},
+		InteropTime: 500, // Does NOT match first dependency_updates timestamp
+	}
+
+	err := ValidateInteropTimeMatch(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must match interop_time")
+}
+
+func TestValidateInteropTimeMatch_NoDependencyUpdates(t *testing.T) {
+	cfg := &ChainDependencyConfigWithInteropTime{
+		ChainDependencyConfig: ChainDependencyConfig{
+			ChainID:           chainID(1),
+			DependencyUpdates: []DependencyUpdate{}, // Empty!
+		},
+		InteropTime: 1000,
+	}
+
+	err := ValidateInteropTimeMatch(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no dependency_updates")
+}
+
+func TestValidateAllInteropTimes(t *testing.T) {
+	configs := []ChainDependencyConfigWithInteropTime{
+		{
+			ChainDependencyConfig: ChainDependencyConfig{
+				ChainID: chainID(1),
+				DependencyUpdates: []DependencyUpdate{
+					{Timestamp: 1000, Dependencies: []eth.ChainID{chainID(2)}},
+				},
+			},
+			InteropTime: 1000, // Valid
+		},
+		{
+			ChainDependencyConfig: ChainDependencyConfig{
+				ChainID: chainID(2),
+				DependencyUpdates: []DependencyUpdate{
+					{Timestamp: 1000, Dependencies: []eth.ChainID{}},
+				},
+			},
+			InteropTime: 1000, // Valid
+		},
+	}
+
+	err := ValidateAllInteropTimes(configs)
+	require.NoError(t, err)
+}
+
+func TestValidateAllInteropTimes_OneMismatch(t *testing.T) {
+	configs := []ChainDependencyConfigWithInteropTime{
+		{
+			ChainDependencyConfig: ChainDependencyConfig{
+				ChainID: chainID(1),
+				DependencyUpdates: []DependencyUpdate{
+					{Timestamp: 1000, Dependencies: []eth.ChainID{chainID(2)}},
+				},
+			},
+			InteropTime: 1000, // Valid
+		},
+		{
+			ChainDependencyConfig: ChainDependencyConfig{
+				ChainID: chainID(2),
+				DependencyUpdates: []DependencyUpdate{
+					{Timestamp: 2000, Dependencies: []eth.ChainID{}},
+				},
+			},
+			InteropTime: 1000, // Mismatch!
+		},
+	}
+
+	err := ValidateAllInteropTimes(configs)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must match interop_time")
+}
