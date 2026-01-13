@@ -202,7 +202,7 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 	s.log.Info("Cross-validator will start at timestamp", "timestamp", minHeadTimestamp)
 
 	// Create cross-validator with known start timestamp
-	crossValidator := NewBackgroundCrossValidator(
+	crossValidator := NewLockstepCrossValidator(
 		ctx,
 		s.log,
 		s.metrics,

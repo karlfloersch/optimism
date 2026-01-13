@@ -15,11 +15,21 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// BackgroundCrossValidator validates cross-chain executing messages and tracks
-// the cross-validated timestamp. It runs a background validation loop that advances
-// the cross-validated timestamp one step at a time, validating all messages at each
-// timestamp across all chains.
-type BackgroundCrossValidator struct {
+// LockstepCrossValidator validates cross-chain executing messages and tracks
+// the cross-validated timestamp.
+//
+// "Lockstep" refers to its synchronization model: all chains must reach the same
+// timestamp before validation can advance. This is simpler but means a slow chain
+// holds back validation for all chains.
+//
+// Simplifications in this implementation:
+//   - No cycle detection: same-block executing messages are not supported
+//   - Lockstep advancement: waits for ALL chains to reach timestamp T before
+//     validating T, rather than validating each chain independently
+//
+// Future improvement: per-chain validation that tracks cross-validated timestamp
+// independently for each chain, allowing faster chains to advance without waiting.
+type LockstepCrossValidator struct {
 	log     log.Logger
 	metrics metrics.Metricer
 
@@ -37,10 +47,10 @@ type BackgroundCrossValidator struct {
 	wg     sync.WaitGroup
 }
 
-// NewBackgroundCrossValidator creates a new BackgroundCrossValidator.
+// NewLockstepCrossValidator creates a new LockstepCrossValidator.
 // startTimestamp is the initial cross-validated timestamp (typically the
 // chain head timestamp at startup, before backfill begins).
-func NewBackgroundCrossValidator(
+func NewLockstepCrossValidator(
 	parentCtx context.Context,
 	logger log.Logger,
 	m metrics.Metricer,
@@ -48,10 +58,10 @@ func NewBackgroundCrossValidator(
 	validationInterval time.Duration,
 	chains map[eth.ChainID]ChainIngester,
 	startTimestamp uint64,
-) *BackgroundCrossValidator {
+) *LockstepCrossValidator {
 	ctx, cancel := context.WithCancel(parentCtx)
 
-	v := &BackgroundCrossValidator{
+	v := &LockstepCrossValidator{
 		log:                 logger.New("component", "cross-validator"),
 		metrics:             m,
 		messageExpiryWindow: messageExpiryWindow,
@@ -65,7 +75,7 @@ func NewBackgroundCrossValidator(
 }
 
 // Start starts the validation loop
-func (v *BackgroundCrossValidator) Start() error {
+func (v *LockstepCrossValidator) Start() error {
 	v.log.Info("Starting cross-validator", "chains", len(v.chains))
 
 	v.wg.Add(1)
@@ -75,7 +85,7 @@ func (v *BackgroundCrossValidator) Start() error {
 }
 
 // Stop stops the validation loop
-func (v *BackgroundCrossValidator) Stop() error {
+func (v *LockstepCrossValidator) Stop() error {
 	v.log.Info("Stopping cross-validator")
 	v.cancel()
 	v.wg.Wait()
@@ -83,7 +93,7 @@ func (v *BackgroundCrossValidator) Stop() error {
 }
 
 // CrossValidatedTimestamp returns the global cross-validated timestamp.
-func (v *BackgroundCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
+func (v *LockstepCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 	ts := v.crossValidatedTs.Load()
 	if ts == 0 {
 		return 0, false
@@ -92,7 +102,7 @@ func (v *BackgroundCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 }
 
 // ValidateAccessEntry validates a single access list entry against all message validity rules.
-func (v *BackgroundCrossValidator) ValidateAccessEntry(
+func (v *LockstepCrossValidator) ValidateAccessEntry(
 	access types.Access,
 	minSafety types.SafetyLevel,
 	execDescriptor types.ExecutingDescriptor,
@@ -134,7 +144,7 @@ func (v *BackgroundCrossValidator) ValidateAccessEntry(
 	return v.validateExecutingMessage(execMsg, execDescriptor.Timestamp)
 }
 
-func (v *BackgroundCrossValidator) validateExecutingMessage(
+func (v *LockstepCrossValidator) validateExecutingMessage(
 	execMsg *types.ExecutingMessage,
 	inclusionTimestamp uint64,
 ) error {
@@ -157,7 +167,7 @@ func (v *BackgroundCrossValidator) validateExecutingMessage(
 	return err
 }
 
-func (v *BackgroundCrossValidator) runValidationLoop() {
+func (v *LockstepCrossValidator) runValidationLoop() {
 	defer v.wg.Done()
 
 	ticker := time.NewTicker(v.validationInterval)
@@ -174,7 +184,7 @@ func (v *BackgroundCrossValidator) runValidationLoop() {
 }
 
 // advanceValidation tries to advance the cross-validated timestamp one step at a time.
-func (v *BackgroundCrossValidator) advanceValidation() {
+func (v *LockstepCrossValidator) advanceValidation() {
 	// All chains must be ready and error-free
 	for _, ingester := range v.chains {
 		if ingester.Error() != nil {
@@ -221,7 +231,7 @@ func (v *BackgroundCrossValidator) advanceValidation() {
 
 // validateTimestamp validates all executing messages with the given inclusion timestamp
 // across all chains.
-func (v *BackgroundCrossValidator) validateTimestamp(timestamp uint64) error {
+func (v *LockstepCrossValidator) validateTimestamp(timestamp uint64) error {
 	for chainID, ingester := range v.chains {
 		msgs, err := ingester.GetExecMsgsAtTimestamp(timestamp)
 		if err != nil {
@@ -240,7 +250,7 @@ func (v *BackgroundCrossValidator) validateTimestamp(timestamp uint64) error {
 	return nil
 }
 
-func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
+func (v *LockstepCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 	if len(v.chains) == 0 {
 		return 0, false
 	}
@@ -266,5 +276,5 @@ func (v *BackgroundCrossValidator) getMinIngestedTimestamp() (uint64, bool) {
 	return minTs, true
 }
 
-// Ensure BackgroundCrossValidator implements CrossValidator
-var _ CrossValidator = (*BackgroundCrossValidator)(nil)
+// Ensure LockstepCrossValidator implements CrossValidator
+var _ CrossValidator = (*LockstepCrossValidator)(nil)

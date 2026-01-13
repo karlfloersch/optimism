@@ -53,7 +53,7 @@ type ChainIngester interface {
 // CrossValidator validates cross-chain messages.
 // Implementations include:
 //   - MockCrossValidator: synchronous, for testing
-//   - BackgroundCrossValidator: runs background validation loop, for production
+//   - LockstepCrossValidator: waits for all chains to align before advancing
 type CrossValidator interface {
 	// Start begins the validator's background processing.
 	Start() error

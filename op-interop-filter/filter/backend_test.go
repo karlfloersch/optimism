@@ -406,8 +406,8 @@ var validatorFactories = map[string]ValidatorFactory{
 		v.SetCrossValidatedTimestamp(crossTs)
 		return v
 	},
-	"BackgroundCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
-		return NewBackgroundCrossValidator(
+	"LockstepCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
+		return NewLockstepCrossValidator(
 			context.Background(),
 			log.New(),
 			metrics.NoopMetrics,
