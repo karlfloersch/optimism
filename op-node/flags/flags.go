@@ -434,6 +434,13 @@ var (
 		TakesFile: true,
 		Category:  InteropCategory,
 	}
+	InteropSupervisorEnabled = &cli.BoolFlag{
+		Name:     "interop.supervisor-enabled",
+		Usage:    "Enable supervisor-based interop features. When false, interop contracts deploy but supervisor logic stays disabled. Defaults to false as supervisor is deprecated.",
+		EnvVars:  prefixEnvVars("INTEROP_SUPERVISOR_ENABLED"),
+		Value:    false,
+		Category: InteropCategory,
+	}
 
 	IgnoreMissingPectraBlobSchedule = &cli.BoolFlag{
 		Name: "ignore-missing-pectra-blob-schedule",
@@ -505,6 +512,7 @@ var optionalFlags = []cli.Flag{
 	InteropRPCPort,
 	InteropJWTSecret,
 	InteropDependencySet,
+	InteropSupervisorEnabled,
 	IgnoreMissingPectraBlobSchedule,
 	ExperimentalOPStackAPI,
 }

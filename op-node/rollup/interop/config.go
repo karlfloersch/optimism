@@ -13,8 +13,11 @@ import (
 )
 
 type Config struct {
+	// SupervisorEnabled enables supervisor-based interop features.
+	// When false, interop contracts deploy but supervisor logic stays disabled.
+	// Defaults to false as supervisor is deprecated.
+	SupervisorEnabled bool
 	// RPCAddr address to bind RPC server to, to serve external supervisor nodes.
-	// Optional. This will soon be required: running op-node without supervisor is being deprecated.
 	RPCAddr string
 	// RPCPort port to bind RPC server to, to serve external supervisor nodes.
 	// Binds to any available port if set to 0.
@@ -33,6 +36,10 @@ func (cfg *Config) Check() error {
 // Setup creates an interop sub-system. This drives the node syncing.
 // If setup returns a nil system (without error) the node should fall back to legacy mode.
 func (cfg *Config) Setup(ctx context.Context, logger log.Logger, rollupCfg *rollup.Config, l1 L1Source, l2 L2Source, m opmetrics.RPCMetricer) (SubSystem, error) {
+	if !cfg.SupervisorEnabled {
+		logger.Info("Supervisor disabled, using legacy sync mode")
+		return nil, nil // a `nil` system will result in legacy mode.
+	}
 	if cfg.RPCAddr == "" {
 		logger.Warn("No interop RPC configured, falling back to legacy sync mode.")
 		return nil, nil // a `nil` system will result in legacy mode.

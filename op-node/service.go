@@ -151,9 +151,10 @@ func NewConfig(ctx cliiface.Context, log log.Logger) (*config.Config, error) {
 
 func NewSupervisorEndpointConfig(ctx cliiface.Context) *interop.Config {
 	return &interop.Config{
-		RPCAddr:          ctx.String(flags.InteropRPCAddr.Name),
-		RPCPort:          ctx.Int(flags.InteropRPCPort.Name),
-		RPCJwtSecretPath: ctx.String(flags.InteropJWTSecret.Name),
+		SupervisorEnabled: ctx.Bool(flags.InteropSupervisorEnabled.Name),
+		RPCAddr:           ctx.String(flags.InteropRPCAddr.Name),
+		RPCPort:           ctx.Int(flags.InteropRPCPort.Name),
+		RPCJwtSecretPath:  ctx.String(flags.InteropJWTSecret.Name),
 	}
 }
 

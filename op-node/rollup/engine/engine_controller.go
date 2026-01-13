@@ -104,6 +104,10 @@ type EngineController struct {
 	elStart    time.Time
 	clock      clock.Clock
 
+	// supervisorEnabled indicates if supervisor-based interop features are enabled.
+	// When false, cross-unsafe and cross-safe promotion happens locally even after interop activation.
+	supervisorEnabled bool
+
 	// L1 chain for reset functionality
 	l1 sync.L1Chain
 
@@ -163,7 +167,7 @@ type EngineController struct {
 var _ event.Deriver = (*EngineController)(nil)
 
 func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger, m opmetrics.Metricer,
-	rollupCfg *rollup.Config, syncCfg *sync.Config, l1 sync.L1Chain, emitter event.Emitter,
+	rollupCfg *rollup.Config, syncCfg *sync.Config, l1 sync.L1Chain, emitter event.Emitter, supervisorEnabled bool,
 ) *EngineController {
 	syncStatus := syncStatusCL
 	if syncCfg.SyncMode == sync.ELSync {
@@ -171,18 +175,19 @@ func NewEngineController(ctx context.Context, engine ExecEngine, log log.Logger,
 	}
 
 	return &EngineController{
-		engine:         engine,
-		log:            log,
-		metrics:        m,
-		chainSpec:      rollup.NewChainSpec(rollupCfg),
-		rollupCfg:      rollupCfg,
-		syncCfg:        syncCfg,
-		syncStatus:     syncStatus,
-		clock:          clock.SystemClock,
-		l1:             l1,
-		ctx:            ctx,
-		emitter:        emitter,
-		unsafePayloads: NewPayloadsQueue(log, maxUnsafePayloadsMemory, payloadMemSize),
+		engine:            engine,
+		log:               log,
+		metrics:           m,
+		chainSpec:         rollup.NewChainSpec(rollupCfg),
+		rollupCfg:         rollupCfg,
+		syncCfg:           syncCfg,
+		syncStatus:        syncStatus,
+		clock:             clock.SystemClock,
+		l1:                l1,
+		ctx:               ctx,
+		emitter:           emitter,
+		supervisorEnabled: supervisorEnabled,
+		unsafePayloads:    NewPayloadsQueue(log, maxUnsafePayloadsMemory, payloadMemSize),
 	}
 }
 func (e *EngineController) UnsafeL2Head() eth.L2BlockRef {
@@ -712,8 +717,8 @@ func (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
 	//  PromoteSafeEvent fan out is updated to procedural PromoteSafe method call
 	switch x := ev.(type) {
 	case UnsafeUpdateEvent:
-		// pre-interop everything that is local-unsafe is also immediately cross-unsafe.
-		if !e.rollupCfg.IsInterop(x.Ref.Time) {
+		// pre-interop (or if supervisor disabled) everything that is local-unsafe is also immediately cross-unsafe.
+		if !e.rollupCfg.IsInterop(x.Ref.Time) || !e.supervisorEnabled {
 			e.emitter.Emit(ctx, PromoteCrossUnsafeEvent(x))
 		}
 		// Try to apply the forkchoice changes
@@ -722,8 +727,8 @@ func (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
 		e.SetCrossUnsafeHead(x.Ref)
 		e.onUnsafeUpdate(ctx, x.Ref, e.unsafeHead)
 	case LocalSafeUpdateEvent:
-		// pre-interop everything that is local-safe is also immediately cross-safe.
-		if !e.rollupCfg.IsInterop(x.Ref.Time) {
+		// pre-interop (or if supervisor disabled) everything that is local-safe is also immediately cross-safe.
+		if !e.rollupCfg.IsInterop(x.Ref.Time) || !e.supervisorEnabled {
 			e.PromoteSafe(ctx, x.Ref, x.Source)
 		}
 	case InteropInvalidateBlockEvent:
