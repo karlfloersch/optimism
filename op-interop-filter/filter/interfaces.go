@@ -16,9 +16,15 @@ type IncludedMessage struct {
 
 // ChainIngester provides access to chain logs and state.
 // Implementations include:
-//   - MemoryChainIngester: in-memory for testing
-//   - LogsDBChainIngester: RPC + sqlite-based for production
+//   - MockChainIngester: in-memory for testing
+//   - LogsDBChainIngester: RPC-backed with logsdb for production
 type ChainIngester interface {
+	// Start begins the ingester's background processing.
+	Start() error
+
+	// Stop halts the ingester's background processing.
+	Stop() error
+
 	// Contains checks if a log exists in the chain's database.
 	Contains(query types.ContainsQuery) (types.BlockSeal, error)
 
@@ -27,9 +33,6 @@ type ChainIngester interface {
 
 	// LatestTimestamp returns the timestamp of the latest ingested block.
 	LatestTimestamp() (uint64, bool)
-
-	// EarliestBlockNum returns the earliest block number in the database.
-	EarliestBlockNum() (uint64, bool)
 
 	// GetExecMsgsAtTimestamp returns executing messages with the given inclusion timestamp.
 	GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error)
@@ -49,9 +52,15 @@ type ChainIngester interface {
 
 // CrossValidator validates cross-chain messages.
 // Implementations include:
-//   - SimpleCrossValidator: synchronous, no background loop
-//   - BackgroundCrossValidator: runs background validation loop
+//   - MockCrossValidator: synchronous, for testing
+//   - BackgroundCrossValidator: runs background validation loop, for production
 type CrossValidator interface {
+	// Start begins the validator's background processing.
+	Start() error
+
+	// Stop halts the validator's background processing.
+	Stop() error
+
 	// ValidateAccessEntry validates a single access list entry.
 	ValidateAccessEntry(access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error
 

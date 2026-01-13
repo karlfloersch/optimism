@@ -147,14 +147,6 @@ func (s *Service) initMetricsServer(cfg *Config) error {
 
 func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 	chains := make(map[eth.ChainID]ChainIngester)
-	var chainLifecycle []interface{ Startable; Stoppable }
-
-	// Helper to cleanup on error
-	cleanup := func() {
-		for _, lc := range chainLifecycle {
-			_ = lc.Stop()
-		}
-	}
 
 	// Track minimum head timestamp across chains for cross-validator start
 	var minHeadTimestamp uint64
@@ -164,19 +156,16 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 		// Query chain ID and head timestamp from the RPC
 		ethClient, err := ethclient.Dial(rpcURL)
 		if err != nil {
-			cleanup()
 			return fmt.Errorf("failed to connect to %s: %w", rpcURL, err)
 		}
 		chainIDBig, err := ethClient.ChainID(ctx)
 		if err != nil {
 			ethClient.Close()
-			cleanup()
 			return fmt.Errorf("failed to query chain ID from %s: %w", rpcURL, err)
 		}
 		header, err := ethClient.HeaderByNumber(ctx, nil) // nil = latest
 		ethClient.Close()
 		if err != nil {
-			cleanup()
 			return fmt.Errorf("failed to query head block from %s: %w", rpcURL, err)
 		}
 		chainID := eth.ChainIDFromBig(chainIDBig)
@@ -188,7 +177,6 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 		}
 
 		if _, exists := chains[chainID]; exists {
-			cleanup()
 			return fmt.Errorf("duplicate chain ID %s: multiple RPCs return the same chain ID", chainID)
 		}
 
@@ -205,12 +193,10 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 			cfg.PollInterval,
 		)
 		if err != nil {
-			cleanup()
 			return fmt.Errorf("failed to create chain ingester for chain %s: %w", chainID, err)
 		}
 
 		chains[chainID] = ingester
-		chainLifecycle = append(chainLifecycle, ingester)
 	}
 
 	s.log.Info("Cross-validator will start at timestamp", "timestamp", minHeadTimestamp)
@@ -227,13 +213,10 @@ func (s *Service) initBackend(ctx context.Context, cfg *Config) error {
 	)
 
 	s.backend = NewBackend(ctx, BackendParams{
-		Logger:                  s.log,
-		Metrics:                 s.metrics,
-		Config:                  cfg,
-		Chains:                  chains,
-		ChainLifecycle:          chainLifecycle,
-		CrossValidator:          crossValidator,
-		CrossValidatorLifecycle: crossValidator,
+		Logger:         s.log,
+		Metrics:        s.metrics,
+		Chains:         chains,
+		CrossValidator: crossValidator,
 	})
 
 	s.log.Info("Created backend", "chains", len(chains))

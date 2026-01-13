@@ -7,9 +7,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// MemoryChainIngester is an in-memory implementation of ChainIngester for testing.
+// MockChainIngester is an in-memory implementation of ChainIngester for testing.
 // It stores logs in a map and provides simple state management.
-type MemoryChainIngester struct {
+type MockChainIngester struct {
 	mu sync.RWMutex
 
 	// Logs stored by their identifying query
@@ -34,17 +34,23 @@ type logKey struct {
 	Checksum  types.MessageChecksum
 }
 
-// NewMemoryChainIngester creates a new in-memory chain ingester.
-func NewMemoryChainIngester() *MemoryChainIngester {
-	return &MemoryChainIngester{
+// NewMockChainIngester creates a new in-memory chain ingester.
+func NewMockChainIngester() *MockChainIngester {
+	return &MockChainIngester{
 		logs:     make(map[logKey]types.BlockSeal),
 		execMsgs: make([]IncludedMessage, 0),
 		ready:    true, // Default to ready for simple tests
 	}
 }
 
+// Start implements ChainIngester (no-op for in-memory).
+func (m *MockChainIngester) Start() error { return nil }
+
+// Stop implements ChainIngester (no-op for in-memory).
+func (m *MockChainIngester) Stop() error { return nil }
+
 // AddLog adds a log entry to the ingester.
-func (m *MemoryChainIngester) AddLog(timestamp, blockNum uint64, logIdx uint32, checksum types.MessageChecksum, seal types.BlockSeal) {
+func (m *MockChainIngester) AddLog(timestamp, blockNum uint64, logIdx uint32, checksum types.MessageChecksum, seal types.BlockSeal) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -67,7 +73,7 @@ func (m *MemoryChainIngester) AddLog(timestamp, blockNum uint64, logIdx uint32, 
 }
 
 // AddExecMsg adds an executing message with its inclusion context.
-func (m *MemoryChainIngester) AddExecMsg(msg IncludedMessage) {
+func (m *MockChainIngester) AddExecMsg(msg IncludedMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -84,14 +90,14 @@ func (m *MemoryChainIngester) AddExecMsg(msg IncludedMessage) {
 }
 
 // SetReady sets the ready state.
-func (m *MemoryChainIngester) SetReady(ready bool) {
+func (m *MockChainIngester) SetReady(ready bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ready = ready
 }
 
 // Contains implements ChainIngester.
-func (m *MemoryChainIngester) Contains(query types.ContainsQuery) (types.BlockSeal, error) {
+func (m *MockChainIngester) Contains(query types.ContainsQuery) (types.BlockSeal, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -110,7 +116,7 @@ func (m *MemoryChainIngester) Contains(query types.ContainsQuery) (types.BlockSe
 }
 
 // LatestBlock implements ChainIngester.
-func (m *MemoryChainIngester) LatestBlock() (eth.BlockID, bool) {
+func (m *MockChainIngester) LatestBlock() (eth.BlockID, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -121,7 +127,7 @@ func (m *MemoryChainIngester) LatestBlock() (eth.BlockID, bool) {
 }
 
 // LatestTimestamp implements ChainIngester.
-func (m *MemoryChainIngester) LatestTimestamp() (uint64, bool) {
+func (m *MockChainIngester) LatestTimestamp() (uint64, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -131,19 +137,8 @@ func (m *MemoryChainIngester) LatestTimestamp() (uint64, bool) {
 	return m.latestTimestamp, true
 }
 
-// EarliestBlockNum implements ChainIngester.
-func (m *MemoryChainIngester) EarliestBlockNum() (uint64, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.earliestBlockNum == 0 {
-		return 0, false
-	}
-	return m.earliestBlockNum, true
-}
-
 // GetExecMsgsAtTimestamp implements ChainIngester.
-func (m *MemoryChainIngester) GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error) {
+func (m *MockChainIngester) GetExecMsgsAtTimestamp(timestamp uint64) ([]IncludedMessage, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -157,21 +152,21 @@ func (m *MemoryChainIngester) GetExecMsgsAtTimestamp(timestamp uint64) ([]Includ
 }
 
 // Ready implements ChainIngester.
-func (m *MemoryChainIngester) Ready() bool {
+func (m *MockChainIngester) Ready() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.ready
 }
 
 // Error implements ChainIngester.
-func (m *MemoryChainIngester) Error() *IngesterError {
+func (m *MockChainIngester) Error() *IngesterError {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.err
 }
 
 // SetError implements ChainIngester.
-func (m *MemoryChainIngester) SetError(reason IngesterErrorReason, msg string) {
+func (m *MockChainIngester) SetError(reason IngesterErrorReason, msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.err = &IngesterError{
@@ -181,11 +176,18 @@ func (m *MemoryChainIngester) SetError(reason IngesterErrorReason, msg string) {
 }
 
 // ClearError implements ChainIngester.
-func (m *MemoryChainIngester) ClearError() {
+func (m *MockChainIngester) ClearError() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.err = nil
 }
 
-// Ensure MemoryChainIngester implements ChainIngester
-var _ ChainIngester = (*MemoryChainIngester)(nil)
+// SetLatestTimestamp sets the latest ingested timestamp (for testing).
+func (m *MockChainIngester) SetLatestTimestamp(ts uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.latestTimestamp = ts
+}
+
+// Ensure MockChainIngester implements ChainIngester
+var _ ChainIngester = (*MockChainIngester)(nil)

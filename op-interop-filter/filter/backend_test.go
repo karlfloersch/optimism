@@ -134,16 +134,13 @@ func newTestBackend(t *testing.T) *Backend {
 	chains := make(map[eth.ChainID]ChainIngester)
 
 	// Create simple cross-validator
-	validator := NewSimpleCrossValidator(chains, cfg.MessageExpiryWindow)
+	validator := NewMockCrossValidator(chains, cfg.MessageExpiryWindow)
 
 	return NewBackend(ctx, BackendParams{
-		Logger:                  log.New(),
-		Metrics:                 metrics.NoopMetrics,
-		Config:                  cfg,
-		Chains:                  chains,
-		ChainLifecycle:          nil,
-		CrossValidator:          validator,
-		CrossValidatorLifecycle: &noopLifecycle{},
+		Logger:         log.New(),
+		Metrics:        metrics.NoopMetrics,
+		Chains:         chains,
+		CrossValidator: validator,
 	})
 }
 
@@ -157,38 +154,29 @@ func newTestBackendWithMockChain(t *testing.T) *Backend {
 		PollInterval:        2 * time.Second,
 	}
 
-	// Add a memory chain ingester that reports as ready
+	// Add a mock chain ingester that reports as ready
 	chainID := eth.ChainIDFromUInt64(1)
-	ingester := NewMemoryChainIngester()
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{
 		chainID: ingester,
 	}
 
 	// Create simple cross-validator
-	validator := NewSimpleCrossValidator(chains, cfg.MessageExpiryWindow)
+	validator := NewMockCrossValidator(chains, cfg.MessageExpiryWindow)
 
 	return NewBackend(ctx, BackendParams{
-		Logger:                  log.New(),
-		Metrics:                 metrics.NoopMetrics,
-		Config:                  cfg,
-		Chains:                  chains,
-		ChainLifecycle:          nil,
-		CrossValidator:          validator,
-		CrossValidatorLifecycle: &noopLifecycle{},
+		Logger:         log.New(),
+		Metrics:        metrics.NoopMetrics,
+		Chains:         chains,
+		CrossValidator: validator,
 	})
 }
 
-// noopLifecycle implements Startable and Stoppable for testing
-type noopLifecycle struct{}
-
-func (n *noopLifecycle) Start() error { return nil }
-func (n *noopLifecycle) Stop() error  { return nil }
-
-func TestSimpleCrossValidator_TimestampOrdering(t *testing.T) {
+func TestMockCrossValidator_TimestampOrdering(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
-	ingester := NewMemoryChainIngester()
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewSimpleCrossValidator(chains, 100)
+	validator := NewMockCrossValidator(chains, 100)
 
 	tests := []struct {
 		name                      string
@@ -246,11 +234,11 @@ func TestSimpleCrossValidator_TimestampOrdering(t *testing.T) {
 	}
 }
 
-func TestSimpleCrossValidator_Expiry(t *testing.T) {
+func TestMockCrossValidator_Expiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
-	ingester := NewMemoryChainIngester()
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewSimpleCrossValidator(chains, 100) // 100 seconds expiry
+	validator := NewMockCrossValidator(chains, 100) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -314,12 +302,12 @@ func TestSimpleCrossValidator_Expiry(t *testing.T) {
 	}
 }
 
-func TestSimpleCrossValidator_UnknownChain(t *testing.T) {
+func TestMockCrossValidator_UnknownChain(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
 	unknownChainID := eth.ChainIDFromUInt64(999)
-	ingester := NewMemoryChainIngester()
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewSimpleCrossValidator(chains, 100)
+	validator := NewMockCrossValidator(chains, 100)
 
 	access := types.Access{
 		ChainID:   unknownChainID,
@@ -335,11 +323,11 @@ func TestSimpleCrossValidator_UnknownChain(t *testing.T) {
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 }
 
-func TestSimpleCrossValidator_TimeoutExpiry(t *testing.T) {
+func TestMockCrossValidator_TimeoutExpiry(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(1)
-	ingester := NewMemoryChainIngester()
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewSimpleCrossValidator(chains, 100) // 100 seconds expiry
+	validator := NewMockCrossValidator(chains, 100) // 100 seconds expiry
 
 	tests := []struct {
 		name                      string
@@ -408,11 +396,230 @@ func TestSimpleCrossValidator_TimeoutExpiry(t *testing.T) {
 	}
 }
 
-func TestSimpleCrossValidator_CrossUnsafeTimestamp(t *testing.T) {
+// ValidatorFactory creates a CrossValidator with a specific cross-validated timestamp.
+type ValidatorFactory func(chains map[eth.ChainID]ChainIngester, expiryWindow uint64, crossValidatedTs uint64) CrossValidator
+
+// validatorFactories contains factories for all CrossValidator implementations.
+var validatorFactories = map[string]ValidatorFactory{
+	"MockCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
+		v := NewMockCrossValidator(chains, expiry)
+		v.SetCrossValidatedTimestamp(crossTs)
+		return v
+	},
+	"BackgroundCrossValidator": func(chains map[eth.ChainID]ChainIngester, expiry uint64, crossTs uint64) CrossValidator {
+		return NewBackgroundCrossValidator(
+			context.Background(),
+			log.New(),
+			metrics.NoopMetrics,
+			expiry,
+			time.Hour, // won't tick in test
+			chains,
+			crossTs, // startTimestamp = cross-validated timestamp
+		)
+	},
+}
+
+// TestBackend_CheckAccessList_Portable tests CheckAccessList behavior through the public API.
+// These tests run against all CrossValidator implementations to ensure consistent behavior.
+func TestBackend_CheckAccessList_Portable(t *testing.T) {
+	for validatorName, createValidator := range validatorFactories {
+		t.Run(validatorName, func(t *testing.T) {
+			runPortableValidationTests(t, createValidator)
+		})
+	}
+}
+
+func runPortableValidationTests(t *testing.T, createValidator ValidatorFactory) {
 	chainID := eth.ChainIDFromUInt64(1)
-	ingester := NewMemoryChainIngester()
+	const expiryWindow = uint64(1000)
+
+	// Valid checksum must start with PrefixChecksum (0x03)
+	validChecksum := func(suffix byte) types.MessageChecksum {
+		cs := types.MessageChecksum{}
+		cs[0] = 3 // PrefixChecksum
+		cs[1] = suffix
+		return cs
+	}
+
+	// Helper to create a backend with given components
+	createBackend := func(ingester ChainIngester, validator CrossValidator) *Backend {
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		return NewBackend(context.Background(), BackendParams{
+			Logger:         log.New(),
+			Metrics:        metrics.NoopMetrics,
+			Chains:         chains,
+			CrossValidator: validator,
+		})
+	}
+
+	// Helper to build access list entries from an Access
+	buildAccessList := func(access types.Access) []common.Hash {
+		return types.EncodeAccessList([]types.Access{access})
+	}
+
+	t.Run("rejects_when_failsafe_enabled", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		backend.SetFailsafeEnabled(true)
+
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: validChecksum(1)}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrFailsafeEnabled)
+	})
+
+	t.Run("rejects_when_not_ready", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		ingester.SetReady(false)
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: validChecksum(1)}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrUninitialized)
+	})
+
+	t.Run("rejects_unknown_executing_chain", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		unknownChain := eth.ChainIDFromUInt64(999)
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: validChecksum(1)}
+		execDesc := types.ExecutingDescriptor{ChainID: unknownChain, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrUnknownChain)
+	})
+
+	t.Run("rejects_unsupported_safety_level", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: validChecksum(1)}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.Finalized, execDesc)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unsupported safety level")
+	})
+
+	t.Run("accepts_valid_local_unsafe_message", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		// Add the init message to the ingester
+		checksum := validChecksum(1)
+		ingester.AddLog(100, 10, 0, checksum, types.BlockSeal{Number: 10})
+
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: checksum}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.NoError(t, err)
+	})
+
+	t.Run("rejects_missing_init_message", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		// Don't add any init message
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: validChecksum(1)}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrConflict)
+	})
+
+	t.Run("rejects_expired_message", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		checksum := validChecksum(1)
+		ingester.AddLog(100, 10, 0, checksum, types.BlockSeal{Number: 10})
+
+		// Init at 100, expiry window 1000, exec at 2000 -> expired
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: checksum}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 2000}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrConflict)
+		require.Contains(t, err.Error(), "expired")
+	})
+
+	t.Run("rejects_init_not_before_exec", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500)
+		backend := createBackend(ingester, validator)
+
+		checksum := validChecksum(1)
+		ingester.AddLog(200, 10, 0, checksum, types.BlockSeal{Number: 10})
+
+		// Init at 200, exec at 100 -> init not before exec
+		access := types.Access{ChainID: chainID, Timestamp: 200, BlockNumber: 10, LogIndex: 0, Checksum: checksum}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 100}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.LocalUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrConflict)
+	})
+
+	t.Run("cross_unsafe_accepts_validated_timestamp", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 500) // cross-validated up to 500
+		backend := createBackend(ingester, validator)
+
+		checksum := validChecksum(1)
+		ingester.AddLog(100, 10, 0, checksum, types.BlockSeal{Number: 10})
+
+		// Init at 100, cross-validated up to 500
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: checksum}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.CrossUnsafe, execDesc)
+		require.NoError(t, err)
+	})
+
+	t.Run("cross_unsafe_rejects_unvalidated_timestamp", func(t *testing.T) {
+		ingester := NewMockChainIngester()
+		chains := map[eth.ChainID]ChainIngester{chainID: ingester}
+		validator := createValidator(chains, expiryWindow, 50) // cross-validated only up to 50
+		backend := createBackend(ingester, validator)
+
+		checksum := validChecksum(1)
+		ingester.AddLog(100, 10, 0, checksum, types.BlockSeal{Number: 10})
+
+		// Init at 100, but cross-validated only up to 50
+		access := types.Access{ChainID: chainID, Timestamp: 100, BlockNumber: 10, LogIndex: 0, Checksum: checksum}
+		execDesc := types.ExecutingDescriptor{ChainID: chainID, Timestamp: 200}
+
+		err := backend.CheckAccessList(context.Background(), buildAccessList(access), types.CrossUnsafe, execDesc)
+		require.ErrorIs(t, err, types.ErrOutOfScope)
+	})
+}
+
+func TestMockCrossValidator_CrossUnsafeTimestamp(t *testing.T) {
+	chainID := eth.ChainIDFromUInt64(1)
+	ingester := NewMockChainIngester()
 	chains := map[eth.ChainID]ChainIngester{chainID: ingester}
-	validator := NewSimpleCrossValidator(chains, 1000)
+	validator := NewMockCrossValidator(chains, 1000)
 
 	// Set cross-validated timestamp to 500
 	validator.SetCrossValidatedTimestamp(500)

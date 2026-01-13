@@ -8,10 +8,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// SimpleCrossValidator is a synchronous implementation of CrossValidator.
+// MockCrossValidator is a synchronous implementation of CrossValidator.
 // It validates messages directly without a background loop.
 // This implementation does NOT support same-block message dependencies.
-type SimpleCrossValidator struct {
+type MockCrossValidator struct {
 	chains             map[eth.ChainID]ChainIngester
 	messageExpiryWindow uint64
 
@@ -19,20 +19,26 @@ type SimpleCrossValidator struct {
 	crossValidatedTs uint64
 }
 
-// NewSimpleCrossValidator creates a new SimpleCrossValidator.
-func NewSimpleCrossValidator(
+// NewMockCrossValidator creates a new MockCrossValidator.
+func NewMockCrossValidator(
 	chains map[eth.ChainID]ChainIngester,
 	messageExpiryWindow uint64,
-) *SimpleCrossValidator {
-	return &SimpleCrossValidator{
+) *MockCrossValidator {
+	return &MockCrossValidator{
 		chains:             chains,
 		messageExpiryWindow: messageExpiryWindow,
 	}
 }
 
+// Start implements CrossValidator (no-op for simple validator).
+func (v *MockCrossValidator) Start() error { return nil }
+
+// Stop implements CrossValidator (no-op for simple validator).
+func (v *MockCrossValidator) Stop() error { return nil }
+
 // SetCrossValidatedTimestamp sets the cross-validated timestamp.
 // This is useful for testing specific scenarios.
-func (v *SimpleCrossValidator) SetCrossValidatedTimestamp(ts uint64) {
+func (v *MockCrossValidator) SetCrossValidatedTimestamp(ts uint64) {
 	v.crossValidatedTs = ts
 }
 
@@ -43,7 +49,7 @@ func (v *SimpleCrossValidator) SetCrossValidatedTimestamp(ts uint64) {
 //  3. If Timeout > 0: initTimestamp + MessageExpiryWindow >= inclusionTimestamp + Timeout
 //  4. If CrossUnsafe: initTimestamp <= crossValidatedTimestamp
 //  5. Log exists in source chain
-func (v *SimpleCrossValidator) ValidateAccessEntry(
+func (v *MockCrossValidator) ValidateAccessEntry(
 	access types.Access,
 	minSafety types.SafetyLevel,
 	execDescriptor types.ExecutingDescriptor,
@@ -78,7 +84,7 @@ func (v *SimpleCrossValidator) ValidateAccessEntry(
 }
 
 // validateExecutingMessage validates timing constraints and log existence.
-func (v *SimpleCrossValidator) validateExecutingMessage(
+func (v *MockCrossValidator) validateExecutingMessage(
 	access types.Access,
 	inclusionTimestamp uint64,
 ) error {
@@ -105,12 +111,12 @@ func (v *SimpleCrossValidator) validateExecutingMessage(
 }
 
 // CrossValidatedTimestamp implements CrossValidator.
-func (v *SimpleCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
+func (v *MockCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
 	if v.crossValidatedTs == 0 {
 		return 0, false
 	}
 	return v.crossValidatedTs, true
 }
 
-// Ensure SimpleCrossValidator implements CrossValidator
-var _ CrossValidator = (*SimpleCrossValidator)(nil)
+// Ensure MockCrossValidator implements CrossValidator
+var _ CrossValidator = (*MockCrossValidator)(nil)

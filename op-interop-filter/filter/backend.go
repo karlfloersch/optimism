@@ -14,34 +14,17 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
-// Startable is implemented by components that can be started
-type Startable interface {
-	Start() error
-}
-
-// Stoppable is implemented by components that can be stopped
-type Stoppable interface {
-	Stop() error
-}
-
 // Backend coordinates chain ingesters and handles CheckAccessList requests.
 // Failsafe is enabled if manually set OR if any chain ingester has an error.
 type Backend struct {
 	log     log.Logger
 	metrics metrics.Metricer
-	cfg     *Config
 
 	// Chain ingesters keyed by chain ID.
 	chains map[eth.ChainID]ChainIngester
 
-	// Startable/Stoppable chain ingesters (for lifecycle management)
-	chainLifecycle []interface{ Startable; Stoppable }
-
 	// Cross-validator handles all cross-chain message validation.
 	crossValidator CrossValidator
-
-	// Cross-validator lifecycle (for Start/Stop)
-	crossValidatorLifecycle interface{ Startable; Stoppable }
 
 	// Manual failsafe override
 	manualFailsafe atomic.Bool
@@ -50,15 +33,11 @@ type Backend struct {
 }
 
 // BackendParams contains parameters for creating a Backend.
-// The caller is responsible for creating the chain ingesters and cross-validator.
 type BackendParams struct {
-	Logger          log.Logger
-	Metrics         metrics.Metricer
-	Config          *Config
-	Chains          map[eth.ChainID]ChainIngester
-	ChainLifecycle  []interface{ Startable; Stoppable }
-	CrossValidator  CrossValidator
-	CrossValidatorLifecycle interface{ Startable; Stoppable }
+	Logger         log.Logger
+	Metrics        metrics.Metricer
+	Chains         map[eth.ChainID]ChainIngester
+	CrossValidator CrossValidator
 }
 
 // NewBackend creates a new Backend instance with the provided components.
@@ -66,14 +45,11 @@ func NewBackend(parentCtx context.Context, params BackendParams) *Backend {
 	_, cancel := context.WithCancel(parentCtx)
 
 	return &Backend{
-		log:                     params.Logger,
-		metrics:                 params.Metrics,
-		cfg:                     params.Config,
-		chains:                  params.Chains,
-		chainLifecycle:          params.ChainLifecycle,
-		crossValidator:          params.CrossValidator,
-		crossValidatorLifecycle: params.CrossValidatorLifecycle,
-		cancel:                  cancel,
+		log:            params.Logger,
+		metrics:        params.Metrics,
+		chains:         params.Chains,
+		crossValidator: params.CrossValidator,
+		cancel:         cancel,
 	}
 }
 
@@ -81,13 +57,13 @@ func NewBackend(parentCtx context.Context, params BackendParams) *Backend {
 func (b *Backend) Start(ctx context.Context) error {
 	b.log.Info("Starting backend")
 
-	for _, lc := range b.chainLifecycle {
-		if err := lc.Start(); err != nil {
-			return fmt.Errorf("failed to start chain ingester: %w", err)
+	for chainID, ingester := range b.chains {
+		if err := ingester.Start(); err != nil {
+			return fmt.Errorf("failed to start chain ingester for %v: %w", chainID, err)
 		}
 	}
 
-	if err := b.crossValidatorLifecycle.Start(); err != nil {
+	if err := b.crossValidator.Start(); err != nil {
 		return fmt.Errorf("failed to start cross-validator: %w", err)
 	}
 
@@ -101,13 +77,13 @@ func (b *Backend) Stop(ctx context.Context) error {
 
 	var result error
 
-	if err := b.crossValidatorLifecycle.Stop(); err != nil {
+	if err := b.crossValidator.Stop(); err != nil {
 		result = errors.Join(result, fmt.Errorf("failed to stop cross-validator: %w", err))
 	}
 
-	for _, lc := range b.chainLifecycle {
-		if err := lc.Stop(); err != nil {
-			result = errors.Join(result, fmt.Errorf("failed to stop chain ingester: %w", err))
+	for chainID, ingester := range b.chains {
+		if err := ingester.Stop(); err != nil {
+			result = errors.Join(result, fmt.Errorf("failed to stop chain ingester for %v: %w", chainID, err))
 		}
 	}
 

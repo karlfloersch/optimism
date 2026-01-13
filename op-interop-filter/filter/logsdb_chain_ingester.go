@@ -79,7 +79,7 @@ func findBlockByTimestamp(
 }
 
 // LogsDBChainIngester handles block ingestion and log storage for a single chain.
-// It uses an RPC client to fetch blocks and a sqlite-based logs database for storage.
+// It uses an RPC client to fetch blocks and a logsdb database for storage.
 type LogsDBChainIngester struct {
 	log     log.Logger
 	metrics metrics.Metricer
@@ -92,7 +92,11 @@ type LogsDBChainIngester struct {
 	backfillDuration time.Duration
 	pollInterval     time.Duration
 
-	ready   atomic.Bool
+	// startingBlock is the first block we need to ingest (set once at init).
+	// Ready() returns true when latestSealed >= startingBlock.
+	startingBlock    atomic.Uint64
+	startingBlockSet atomic.Bool
+
 	stopped atomic.Bool
 
 	errorState atomic.Pointer[IngesterError]
@@ -205,9 +209,17 @@ func (c *LogsDBChainIngester) Stop() error {
 	return nil
 }
 
-// Ready returns true if backfill is complete
+// Ready returns true if we've ingested up to at least the starting block.
+// This is the only place where "backfill" is a concept - just one comparison.
 func (c *LogsDBChainIngester) Ready() bool {
-	return c.ready.Load()
+	if !c.startingBlockSet.Load() {
+		return false
+	}
+	latestBlock, ok := c.LatestBlock()
+	if !ok {
+		return false
+	}
+	return latestBlock.Number >= c.startingBlock.Load()
 }
 
 // SetError sets the error state, logs the error, and records metrics.
@@ -298,14 +310,6 @@ func (c *LogsDBChainIngester) LatestTimestamp() (uint64, bool) {
 	}
 
 	return seal.Timestamp, true
-}
-
-// EarliestBlockNum returns the earliest block number in the logsDB.
-func (c *LogsDBChainIngester) EarliestBlockNum() (uint64, bool) {
-	if !c.earliestBlockSet.Load() {
-		return 0, false
-	}
-	return c.earliestBlockNum.Load(), true
 }
 
 // GetExecMsgsAtTimestamp returns executing messages with the given inclusion timestamp.
@@ -401,94 +405,96 @@ func (c *LogsDBChainIngester) initLogsDB() error {
 func (c *LogsDBChainIngester) runIngestion() {
 	defer c.wg.Done()
 
-	if err := c.catchUp(); err != nil {
+	// One-time setup: determine starting block and next block to ingest
+	nextBlock, err := c.initIngestion()
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			c.log.Info("Catch up canceled")
+			c.log.Info("Ingestion init canceled")
 			return
 		}
-		c.log.Error("Failed to catch up", "err", err)
+		c.log.Error("Failed to initialize ingestion", "err", err)
 		return
 	}
 
-	c.ready.Store(true)
-	c.log.Info("Caught up, starting live ingestion")
+	// Track progress for logging
+	lastLogTime := time.Now()
 
-	ticker := time.NewTicker(c.pollInterval)
-	defer ticker.Stop()
-
+	// Unified ingestion loop - no concept of "backfill" vs "live"
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-ticker.C:
-			if err := c.pollNewBlocks(); err != nil {
+		default:
+		}
+
+		// Skip if in error state
+		if c.Error() != nil {
+			time.Sleep(c.pollInterval)
+			continue
+		}
+
+		head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			c.log.Error("Failed to get head", "err", err)
+			time.Sleep(c.pollInterval)
+			continue
+		}
+
+		// Reorg detection: if head moved behind our progress, check hash
+		if head.NumberU64() < nextBlock-1 {
+			if err := c.checkReorg(head); err != nil {
+				continue
+			}
+		}
+
+		// Ingest blocks up to head
+		if nextBlock <= head.NumberU64() {
+			if err := c.ingestBlock(nextBlock); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				c.log.Error("Failed to poll new blocks", "err", err)
+				c.log.Error("Failed to ingest block", "block", nextBlock, "err", err)
+				time.Sleep(c.pollInterval)
+				continue
 			}
+			nextBlock++
+
+			// Progress logging every 10 seconds
+			if time.Since(lastLogTime) > 10*time.Second {
+				startingBlock := c.startingBlock.Load()
+				if nextBlock <= startingBlock {
+					progress := float64(nextBlock-c.earliestBlockNum.Load()) / float64(startingBlock-c.earliestBlockNum.Load()+1)
+					c.log.Info("Ingestion progress",
+						"block", nextBlock-1,
+						"target", startingBlock,
+						"progress", fmt.Sprintf("%.0f%%", progress*100))
+					chainIDUint64, _ := c.chainID.Uint64()
+					c.metrics.RecordBackfillProgress(chainIDUint64, progress)
+				} else {
+					c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", head.NumberU64())
+				}
+				lastLogTime = time.Now()
+			}
+			continue // Try to ingest more blocks without sleeping
 		}
+
+		// Caught up to head, wait for new blocks
+		time.Sleep(c.pollInterval)
 	}
 }
 
-func (c *LogsDBChainIngester) catchUp() error {
+// initIngestion performs one-time setup and returns the first block to ingest.
+func (c *LogsDBChainIngester) initIngestion() (uint64, error) {
 	head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
 	if err != nil {
-		return fmt.Errorf("failed to get current head: %w", err)
+		return 0, fmt.Errorf("failed to get current head: %w", err)
 	}
 	c.log.Info("Current chain head", "block", head.NumberU64(), "hash", head.Hash())
 
-	startBlock, isFreshStart, err := c.determineStartBlock(head)
-	if err != nil {
-		return err
-	}
-	if startBlock == 0 {
-		return nil
-	}
-
-	if isFreshStart && startBlock > 0 {
-		if err := c.sealParentBlock(startBlock - 1); err != nil {
-			return fmt.Errorf("failed to seal parent block: %w", err)
-		}
-	}
-
-	return c.backfill(startBlock, head.NumberU64())
-}
-
-func (c *LogsDBChainIngester) determineStartBlock(head eth.BlockInfo) (startBlock uint64, isFreshStart bool, err error) {
-	c.mu.RLock()
-	latestSealed, hasSealed := c.logsDB.LatestSealedBlock()
-	c.mu.RUnlock()
-
-	if hasSealed {
-		startBlock = latestSealed.Number + 1
-		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", startBlock)
-
-		if !c.earliestBlockSet.Load() {
-			c.findAndSetEarliestBlock(latestSealed.Number)
-		}
-
-		if startBlock > head.NumberU64() {
-			c.log.Info("DB is up to date")
-			return 0, false, nil
-		}
-		return startBlock, false, nil
-	}
-
-	startBlock, err = c.findBackfillStartBlock(head)
-	if err != nil {
-		return 0, false, fmt.Errorf("failed to find backfill start block: %w", err)
-	}
-
-	c.log.Info("Starting fresh backfill",
-		"from", startBlock,
-		"to", head.NumberU64(),
-		"blocks", head.NumberU64()-startBlock+1)
-
-	return startBlock, true, nil
-}
-
-func (c *LogsDBChainIngester) findBackfillStartBlock(head eth.BlockInfo) (uint64, error) {
+	// Calculate the starting block (head - backfillDuration)
 	backfillSeconds := uint64(c.backfillDuration / time.Second)
 	var targetTimestamp uint64
 	if head.Time() > backfillSeconds {
@@ -503,7 +509,67 @@ func (c *LogsDBChainIngester) findBackfillStartBlock(head eth.BlockInfo) (uint64
 		return info.Time(), nil
 	}
 
-	return findBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
+	startingBlock, err := findBlockByTimestamp(c.ctx, targetTimestamp, head.NumberU64(), fetchTimestamp)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find starting block: %w", err)
+	}
+
+	c.startingBlock.Store(startingBlock)
+	c.startingBlockSet.Store(true)
+	c.log.Info("Determined starting block", "block", startingBlock)
+
+	// Check if we have existing data to resume from
+	c.mu.RLock()
+	latestSealed, hasSealed := c.logsDB.LatestSealedBlock()
+	c.mu.RUnlock()
+
+	if hasSealed {
+		// Resume from existing DB
+		nextBlock := latestSealed.Number + 1
+		c.log.Info("Resuming from existing DB", "lastSealed", latestSealed.Number, "resumeFrom", nextBlock)
+
+		if !c.earliestBlockSet.Load() {
+			c.findAndSetEarliestBlock(latestSealed.Number)
+		}
+
+		return nextBlock, nil
+	}
+
+	// Fresh start: seal parent block as anchor
+	if startingBlock > 0 {
+		if err := c.sealParentBlock(startingBlock - 1); err != nil {
+			return 0, fmt.Errorf("failed to seal parent block: %w", err)
+		}
+	}
+
+	c.log.Info("Starting fresh ingestion",
+		"from", startingBlock,
+		"to", head.NumberU64(),
+		"blocks", head.NumberU64()-startingBlock+1)
+
+	return startingBlock, nil
+}
+
+// checkReorg checks if a reorg occurred when head moves behind our progress.
+func (c *LogsDBChainIngester) checkReorg(head eth.BlockInfo) error {
+	dbHash, ok := c.BlockHashAt(head.NumberU64())
+	if !ok {
+		c.log.Warn("Head moved backward, couldn't verify block hash",
+			"head", head.NumberU64())
+		return nil
+	}
+
+	if dbHash == head.Hash() {
+		c.log.Debug("Head temporarily behind, same hash - skipping",
+			"head", head.NumberU64())
+		return nil
+	}
+
+	c.log.Warn("Detected reorg: different block at same height",
+		"height", head.NumberU64(), "db_hash", dbHash, "head_hash", head.Hash())
+	c.SetError(ErrorReorg, fmt.Sprintf("reorg at height %d: db has %s, chain has %s",
+		head.NumberU64(), dbHash, head.Hash()))
+	return fmt.Errorf("reorg detected")
 }
 
 func (c *LogsDBChainIngester) sealParentBlock(blockNum uint64) error {
@@ -528,83 +594,6 @@ func (c *LogsDBChainIngester) sealParentBlock(blockNum uint64) error {
 	c.earliestBlockSet.Store(true)
 
 	c.log.Info("Sealed parent block", "block", blockNum, "hash", blockID.Hash)
-	return nil
-}
-
-func (c *LogsDBChainIngester) backfill(startBlock, endBlock uint64) error {
-	totalBlocks := endBlock - startBlock + 1
-	lastProgress := 0
-	lastLog := time.Now()
-
-	for blockNum := startBlock; blockNum <= endBlock; blockNum++ {
-		select {
-		case <-c.ctx.Done():
-			return c.ctx.Err()
-		default:
-		}
-
-		if err := c.ingestBlock(blockNum); err != nil {
-			return fmt.Errorf("failed to ingest block %d: %w", blockNum, err)
-		}
-
-		progress := int((blockNum - startBlock + 1) * 100 / totalBlocks)
-		if progress >= lastProgress+10 || time.Since(lastLog) > 10*time.Second {
-			c.log.Info("Backfill progress",
-				"block", blockNum,
-				"total", endBlock,
-				"progress", fmt.Sprintf("%d%%", progress))
-			lastProgress = progress
-			lastLog = time.Now()
-			chainIDUint64, _ := c.chainID.Uint64()
-			c.metrics.RecordBackfillProgress(chainIDUint64, float64(progress)/100.0)
-		}
-	}
-
-	return nil
-}
-
-func (c *LogsDBChainIngester) pollNewBlocks() error {
-	if c.Error() != nil {
-		return nil
-	}
-
-	head, err := c.ethClient.InfoByLabel(c.ctx, eth.Unsafe)
-	if err != nil {
-		return fmt.Errorf("failed to get head: %w", err)
-	}
-
-	latestBlock, ok := c.LatestBlock()
-	if !ok {
-		return fmt.Errorf("no latest block in DB")
-	}
-
-	if head.NumberU64() < latestBlock.Number {
-		dbHash, ok := c.BlockHashAt(head.NumberU64())
-		if !ok {
-			c.log.Warn("Head moved backward, couldn't verify block hash",
-				"head", head.NumberU64(), "latest", latestBlock.Number)
-			return nil
-		}
-
-		if dbHash == head.Hash() {
-			c.log.Debug("Head temporarily behind, same hash - skipping",
-				"head", head.NumberU64(), "latest", latestBlock.Number)
-			return nil
-		}
-
-		c.log.Warn("Detected reorg: different block at same height",
-			"height", head.NumberU64(), "db_hash", dbHash, "head_hash", head.Hash())
-		c.SetError(ErrorReorg, fmt.Sprintf("reorg at height %d: db has %s, chain has %s",
-			head.NumberU64(), dbHash, head.Hash()))
-		return nil
-	}
-
-	for blockNum := latestBlock.Number + 1; blockNum <= head.NumberU64(); blockNum++ {
-		if err := c.ingestBlock(blockNum); err != nil {
-			return fmt.Errorf("failed to ingest block %d: %w", blockNum, err)
-		}
-	}
-
 	return nil
 }
 
