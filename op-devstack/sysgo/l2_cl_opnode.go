@@ -270,6 +270,9 @@ func withOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 		// specify interop config, but do not configure anything, to disable indexing mode
 		interopCfg := &interop.Config{}
 
+		// Copy rollup config to potentially modify SupervisorEnabled
+		rollupCfg := *l2Net.rollupCfg
+
 		if cfg.IndexingMode {
 			interopCfg = &interop.Config{
 				RPCAddr: "127.0.0.1",
@@ -278,6 +281,8 @@ func withOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				RPCPort:          0,
 				RPCJwtSecretPath: jwtPath,
 			}
+			// Enable supervisor mode in rollup config when indexing mode is active
+			rollupCfg.SupervisorEnabled = true
 		}
 
 		// Set the req-resp sync flag as per config
@@ -309,7 +314,7 @@ func withOpNode(l2CLID stack.L2CLNodeID, l1CLID stack.L1CLNodeID, l1ELID stack.L
 				SequencerEnabled:   cfg.IsSequencer,
 				SequencerConfDepth: 2,
 			},
-			Rollup:        *l2Net.rollupCfg,
+			Rollup:        rollupCfg,
 			DependencySet: depSet,
 			P2PSigner:     p2pSignerSetup, // nil when not sequencer
 			RPC: oprpc.CLIConfig{
