@@ -712,8 +712,8 @@ func (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
 	//  PromoteSafeEvent fan out is updated to procedural PromoteSafe method call
 	switch x := ev.(type) {
 	case UnsafeUpdateEvent:
-		// pre-interop everything that is local-unsafe is also immediately cross-unsafe.
-		if !e.rollupCfg.IsInterop(x.Ref.Time) {
+		// pre-interop (or if supervisor disabled) everything that is local-unsafe is also immediately cross-unsafe.
+		if !e.rollupCfg.IsInterop(x.Ref.Time) || !e.rollupCfg.SupervisorEnabled {
 			e.emitter.Emit(ctx, PromoteCrossUnsafeEvent(x))
 		}
 		// Try to apply the forkchoice changes
@@ -722,8 +722,8 @@ func (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
 		e.SetCrossUnsafeHead(x.Ref)
 		e.onUnsafeUpdate(ctx, x.Ref, e.unsafeHead)
 	case LocalSafeUpdateEvent:
-		// pre-interop everything that is local-safe is also immediately cross-safe.
-		if !e.rollupCfg.IsInterop(x.Ref.Time) {
+		// pre-interop (or if supervisor disabled) everything that is local-safe is also immediately cross-safe.
+		if !e.rollupCfg.IsInterop(x.Ref.Time) || !e.rollupCfg.SupervisorEnabled {
 			e.PromoteSafe(ctx, x.Ref, x.Source)
 		}
 	case InteropInvalidateBlockEvent:

@@ -473,9 +473,10 @@ func TestEngineQueue_Finalize(t *testing.T) {
 		emitter.AssertExpectations(t)
 	})
 
-	// The Finalizer does not promote any blocks to finalized status after interop.
-	// Blocks after interop are finalized with the interop deriver and interop backend.
-	t.Run("disable-after-interop", func(t *testing.T) {
+	// The Finalizer does not promote any blocks to finalized status after interop
+	// when SupervisorEnabled is true. Blocks after interop are finalized with the
+	// interop deriver and interop backend.
+	t.Run("disable-after-interop-with-supervisor", func(t *testing.T) {
 		logger := testlog.Logger(t, log.LevelInfo)
 		l1F := &testutils.MockL1Source{}
 		defer l1F.AssertExpectations(t)
@@ -484,8 +485,10 @@ func TestEngineQueue_Finalize(t *testing.T) {
 
 		emitter := &testutils.MockEmitter{}
 		ec := new(fakeEngineController)
+		// SupervisorEnabled=true means finalization is handed off to supervisor after interop
 		fi := NewFinalizer(context.Background(), logger, &rollup.Config{
-			InteropTime: &refC1.Time,
+			InteropTime:       &refC1.Time,
+			SupervisorEnabled: true,
 		}, nil, l1F, ec)
 		fi.AttachEmitter(emitter)
 
@@ -501,6 +504,39 @@ func TestEngineQueue_Finalize(t *testing.T) {
 		// C1 was Interop, C0 was not yet interop and can be finalized
 		fi.OnEvent(ctx, TryFinalizeEvent{})
 		require.Equal(t, refC0, ec.finalizedL2)
+		emitter.AssertExpectations(t)
+	})
+
+	// When SupervisorEnabled is false (default), local finalization continues
+	// even after interop activation.
+	t.Run("continue-after-interop-without-supervisor", func(t *testing.T) {
+		logger := testlog.Logger(t, log.LevelInfo)
+		l1F := &testutils.MockL1Source{}
+		defer l1F.AssertExpectations(t)
+		l1F.ExpectL1BlockRefByNumber(refD.Number, refD, nil)
+		l1F.ExpectL1BlockRefByNumber(refD.Number, refD, nil)
+
+		emitter := &testutils.MockEmitter{}
+		ec := new(fakeEngineController)
+		// SupervisorEnabled=false (default) means local finalization continues
+		fi := NewFinalizer(context.Background(), logger, &rollup.Config{
+			InteropTime:       &refC1.Time,
+			SupervisorEnabled: false,
+		}, nil, l1F, ec)
+		fi.AttachEmitter(emitter)
+
+		// now say C0 and C1 were included in D and became the new safe head
+		fi.OnEvent(ctx, engine.SafeDerivedEvent{Safe: refC0, Source: refD})
+		fi.OnEvent(ctx, engine.SafeDerivedEvent{Safe: refC1, Source: refD})
+		fi.OnEvent(ctx, derive.DeriverIdleEvent{Origin: refD})
+		emitter.AssertExpectations(t)
+
+		emitter.ExpectOnce(TryFinalizeEvent{})
+		fi.OnL1Finalized(refD)
+
+		// Both C0 and C1 can be finalized because supervisor is disabled
+		fi.OnEvent(ctx, TryFinalizeEvent{})
+		require.Equal(t, refC1, ec.finalizedL2)
 		emitter.AssertExpectations(t)
 	})
 }

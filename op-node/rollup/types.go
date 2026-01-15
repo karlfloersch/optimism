@@ -154,6 +154,12 @@ type Config struct {
 
 	// Optional Features
 
+	// SupervisorEnabled indicates whether supervisor-based interop features are enabled.
+	// When false (default), interop contracts deploy but cross-chain coordination is handled locally.
+	// When true, the node defers cross-unsafe/cross-safe/finality to the supervisor.
+	// This is only used for testing supervisor integration.
+	SupervisorEnabled bool `json:"supervisor_enabled,omitempty"`
+
 	// AltDAConfig. We are in the process of migrating to the AltDAConfig from these legacy top level values
 	AltDAConfig *AltDAConfig `json:"alt_da,omitempty"`
 

@@ -199,6 +199,11 @@ func SetupInterop(t helpers.Testing, opts ...setupOption) *InteropSetup {
 }
 
 func (is *InteropSetup) CreateActors() *InteropActors {
+	// Enable supervisor mode on rollup configs since we're creating supervisor actors
+	for _, l2Out := range is.Out.L2s {
+		l2Out.RollupCfg.SupervisorEnabled = true
+	}
+
 	l1Miner := helpers.NewL1Miner(is.T, is.Log.New("role", "l1Miner"), is.Out.L1.Genesis)
 	supervisorAPI := NewSupervisor(is.T, is.Log, is.CfgSet)
 	supervisorAPI.backend.AttachL1Source(l1Miner.L1ClientSimple(is.T))

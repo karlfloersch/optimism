@@ -298,10 +298,10 @@ func (fi *Finalizer) onDerivedSafeBlock(l2Safe eth.L2BlockRef, derivedFrom eth.L
 	fi.mu.Lock()
 	defer fi.mu.Unlock()
 
-	// Stop registering blocks after interop.
+	// Stop registering blocks after interop only if supervisor is enabled.
 	// Finality in interop is determined by the superchain backend,
 	// i.e. the op-supervisor RPC identifies which L2 block may be finalized.
-	if fi.cfg.IsInterop(l2Safe.Time) {
+	if fi.cfg.IsInterop(l2Safe.Time) && fi.cfg.SupervisorEnabled {
 		return
 	}
 
