@@ -32,9 +32,9 @@ abstract contract Deployer is Script {
 
         DeployUtils.etchLabelAndAllowCheatcodes({ _etchTo: address(cfg), _cname: "DeployConfig" });
 
-        // In test context, use hardcoded defaults by calling read() with empty path.
+        // In test context or kontrol context, use hardcoded defaults by calling read() with empty path.
         // In non-test context, read from the config file.
-        if (vm.isContext(VmSafe.ForgeContext.TestGroup)) {
+        if (vm.isContext(VmSafe.ForgeContext.TestGroup) || Config.isKontrolContext()) {
             cfg.read("");
         } else {
             cfg.read(Config.deployConfigPath());

@@ -342,4 +342,9 @@ library Config {
     function sysFeatureCustomGasToken() internal view returns (bool) {
         return vm.envOr("SYS_FEATURE__CUSTOM_GAS_TOKEN", false);
     }
+
+    /// @notice Returns true if running in kontrol context.
+    function isKontrolContext() internal view returns (bool) {
+        return vm.envOr("KONTROL_CONTEXT", false);
+    }
 }
