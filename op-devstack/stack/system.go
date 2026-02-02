@@ -20,12 +20,14 @@ type System interface {
 	Supervisor(m SupervisorMatcher) Supervisor
 	Supernode(m SupernodeMatcher) Supernode
 	TestSequencer(id TestSequencerMatcher) TestSequencer
+	InteropFilter(m InteropFilterMatcher) InteropFilter
 
 	SuperchainIDs() []SuperchainID
 	ClusterIDs() []ClusterID
 	L1NetworkIDs() []L1NetworkID
 	L2NetworkIDs() []L2NetworkID
 	SupervisorIDs() []SupervisorID
+	InteropFilterIDs() []InteropFilterID
 
 	Superchains() []Superchain
 	Clusters() []Cluster
@@ -34,6 +36,7 @@ type System interface {
 	Supervisors() []Supervisor
 	Supernodes() []Supernode
 	TestSequencers() []TestSequencer
+	InteropFilters() []InteropFilter
 }
 
 // ExtensibleSystem is an extension-interface to add new components to the system.
@@ -49,6 +52,7 @@ type ExtensibleSystem interface {
 	AddSupernode(v Supernode)
 	AddTestSequencer(v TestSequencer)
 	AddSyncTester(v SyncTester)
+	AddInteropFilter(v InteropFilter)
 }
 
 type TimeTravelClock interface {

@@ -53,6 +53,7 @@ type Orchestrator struct {
 	proposers       locks.RWMap[stack.L2ProposerID, *L2Proposer]
 	rollupBoosts    locks.RWMap[stack.RollupBoostNodeID, *RollupBoostNode]
 	oprbuilderNodes locks.RWMap[stack.OPRBuilderNodeID, *OPRBuilderNode]
+	interopFilters  locks.RWMap[stack.InteropFilterID, *InteropFilter]
 
 	// service name => prometheus endpoints to scrape
 	l2MetricsEndpoints locks.RWMap[string, []PrometheusMetricsTarget]
@@ -160,6 +161,7 @@ func (o *Orchestrator) Hydrate(sys stack.ExtensibleSystem) {
 	o.l2CLs.Range(rangeHydrateFn[stack.L2CLNodeID, L2CLNode](sys))
 	o.supervisors.Range(rangeHydrateFn[stack.SupervisorID, Supervisor](sys))
 	o.supernodes.Range(rangeHydrateFn[stack.SupernodeID, *SuperNode](sys))
+	o.interopFilters.Range(rangeHydrateFn[stack.InteropFilterID, *InteropFilter](sys))
 	o.testSequencers.Range(rangeHydrateFn[stack.TestSequencerID, *TestSequencer](sys))
 	o.batchers.Range(rangeHydrateFn[stack.L2BatcherID, *L2Batcher](sys))
 	o.challengers.Range(rangeHydrateFn[stack.L2ChallengerID, *L2Challenger](sys))

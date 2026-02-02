@@ -32,10 +32,11 @@ type presetSystem struct {
 	// tracks all networks, and ensures there are no networks with the same eth.ChainID
 	networks locks.RWMap[eth.ChainID, stack.Network]
 
-	supervisors locks.RWMap[stack.SupervisorID, stack.Supervisor]
-	supernodes  locks.RWMap[stack.SupernodeID, stack.Supernode]
-	sequencers  locks.RWMap[stack.TestSequencerID, stack.TestSequencer]
-	syncTesters locks.RWMap[stack.SyncTesterID, stack.SyncTester]
+	supervisors    locks.RWMap[stack.SupervisorID, stack.Supervisor]
+	supernodes     locks.RWMap[stack.SupernodeID, stack.Supernode]
+	sequencers     locks.RWMap[stack.TestSequencerID, stack.TestSequencer]
+	syncTesters    locks.RWMap[stack.SyncTesterID, stack.SyncTester]
+	interopFilters locks.RWMap[stack.InteropFilterID, stack.InteropFilter]
 }
 
 var _ stack.ExtensibleSystem = (*presetSystem)(nil)
@@ -136,6 +137,16 @@ func (p *presetSystem) AddSyncTester(v stack.SyncTester) {
 	p.require().True(p.syncTesters.SetIfMissing(v.ID(), v), "sync tester %s must not already exist", v.ID())
 }
 
+func (p *presetSystem) InteropFilter(m stack.InteropFilterMatcher) stack.InteropFilter {
+	v, ok := findMatch(m, p.interopFilters.Get, p.InteropFilters)
+	p.require().True(ok, "must find interop filter %s", m)
+	return v
+}
+
+func (p *presetSystem) AddInteropFilter(v stack.InteropFilter) {
+	p.require().True(p.interopFilters.SetIfMissing(v.ID(), v), "interop filter %s must not already exist", v.ID())
+}
+
 func (p *presetSystem) SuperchainIDs() []stack.SuperchainID {
 	return stack.SortSuperchainIDs(p.superchains.Keys())
 }
@@ -182,6 +193,14 @@ func (p *presetSystem) Supernodes() []stack.Supernode {
 
 func (p *presetSystem) TestSequencers() []stack.TestSequencer {
 	return stack.SortTestSequencers(p.sequencers.Values())
+}
+
+func (p *presetSystem) InteropFilterIDs() []stack.InteropFilterID {
+	return stack.SortInteropFilterIDs(p.interopFilters.Keys())
+}
+
+func (p *presetSystem) InteropFilters() []stack.InteropFilter {
+	return stack.SortInteropFilters(p.interopFilters.Values())
 }
 
 func (p *presetSystem) SetTimeTravelClock(cl stack.TimeTravelClock) {
