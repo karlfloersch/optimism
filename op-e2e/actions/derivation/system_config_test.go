@@ -32,6 +32,7 @@ func TestSystemConfigBatchType(t *testing.T) {
 		{"BatcherKeyRotation", BatcherKeyRotation},
 		{"GPOParamsChange", GPOParamsChange},
 		{"GasLimitChange", GasLimitChange},
+		{"HighGasLimitChange", HighGasLimitChange},
 	}
 	for _, test := range tests {
 		test := test
@@ -418,4 +419,44 @@ func GasLimitChange(gt *testing.T, deltaTimeOffset *hexutil.Uint64) {
 	verifier.ActL2PipelineFull(t)
 
 	require.Equal(t, sequencer.L2Unsafe(), verifier.L2Safe(), "verifier stays in sync, even with gaslimit changes")
+}
+
+// HighGasLimitChange tests that the gas limit can be set above the old 500M cap (now 2B).
+// This verifies the MAX_GAS_LIMIT raise from 500M to 2B works end-to-end.
+func HighGasLimitChange(gt *testing.T, deltaTimeOffset *hexutil.Uint64) {
+	t := actionsHelpers.NewDefaultTesting(gt)
+	dp := e2eutils.MakeDeployParams(t, actionsHelpers.DefaultRollupTestParams())
+	upgradesHelpers.ApplyDeltaTimeOffset(dp, deltaTimeOffset)
+	sd := e2eutils.Setup(t, dp, actionsHelpers.DefaultAlloc)
+	log := testlog.Logger(t, log.LevelDebug)
+	miner, seqEngine, sequencer := actionsHelpers.SetupSequencerTest(t, sd, log)
+
+	sequencer.ActL2PipelineFull(t)
+	miner.ActEmptyBlock(t)
+	sequencer.ActL1HeadSignal(t)
+	sequencer.ActBuildToL1Head(t)
+
+	// set gas limit to 1B -- above the old 500M cap
+	sysCfgContract, err := bindings.NewSystemConfig(sd.RollupCfg.L1SystemConfigAddress, miner.EthClient())
+	require.NoError(t, err)
+
+	sysCfgOwner, err := bind.NewKeyedTransactorWithChainID(dp.Secrets.Deployer, sd.RollupCfg.L1ChainID)
+	require.NoError(t, err)
+
+	newGasLimit := uint64(1_000_000_000)
+	_, err = sysCfgContract.SetGasLimit(sysCfgOwner, newGasLimit)
+	require.NoError(t, err)
+
+	// include the gas limit update on L1
+	miner.ActL1StartBlock(12)(t)
+	miner.ActL1IncludeTx(dp.Addresses.Deployer)(t)
+	miner.ActL1EndBlock(t)
+
+	// build L2 to adopt the new gas limit
+	sequencer.ActL1HeadSignal(t)
+	sequencer.ActBuildToL1Head(t)
+
+	// verify L2 adopted the 1B gas limit
+	require.Equal(t, newGasLimit, seqEngine.L2Chain().CurrentBlock().GasLimit,
+		"L2 block should adopt the 1B gas limit (above old 500M cap)")
 }
