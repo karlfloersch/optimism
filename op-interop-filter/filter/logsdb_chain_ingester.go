@@ -380,7 +380,6 @@ func (c *LogsDBChainIngester) initLogsDB() error {
 func (c *LogsDBChainIngester) runIngestion() {
 	defer c.wg.Done()
 
-	// One-time setup: determine starting block and next block to ingest
 	nextBlock, err := c.initIngestion()
 	if err != nil {
 		// Application context was canceled (e.g., during shutdown).
@@ -392,14 +391,11 @@ func (c *LogsDBChainIngester) runIngestion() {
 		return
 	}
 
-	// Track progress for logging
 	lastLogTime := clock.SystemClock.Now()
 
-	// Use ticker for polling interval
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
-	// Unified ingestion loop - no concept of "backfill" vs "live"
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -422,9 +418,8 @@ func (c *LogsDBChainIngester) runIngestion() {
 			continue
 		}
 
-		// Reorg detection: if head is at or behind our progress, verify hash at that height.
-		// This catches same-height reorgs where the head block was replaced without height decrease.
-		if head.NumberU64() <= nextBlock-1 {
+		// Verify canonical hash when head is behind the next block to ingest.
+		if head.NumberU64() < nextBlock {
 			if err := c.checkReorg(head); err != nil {
 				continue
 			}
@@ -466,7 +461,6 @@ func (c *LogsDBChainIngester) runIngestion() {
 				lastLogTime = clock.SystemClock.Now()
 			}
 		}
-		// Caught up to head, will wait for next ticker tick
 	}
 }
 
