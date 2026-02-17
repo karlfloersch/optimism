@@ -395,11 +395,10 @@ func (c *LogsDBChainIngester) runIngestion() {
 	// Track progress for logging
 	lastLogTime := clock.SystemClock.Now()
 
-	// Use ticker for polling interval
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
-	// Unified ingestion loop - no concept of "backfill" vs "live"
+	// Ingestion loop
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -422,8 +421,8 @@ func (c *LogsDBChainIngester) runIngestion() {
 			continue
 		}
 
-		// Reorg detection: if head moved behind our progress, check hash
-		if head.NumberU64() < nextBlock-1 {
+		// Verify canonical hash when head is behind the next block to ingest.
+		if head.NumberU64() < nextBlock {
 			if err := c.checkReorg(head); err != nil {
 				continue
 			}
@@ -448,24 +447,26 @@ func (c *LogsDBChainIngester) runIngestion() {
 			}
 			nextBlock++
 
-			// Progress logging
 			if clock.SystemClock.Since(lastLogTime) > progressLogInterval {
-				startingBlock := c.calculateStartingBlock()
-				if nextBlock <= startingBlock {
-					progress := float64(nextBlock-c.earliestIngestedBlock.Load()) / float64(startingBlock-c.earliestIngestedBlock.Load()+1)
-					c.log.Info("Ingestion progress",
-						"block", nextBlock-1,
-						"target", startingBlock,
-						"progress", fmt.Sprintf("%.0f%%", progress*100))
-					chainIDUint64, _ := c.chainID.Uint64()
-					c.metrics.RecordBackfillProgress(chainIDUint64, progress)
-				} else {
-					c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", head.NumberU64())
-				}
+				c.logProgress(nextBlock, head.NumberU64())
 				lastLogTime = clock.SystemClock.Now()
 			}
 		}
-		// Caught up to head, will wait for next ticker tick
+	}
+}
+
+func (c *LogsDBChainIngester) logProgress(nextBlock uint64, headNumber uint64) {
+	startingBlock := c.calculateStartingBlock()
+	if nextBlock <= startingBlock {
+		progress := float64(nextBlock-c.earliestIngestedBlock.Load()) / float64(startingBlock-c.earliestIngestedBlock.Load()+1)
+		c.log.Info("Ingestion progress",
+			"block", nextBlock-1,
+			"target", startingBlock,
+			"progress", fmt.Sprintf("%.0f%%", progress*100))
+		chainIDUint64, _ := c.chainID.Uint64()
+		c.metrics.RecordBackfillProgress(chainIDUint64, progress)
+	} else {
+		c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", headNumber)
 	}
 }
 

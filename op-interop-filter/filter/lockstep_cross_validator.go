@@ -291,6 +291,12 @@ func (v *LockstepCrossValidator) advanceValidation() {
 
 	// Lazy initialization: start from the configured start timestamp
 	if currentTs == 0 {
+		if err := v.validateTimestamp(v.startTimestamp); err != nil {
+			v.log.Error("Cross-validation failed during initialization", "timestamp", v.startTimestamp, "err", err)
+			v.setError(err.Error())
+			return
+		}
+
 		v.crossValidatedTs.Store(v.startTimestamp)
 		v.log.Info("Cross-validator initialized", "startTimestamp", v.startTimestamp)
 		return

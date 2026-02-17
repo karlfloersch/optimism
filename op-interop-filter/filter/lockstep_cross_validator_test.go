@@ -151,18 +151,7 @@ func TestCrossValidator_ValidationFailureSetsError(t *testing.T) {
 	mockA.AddLog(100, 10, 0, checksumA, types.BlockSeal{})
 	mockA.SetLatestTimestamp(101)
 
-	// Add INVALID executing message on chain B that references a non-existent log
-	mockB.AddExecMsg(IncludedMessage{
-		ExecutingMessage: &types.ExecutingMessage{
-			ChainID:   eth.ChainIDFromUInt64(testChainA), // References chain A
-			BlockNum:  999,                               // Non-existent block
-			LogIdx:    0,
-			Timestamp: 50,                          // Init timestamp
-			Checksum:  types.MessageChecksum{0xFF}, // Non-existent checksum
-		},
-		InclusionBlockNum:  11,
-		InclusionTimestamp: 101,
-	})
+	// No executing messages at start timestamp.
 	mockB.SetLatestTimestamp(101)
 
 	chains := map[eth.ChainID]ChainIngester{
@@ -184,7 +173,7 @@ func TestCrossValidator_ValidationFailureSetsError(t *testing.T) {
 	require.Nil(t, mockA.Error())
 	require.Nil(t, mockB.Error())
 
-	// First call triggers initialization (sets crossValidatedTs to minIngestedTs=101)
+	// First call validates and initializes start timestamp.
 	cv.advanceValidation()
 
 	// Simulate chains ingesting one more block (timestamp 102)
@@ -340,6 +329,38 @@ func TestAdvanceValidation_InitializesToStartTimestamp(t *testing.T) {
 	ts, ok := cv.CrossValidatedTimestamp()
 	require.True(t, ok)
 	require.Equal(t, uint64(100), ts, "should initialize to startTimestamp")
+}
+
+func TestAdvanceValidation_InitializationValidatesStartTimestamp(t *testing.T) {
+	mock := newMockChainIngester()
+	mock.SetReady(true)
+	mock.SetLatestTimestamp(100)
+
+	// Invalid executing message at the start timestamp.
+	mock.AddExecMsg(IncludedMessage{
+		ExecutingMessage: &types.ExecutingMessage{
+			ChainID:   eth.ChainIDFromUInt64(testChainA),
+			BlockNum:  999,
+			LogIdx:    0,
+			Timestamp: 50,
+			Checksum:  types.MessageChecksum{0xFF},
+		},
+		InclusionBlockNum:  11,
+		InclusionTimestamp: 100,
+	})
+
+	chains := map[eth.ChainID]ChainIngester{
+		eth.ChainIDFromUInt64(testChainA): mock,
+	}
+	cv := newTestCrossValidator(chains, testExpiryWindow, 100)
+
+	cv.advanceValidation()
+
+	require.NotNil(t, cv.Error())
+	require.Contains(t, cv.Error().Message, "validation failed")
+
+	_, ok := cv.CrossValidatedTimestamp()
+	require.False(t, ok, "should not initialize when start timestamp validation fails")
 }
 
 func TestAdvanceValidation_AdvancesTimestamp(t *testing.T) {
