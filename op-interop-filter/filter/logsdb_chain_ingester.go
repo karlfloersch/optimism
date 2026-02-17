@@ -422,8 +422,9 @@ func (c *LogsDBChainIngester) runIngestion() {
 			continue
 		}
 
-		// Reorg detection: if head moved behind our progress, check hash
-		if head.NumberU64() < nextBlock-1 {
+		// Reorg detection: if head is at or behind our progress, verify hash at that height.
+		// This catches same-height reorgs where the head block was replaced without height decrease.
+		if head.NumberU64() <= nextBlock-1 {
 			if err := c.checkReorg(head); err != nil {
 				continue
 			}

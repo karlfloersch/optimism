@@ -448,6 +448,71 @@ func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
 	require.Equal(t, ErrorReorg, ingesterErr.Reason)
 }
 
+func TestLogsDBChainIngester_DetectsSameHeightReorgInRunLoop(t *testing.T) {
+	chainID := eth.ChainIDFromUInt64(901)
+	tempDir := t.TempDir()
+
+	mockClient := NewMockEthClient()
+
+	parent := &mockBlockInfo{
+		number:     99,
+		hash:       common.Hash{0x99},
+		parentHash: common.Hash{0x55},
+		timestamp:  1198,
+	}
+	originalHead := &mockBlockInfo{
+		number:     100,
+		hash:       common.Hash{0xAA},
+		parentHash: parent.Hash(),
+		timestamp:  1200,
+	}
+	reorgedHead := &mockBlockInfo{
+		number:     100,
+		hash:       common.Hash{0xBB}, // same height, different hash
+		parentHash: parent.Hash(),
+		timestamp:  1200,
+	}
+
+	// Build DB state from original canonical head.
+	mockClient.AddBlock(parent, nil)
+	mockClient.AddBlock(originalHead, nil)
+	mockClient.SetHeadBlock(originalHead)
+
+	seedIngester := newTestLogsDBChainIngester(t, testIngesterConfig{
+		chainID:   chainID,
+		dataDir:   tempDir,
+		ethClient: mockClient,
+		rollupCfg: testRollupConfig(901, 0, 1000),
+	})
+	err := seedIngester.initLogsDB()
+	require.NoError(t, err)
+	err = seedIngester.sealParentBlock(99)
+	require.NoError(t, err)
+	err = seedIngester.ingestBlock(100)
+	require.NoError(t, err)
+	require.NoError(t, seedIngester.logsDB.Close())
+
+	// Same-height reorg: head block number stays 100 but hash changes.
+	mockClient.AddBlock(reorgedHead, nil) // overwrite block 100 by number
+	mockClient.SetHeadBlock(reorgedHead)
+
+	ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
+		chainID:   chainID,
+		dataDir:   tempDir,
+		ethClient: mockClient,
+		rollupCfg: testRollupConfig(901, 0, 1000),
+	})
+	ingester.pollInterval = 10 * time.Millisecond
+
+	require.NoError(t, ingester.Start())
+	t.Cleanup(func() { _ = ingester.Stop() })
+
+	require.Eventually(t, func() bool {
+		ingesterErr := ingester.Error()
+		return ingesterErr != nil && ingesterErr.Reason == ErrorReorg
+	}, 300*time.Millisecond, 10*time.Millisecond, "run loop should detect same-height reorg")
+}
+
 func TestLogsDBChainIngester_QueryMethods(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(901)
 	tempDir := t.TempDir()
