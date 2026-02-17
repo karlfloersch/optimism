@@ -447,16 +447,15 @@ func (c *LogsDBChainIngester) runIngestion() {
 			}
 			nextBlock++
 
-			lastLogTime = c.maybeLogProgress(nextBlock, head.NumberU64(), lastLogTime)
+			if clock.SystemClock.Since(lastLogTime) > progressLogInterval {
+				c.logProgress(nextBlock, head.NumberU64())
+				lastLogTime = clock.SystemClock.Now()
+			}
 		}
 	}
 }
 
-func (c *LogsDBChainIngester) maybeLogProgress(nextBlock uint64, headNumber uint64, lastLogTime time.Time) time.Time {
-	if clock.SystemClock.Since(lastLogTime) <= progressLogInterval {
-		return lastLogTime
-	}
-
+func (c *LogsDBChainIngester) logProgress(nextBlock uint64, headNumber uint64) {
 	startingBlock := c.calculateStartingBlock()
 	if nextBlock <= startingBlock {
 		progress := float64(nextBlock-c.earliestIngestedBlock.Load()) / float64(startingBlock-c.earliestIngestedBlock.Load()+1)
@@ -469,8 +468,6 @@ func (c *LogsDBChainIngester) maybeLogProgress(nextBlock uint64, headNumber uint
 	} else {
 		c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", headNumber)
 	}
-
-	return clock.SystemClock.Now()
 }
 
 // initIngestion performs one-time setup and returns the first block to ingest.

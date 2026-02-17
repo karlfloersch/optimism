@@ -406,8 +406,31 @@ func TestLogsDBChainIngester_Contains(t *testing.T) {
 }
 
 func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
+	chainID := eth.ChainIDFromUInt64(901)
+	rollupCfg := testRollupConfig(901, 0, 1000)
+
+	newIngester := func(t *testing.T, dataDir string, mockClient *MockEthClient) *LogsDBChainIngester {
+		t.Helper()
+		return newTestLogsDBChainIngester(t, testIngesterConfig{
+			chainID:   chainID,
+			dataDir:   dataDir,
+			ethClient: mockClient,
+			rollupCfg: rollupCfg,
+		})
+	}
+
+	initDB := func(t *testing.T, ingester *LogsDBChainIngester) {
+		t.Helper()
+		require.NoError(t, ingester.initLogsDB())
+	}
+
+	seedToBlock100 := func(t *testing.T, ingester *LogsDBChainIngester) {
+		t.Helper()
+		require.NoError(t, ingester.sealParentBlock(99))
+		require.NoError(t, ingester.ingestBlock(100))
+	}
+
 	t.Run("parent-hash mismatch in ingestBlock", func(t *testing.T) {
-		chainID := eth.ChainIDFromUInt64(901)
 		tempDir := t.TempDir()
 
 		mockClient := NewMockEthClient()
@@ -418,27 +441,15 @@ func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
 		block100 := createTestBlock(100, 1200, parentBlock.Hash())
 		mockClient.AddBlock(block100, createTestReceipts(100, 1))
 
-		ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
-			chainID:   chainID,
-			dataDir:   tempDir,
-			ethClient: mockClient,
-			rollupCfg: testRollupConfig(901, 0, 1000),
-		})
-
-		err := ingester.initLogsDB()
-		require.NoError(t, err)
+		ingester := newIngester(t, tempDir, mockClient)
+		initDB(t, ingester)
 		t.Cleanup(func() { ingester.logsDB.Close() })
-
-		err = ingester.sealParentBlock(99)
-		require.NoError(t, err)
-
-		err = ingester.ingestBlock(100)
-		require.NoError(t, err)
+		seedToBlock100(t, ingester)
 
 		reorgBlock := createTestBlock(101, 1202, common.Hash{0xDE, 0xAD})
 		mockClient.AddBlock(reorgBlock, createTestReceipts(101, 1))
 
-		err = ingester.ingestBlock(101)
+		err := ingester.ingestBlock(101)
 		require.NoError(t, err)
 
 		ingesterErr := ingester.Error()
@@ -447,7 +458,6 @@ func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
 	})
 
 	t.Run("same-height reorg in run loop", func(t *testing.T) {
-		chainID := eth.ChainIDFromUInt64(901)
 		tempDir := t.TempDir()
 
 		mockClient := NewMockEthClient()
@@ -475,29 +485,15 @@ func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
 		mockClient.AddBlock(originalHead, nil)
 		mockClient.SetHeadBlock(originalHead)
 
-		seedIngester := newTestLogsDBChainIngester(t, testIngesterConfig{
-			chainID:   chainID,
-			dataDir:   tempDir,
-			ethClient: mockClient,
-			rollupCfg: testRollupConfig(901, 0, 1000),
-		})
-		err := seedIngester.initLogsDB()
-		require.NoError(t, err)
-		err = seedIngester.sealParentBlock(99)
-		require.NoError(t, err)
-		err = seedIngester.ingestBlock(100)
-		require.NoError(t, err)
+		seedIngester := newIngester(t, tempDir, mockClient)
+		initDB(t, seedIngester)
+		seedToBlock100(t, seedIngester)
 		require.NoError(t, seedIngester.logsDB.Close())
 
 		mockClient.AddBlock(reorgedHead, nil)
 		mockClient.SetHeadBlock(reorgedHead)
 
-		ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
-			chainID:   chainID,
-			dataDir:   tempDir,
-			ethClient: mockClient,
-			rollupCfg: testRollupConfig(901, 0, 1000),
-		})
+		ingester := newIngester(t, tempDir, mockClient)
 		ingester.pollInterval = 10 * time.Millisecond
 
 		require.NoError(t, ingester.Start())
