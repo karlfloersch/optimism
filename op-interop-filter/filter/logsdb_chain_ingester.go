@@ -380,6 +380,7 @@ func (c *LogsDBChainIngester) initLogsDB() error {
 func (c *LogsDBChainIngester) runIngestion() {
 	defer c.wg.Done()
 
+	// One-time setup: determine starting block and next block to ingest
 	nextBlock, err := c.initIngestion()
 	if err != nil {
 		// Application context was canceled (e.g., during shutdown).
@@ -391,11 +392,13 @@ func (c *LogsDBChainIngester) runIngestion() {
 		return
 	}
 
+	// Track progress for logging
 	lastLogTime := clock.SystemClock.Now()
 
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
+	// Ingestion loop
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -444,24 +447,30 @@ func (c *LogsDBChainIngester) runIngestion() {
 			}
 			nextBlock++
 
-			// Progress logging
-			if clock.SystemClock.Since(lastLogTime) > progressLogInterval {
-				startingBlock := c.calculateStartingBlock()
-				if nextBlock <= startingBlock {
-					progress := float64(nextBlock-c.earliestIngestedBlock.Load()) / float64(startingBlock-c.earliestIngestedBlock.Load()+1)
-					c.log.Info("Ingestion progress",
-						"block", nextBlock-1,
-						"target", startingBlock,
-						"progress", fmt.Sprintf("%.0f%%", progress*100))
-					chainIDUint64, _ := c.chainID.Uint64()
-					c.metrics.RecordBackfillProgress(chainIDUint64, progress)
-				} else {
-					c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", head.NumberU64())
-				}
-				lastLogTime = clock.SystemClock.Now()
-			}
+			lastLogTime = c.maybeLogProgress(nextBlock, head.NumberU64(), lastLogTime)
 		}
 	}
+}
+
+func (c *LogsDBChainIngester) maybeLogProgress(nextBlock uint64, headNumber uint64, lastLogTime time.Time) time.Time {
+	if clock.SystemClock.Since(lastLogTime) <= progressLogInterval {
+		return lastLogTime
+	}
+
+	startingBlock := c.calculateStartingBlock()
+	if nextBlock <= startingBlock {
+		progress := float64(nextBlock-c.earliestIngestedBlock.Load()) / float64(startingBlock-c.earliestIngestedBlock.Load()+1)
+		c.log.Info("Ingestion progress",
+			"block", nextBlock-1,
+			"target", startingBlock,
+			"progress", fmt.Sprintf("%.0f%%", progress*100))
+		chainIDUint64, _ := c.chainID.Uint64()
+		c.metrics.RecordBackfillProgress(chainIDUint64, progress)
+	} else {
+		c.log.Debug("Ingestion progress", "block", nextBlock-1, "head", headNumber)
+	}
+
+	return clock.SystemClock.Now()
 }
 
 // initIngestion performs one-time setup and returns the first block to ingest.
