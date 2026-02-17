@@ -406,111 +406,108 @@ func TestLogsDBChainIngester_Contains(t *testing.T) {
 }
 
 func TestLogsDBChainIngester_ReorgDetection(t *testing.T) {
-	chainID := eth.ChainIDFromUInt64(901)
-	tempDir := t.TempDir()
+	t.Run("parent-hash mismatch in ingestBlock", func(t *testing.T) {
+		chainID := eth.ChainIDFromUInt64(901)
+		tempDir := t.TempDir()
 
-	mockClient := NewMockEthClient()
+		mockClient := NewMockEthClient()
 
-	// Create blocks
-	parentBlock := createTestBlock(99, 1198, common.Hash{})
-	mockClient.AddBlock(parentBlock, nil)
+		parentBlock := createTestBlock(99, 1198, common.Hash{})
+		mockClient.AddBlock(parentBlock, nil)
 
-	block100 := createTestBlock(100, 1200, parentBlock.Hash())
-	mockClient.AddBlock(block100, createTestReceipts(100, 1))
+		block100 := createTestBlock(100, 1200, parentBlock.Hash())
+		mockClient.AddBlock(block100, createTestReceipts(100, 1))
 
-	ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
-		chainID:   chainID,
-		dataDir:   tempDir,
-		ethClient: mockClient,
-		rollupCfg: testRollupConfig(901, 0, 1000),
-	})
+		ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
+			chainID:   chainID,
+			dataDir:   tempDir,
+			ethClient: mockClient,
+			rollupCfg: testRollupConfig(901, 0, 1000),
+		})
 
-	err := ingester.initLogsDB()
-	require.NoError(t, err)
-	t.Cleanup(func() { ingester.logsDB.Close() })
+		err := ingester.initLogsDB()
+		require.NoError(t, err)
+		t.Cleanup(func() { ingester.logsDB.Close() })
 
-	err = ingester.sealParentBlock(99)
-	require.NoError(t, err)
+		err = ingester.sealParentBlock(99)
+		require.NoError(t, err)
 
-	err = ingester.ingestBlock(100)
-	require.NoError(t, err)
+		err = ingester.ingestBlock(100)
+		require.NoError(t, err)
 
-	// Now try to ingest a block with wrong parent hash (simulating a reorg)
-	reorgBlock := createTestBlock(101, 1202, common.Hash{0xDE, 0xAD}) // Wrong parent
-	mockClient.AddBlock(reorgBlock, createTestReceipts(101, 1))
+		reorgBlock := createTestBlock(101, 1202, common.Hash{0xDE, 0xAD})
+		mockClient.AddBlock(reorgBlock, createTestReceipts(101, 1))
 
-	err = ingester.ingestBlock(101)
-	require.NoError(t, err) // ingestBlock doesn't return error, it sets error state
+		err = ingester.ingestBlock(101)
+		require.NoError(t, err)
 
-	// Check that error state was set
-	ingesterErr := ingester.Error()
-	require.NotNil(t, ingesterErr)
-	require.Equal(t, ErrorReorg, ingesterErr.Reason)
-}
-
-func TestLogsDBChainIngester_DetectsSameHeightReorgInRunLoop(t *testing.T) {
-	chainID := eth.ChainIDFromUInt64(901)
-	tempDir := t.TempDir()
-
-	mockClient := NewMockEthClient()
-
-	parent := &mockBlockInfo{
-		number:     99,
-		hash:       common.Hash{0x99},
-		parentHash: common.Hash{0x55},
-		timestamp:  1198,
-	}
-	originalHead := &mockBlockInfo{
-		number:     100,
-		hash:       common.Hash{0xAA},
-		parentHash: parent.Hash(),
-		timestamp:  1200,
-	}
-	reorgedHead := &mockBlockInfo{
-		number:     100,
-		hash:       common.Hash{0xBB}, // same height, different hash
-		parentHash: parent.Hash(),
-		timestamp:  1200,
-	}
-
-	// Build DB state from original canonical head.
-	mockClient.AddBlock(parent, nil)
-	mockClient.AddBlock(originalHead, nil)
-	mockClient.SetHeadBlock(originalHead)
-
-	seedIngester := newTestLogsDBChainIngester(t, testIngesterConfig{
-		chainID:   chainID,
-		dataDir:   tempDir,
-		ethClient: mockClient,
-		rollupCfg: testRollupConfig(901, 0, 1000),
-	})
-	err := seedIngester.initLogsDB()
-	require.NoError(t, err)
-	err = seedIngester.sealParentBlock(99)
-	require.NoError(t, err)
-	err = seedIngester.ingestBlock(100)
-	require.NoError(t, err)
-	require.NoError(t, seedIngester.logsDB.Close())
-
-	// Same-height reorg: head block number stays 100 but hash changes.
-	mockClient.AddBlock(reorgedHead, nil) // overwrite block 100 by number
-	mockClient.SetHeadBlock(reorgedHead)
-
-	ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
-		chainID:   chainID,
-		dataDir:   tempDir,
-		ethClient: mockClient,
-		rollupCfg: testRollupConfig(901, 0, 1000),
-	})
-	ingester.pollInterval = 10 * time.Millisecond
-
-	require.NoError(t, ingester.Start())
-	t.Cleanup(func() { _ = ingester.Stop() })
-
-	require.Eventually(t, func() bool {
 		ingesterErr := ingester.Error()
-		return ingesterErr != nil && ingesterErr.Reason == ErrorReorg
-	}, 300*time.Millisecond, 10*time.Millisecond, "run loop should detect same-height reorg")
+		require.NotNil(t, ingesterErr)
+		require.Equal(t, ErrorReorg, ingesterErr.Reason)
+	})
+
+	t.Run("same-height reorg in run loop", func(t *testing.T) {
+		chainID := eth.ChainIDFromUInt64(901)
+		tempDir := t.TempDir()
+
+		mockClient := NewMockEthClient()
+
+		parent := &mockBlockInfo{
+			number:     99,
+			hash:       common.Hash{0x99},
+			parentHash: common.Hash{0x55},
+			timestamp:  1198,
+		}
+		originalHead := &mockBlockInfo{
+			number:     100,
+			hash:       common.Hash{0xAA},
+			parentHash: parent.Hash(),
+			timestamp:  1200,
+		}
+		reorgedHead := &mockBlockInfo{
+			number:     100,
+			hash:       common.Hash{0xBB},
+			parentHash: parent.Hash(),
+			timestamp:  1200,
+		}
+
+		mockClient.AddBlock(parent, nil)
+		mockClient.AddBlock(originalHead, nil)
+		mockClient.SetHeadBlock(originalHead)
+
+		seedIngester := newTestLogsDBChainIngester(t, testIngesterConfig{
+			chainID:   chainID,
+			dataDir:   tempDir,
+			ethClient: mockClient,
+			rollupCfg: testRollupConfig(901, 0, 1000),
+		})
+		err := seedIngester.initLogsDB()
+		require.NoError(t, err)
+		err = seedIngester.sealParentBlock(99)
+		require.NoError(t, err)
+		err = seedIngester.ingestBlock(100)
+		require.NoError(t, err)
+		require.NoError(t, seedIngester.logsDB.Close())
+
+		mockClient.AddBlock(reorgedHead, nil)
+		mockClient.SetHeadBlock(reorgedHead)
+
+		ingester := newTestLogsDBChainIngester(t, testIngesterConfig{
+			chainID:   chainID,
+			dataDir:   tempDir,
+			ethClient: mockClient,
+			rollupCfg: testRollupConfig(901, 0, 1000),
+		})
+		ingester.pollInterval = 10 * time.Millisecond
+
+		require.NoError(t, ingester.Start())
+		t.Cleanup(func() { _ = ingester.Stop() })
+
+		require.Eventually(t, func() bool {
+			ingesterErr := ingester.Error()
+			return ingesterErr != nil && ingesterErr.Reason == ErrorReorg
+		}, 300*time.Millisecond, 10*time.Millisecond, "run loop should detect same-height reorg")
+	})
 }
 
 func TestLogsDBChainIngester_QueryMethods(t *testing.T) {
