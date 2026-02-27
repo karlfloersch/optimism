@@ -492,7 +492,7 @@ func (s *Driver) followUpstream() {
 		s.log.Warn("Follow Upstream: Failed to fetch status", "err", err)
 		return
 	}
-	s.log.Info("Follow Upstream", "eSafe", status.SafeL2, "eFinalized", status.FinalizedL2, "eCurrentL1", status.CurrentL1)
+	s.log.Info("Follow Upstream", "eSafe", status.SafeL2, "eLocalSafe", status.LocalSafeL2, "eFinalized", status.FinalizedL2, "eCurrentL1", status.CurrentL1)
 	if status.FinalizedL2.Number > status.SafeL2.Number {
 		s.log.Warn("Follow Upstream: Invalid external state, finalized is ahead of safe", "safe", status.SafeL2.Number, "finalized", status.FinalizedL2.Number)
 		return
@@ -547,5 +547,5 @@ func (s *Driver) followUpstream() {
 		s.emitter.Emit(s.driverCtx, derive.DeriverL1StatusEvent{Origin: status.CurrentL1})
 	}
 	// Only reach this point if all L1 checks passed
-	s.SyncDeriver.Engine.FollowSource(status.SafeL2, status.FinalizedL2)
+	s.SyncDeriver.Engine.FollowSource(status.SafeL2, status.LocalSafeL2, status.FinalizedL2)
 }

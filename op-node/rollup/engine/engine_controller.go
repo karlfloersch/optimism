@@ -1208,7 +1208,7 @@ func (e *EngineController) startPayload(ctx context.Context, fc eth.ForkchoiceSt
 	}
 }
 
-func (e *EngineController) FollowSource(eSafeBlockRef, eFinalizedRef eth.L2BlockRef) {
+func (e *EngineController) FollowSource(eSafeBlockRef, eLocalSafeRef, eFinalizedRef eth.L2BlockRef) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -1218,7 +1218,7 @@ func (e *EngineController) FollowSource(eSafeBlockRef, eFinalizedRef eth.L2Block
 			// May interrupt ongoing EL Sync to update the target, or trigger EL Sync
 			e.tryUpdateUnsafe(e.ctx, eSafeBlockRef)
 		}
-		e.tryUpdateLocalSafe(e.ctx, eSafeBlockRef, true, eth.L1BlockRef{})
+		e.tryUpdateLocalSafe(e.ctx, eLocalSafeRef, true, eth.L1BlockRef{})
 		// Directly update the Engine Controller state, bypassing finalizer
 		if e.FinalizedHead().Number <= eFinalizedRef.Number {
 			e.promoteFinalized(e.ctx, eFinalizedRef)
@@ -1229,6 +1229,7 @@ func (e *EngineController) FollowSource(eSafeBlockRef, eFinalizedRef eth.L2Block
 		"currentUnsafe", e.unsafeHead,
 		"currentSafe", e.SafeL2Head(),
 		"externalSafe", eSafeBlockRef,
+		"externalLocalSafe", eLocalSafeRef,
 		"externalFinalized", eFinalizedRef,
 	)
 
