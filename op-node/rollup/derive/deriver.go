@@ -179,7 +179,7 @@ func (d *PipelineDeriver) OnEvent(ctx context.Context, ev event.Event) bool {
 		d.pipeline.log.Warn("Deriving deposits-only attributes", "origin", d.pipeline.Origin())
 		attrib, err := d.pipeline.DepositsOnlyAttributes(x.Parent, x.DerivedFrom)
 		if err != nil {
-			d.emitter.Emit(ctx, rollup.CriticalErrorEvent{
+			d.emitter.Emit(ctx, rollup.ResetEvent{
 				Err: fmt.Errorf("deriving deposits-only attributes: %w", err),
 			})
 			return true
