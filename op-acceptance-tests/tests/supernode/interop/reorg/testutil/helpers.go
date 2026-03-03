@@ -70,6 +70,7 @@ func SetupInvalidExecMsgScenario(t devtest.T, filteringEnabled bool) *InvalidExe
 		gethB.SetSupervisorRPC(mockEndpoint)
 	}
 	sys.L2ELB.Start()
+	sys.L2B.WaitForBlock()
 
 	// Create funded EOAs
 	alice := sys.FunderA.NewFundedEOA(eth.OneEther)
