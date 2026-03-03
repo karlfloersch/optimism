@@ -116,7 +116,7 @@ func (n *OpGeth) Start() {
 	l2Geth, err := geth.InitL2(n.id.String(), n.l2Net.genesis, n.jwtPath,
 		func(ethCfg *ethconfig.Config, nodeCfg *gn.Config) error {
 			ethCfg.InteropMessageRPC = n.supervisorRPC
-			ethCfg.InteropMempoolFiltering = true
+			ethCfg.InteropMempoolFiltering = n.cfg.InteropMempoolFiltering == nil || *n.cfg.InteropMempoolFiltering
 
 			listenAddr := n.cfg.P2PAddr
 			port := n.cfg.P2PPort
@@ -177,6 +177,18 @@ func (n *OpGeth) Stop() {
 	closeErr := n.l2Geth.Close()
 	n.logger.Info("Closed op-geth", "id", n.id, "err", closeErr)
 	n.l2Geth = nil
+}
+
+// SetInteropMempoolFiltering updates the interop mempool filtering config.
+// Takes effect on the next Start().
+func (n *OpGeth) SetInteropMempoolFiltering(enabled *bool) {
+	n.cfg.InteropMempoolFiltering = enabled
+}
+
+// SetSupervisorRPC overrides the supervisor RPC endpoint used for
+// InteropMessageRPC. Takes effect on the next Start().
+func (n *OpGeth) SetSupervisorRPC(endpoint string) {
+	n.supervisorRPC = endpoint
 }
 
 func WithOpGeth(id stack.L2ELNodeID, opts ...L2ELOption) stack.Option[*Orchestrator] {

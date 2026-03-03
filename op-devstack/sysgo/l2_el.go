@@ -16,13 +16,14 @@ type L2ELNode interface {
 }
 
 type L2ELConfig struct {
-	SupervisorID  *stack.SupervisorID
-	P2PAddr       string
-	P2PPort       int
-	P2PNodeKeyHex string
-	StaticPeers   []string
-	TrustedPeers  []string
-	ProofHistory  bool
+	SupervisorID            *stack.SupervisorID
+	P2PAddr                 string
+	P2PPort                 int
+	P2PNodeKeyHex           string
+	StaticPeers             []string
+	TrustedPeers            []string
+	ProofHistory            bool
+	InteropMempoolFiltering *bool
 }
 
 func L2ELWithSupervisor(supervisorID stack.SupervisorID) L2ELOption {
@@ -34,6 +35,12 @@ func L2ELWithSupervisor(supervisorID stack.SupervisorID) L2ELOption {
 func L2ELWithProofHistory(enable bool) L2ELOption {
 	return L2ELOptionFn(func(p devtest.P, id stack.L2ELNodeID, cfg *L2ELConfig) {
 		cfg.ProofHistory = enable
+	})
+}
+
+func L2ELWithInteropMempoolFiltering(enabled bool) L2ELOption {
+	return L2ELOptionFn(func(p devtest.P, id stack.L2ELNodeID, cfg *L2ELConfig) {
+		cfg.InteropMempoolFiltering = &enabled
 	})
 }
 
