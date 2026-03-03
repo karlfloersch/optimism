@@ -229,7 +229,7 @@ func (e *EngineController) SafeL2Head() eth.L2BlockRef {
 			panic("superAuthority supplied an identifier for the safe head which is not known to the engine")
 		}
 		return br
-	} else if e.supervisorEnabled {
+	} else if e.supervisorEnabled || e.syncCfg.FollowSourceEnabled() {
 		return e.deprecatedSafeHead
 	} else {
 		return e.localSafeHead
@@ -262,7 +262,7 @@ func (e *EngineController) FinalizedHead() eth.L2BlockRef {
 			panic("superAuthority supplied an identifier for the finalized head which is not known to the engine")
 		}
 		return br
-	} else if e.supervisorEnabled {
+	} else if e.supervisorEnabled || e.syncCfg.FollowSourceEnabled() {
 		return e.deprecatedFinalizedHead
 	} else {
 		return e.localFinalizedHead
@@ -787,7 +787,7 @@ func (e *EngineController) TryUpdateEngine(ctx context.Context) {
 
 func (e *EngineController) localSafeIsFullySafe(timestamp uint64) bool {
 	// pre-interop (or if supervisor disabled) everything that is local-safe is also immediately cross-safe.
-	return !e.rollupCfg.IsInterop(timestamp) || !e.supervisorEnabled
+	return !e.rollupCfg.IsInterop(timestamp) || (!e.supervisorEnabled && !e.syncCfg.FollowSourceEnabled())
 }
 
 func (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {
