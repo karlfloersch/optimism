@@ -435,16 +435,17 @@ func TestFollowSource_DivergentLocalSafeAndCrossSafe(t *testing.T) {
 		L1Origin: l1Origin.ID(), SequenceNumber: 5,
 	}
 
-	cfg := &rollup.Config{}
+	interopTime := uint64(0)
+	cfg := &rollup.Config{InteropTime: &interopTime}
 	mockEngine := &testutils.MockEngine{}
 	emitter := &testutils.MockEmitter{}
 
-	// supervisorEnabled=true with no superAuthority:
+	// FollowSourceEnabled=true with no superAuthority:
 	//   SafeL2Head() returns deprecatedSafeHead (cross-safe)
 	//   FinalizedHead() returns deprecatedFinalizedHead
 	// This lets us observe cross-safe independently from local-safe.
 	ec := NewEngineController(context.Background(), mockEngine, testlog.Logger(t, 0),
-		metrics.NoopMetrics, cfg, &sync.Config{}, true, &testutils.MockL1Source{}, emitter, nil)
+		metrics.NoopMetrics, cfg, &sync.Config{L2FollowSourceEndpoint: "http://localhost"}, false, &testutils.MockL1Source{}, emitter, nil)
 
 	// Initial state: unsafe=block5, localSafe=block2, crossSafe=block2, finalized=block1
 	ec.unsafeHead = block5
@@ -485,7 +486,7 @@ func TestFollowSource_DivergentLocalSafeAndCrossSafe(t *testing.T) {
 	// Assert the final head state
 	require.Equal(t, block5, ec.localSafeHead, "localSafeHead should be updated to block5")
 	require.Equal(t, block4, ec.deprecatedSafeHead, "deprecatedSafeHead (cross-safe) should be updated to block4")
-	require.Equal(t, block3, ec.localFinalizedHead, "finalized should be updated to block3")
+	require.Equal(t, block3, ec.deprecatedFinalizedHead, "deprecatedFinalizedHead (cross-finalized) should be updated to block3")
 
 	// Assert the invariant: cross-safe <= local-safe
 	require.LessOrEqual(t, ec.deprecatedSafeHead.Number, ec.localSafeHead.Number,
