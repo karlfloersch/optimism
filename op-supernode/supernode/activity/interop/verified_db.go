@@ -127,6 +127,39 @@ func (v *VerifiedDB) Commit(result VerifiedResult) error {
 	return nil
 }
 
+// ReverseIter iterates backwards over actual entries in the DB starting from startTs.
+// The callback receives each timestamp and result. Return false to stop iteration.
+func (v *VerifiedDB) ReverseIter(startTs uint64, fn func(ts uint64, result VerifiedResult) bool) error {
+	return v.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		c := b.Cursor()
+
+		// Seek to startTs or the nearest key before it
+		seekKey := timestampToKey(startTs)
+		k, val := c.Seek(seekKey)
+		// If Seek landed past startTs, go back one
+		if k != nil && binary.BigEndian.Uint64(k) > startTs {
+			k, val = c.Prev()
+		}
+		// If Seek returned nil (startTs is past all keys), start from the last key
+		if k == nil {
+			k, val = c.Last()
+		}
+
+		for ; k != nil && len(k) == u64Len; k, val = c.Prev() {
+			ts := binary.BigEndian.Uint64(k)
+			var result VerifiedResult
+			if err := json.Unmarshal(val, &result); err != nil {
+				continue
+			}
+			if !fn(ts, result) {
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
 // Get retrieves the verified result at the given timestamp.
 func (v *VerifiedDB) Get(ts uint64) (VerifiedResult, error) {
 	key := timestampToKey(ts)

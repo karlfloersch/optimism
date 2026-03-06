@@ -458,34 +458,37 @@ func (i *Interop) LatestVerifiedL2Block(chainID eth.ChainID) (eth.BlockID, uint6
 // which guarantees that the verified data at that pauseAtTimestamp
 // originates from or before the supplied L1 block.
 func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef) (eth.BlockID, uint64) {
+	// If L1 block is empty/zero, nothing can match
+	if l1Block == (eth.L1BlockRef{}) {
+		return eth.BlockID{}, 0
+	}
+
 	// Get the last verified timestamp
 	lastTs, ok := i.verifiedDB.LastTimestamp()
 	if !ok {
 		return eth.BlockID{}, 0
 	}
 
-	// Search backwards from the last timestamp to find the latest result
+	// Search backwards over actual DB entries to find the latest result
 	// where the L1 inclusion block is at or below the supplied L1 block number
-	for ts := lastTs; ts > 0; ts-- {
-		result, err := i.verifiedDB.Get(ts)
-		if err != nil {
-			// Timestamp might not exist (due to gaps or rewinds), continue searching
-			continue
-		}
-
-		// Check if this result's L1 inclusion is at or below the supplied L1 block number
+	var foundID eth.BlockID
+	var foundTs uint64
+	err := i.verifiedDB.ReverseIter(lastTs, func(ts uint64, result VerifiedResult) bool {
 		if result.L1Inclusion.Number <= l1Block.Number {
-			// Found a finalized result, return the L2 head for this chain
 			head, ok := result.L2Heads[chainID]
 			if !ok {
-				return eth.BlockID{}, 0
+				return false // stop, chain not in this result
 			}
-			return head, ts
+			foundID = head
+			foundTs = ts
+			return false // found it, stop
 		}
+		return true // keep searching
+	})
+	if err != nil {
+		return eth.BlockID{}, 0
 	}
-
-	// No verified block found
-	return eth.BlockID{}, 0
+	return foundID, foundTs
 }
 
 // Reset is called when a chain container resets due to an invalidated block.
