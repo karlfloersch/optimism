@@ -7,6 +7,7 @@ This is a working implementation plan, not a rigid spec.
 The intent of V2 is to simplify the design around the actual interop primitives we already have in the codebase:
 
 - accepted verified snapshots
+- a validated accepted prefix for readers
 - frozen frontier snapshots
 - logs DB rewind
 - denylist entries that can self-validate
@@ -52,6 +53,7 @@ So the gaps are:
 - accepted verified state can go stale
 - `logsDB` can retain stale blocks/logs from an old world
 - denylist entries can outlive the cross-safe world that justified them
+- readers can observe stale accepted state before the repair loop runs
 
 ## Definitions
 
@@ -90,6 +92,26 @@ For each chain:
 
 This snapshot is collected once per round and reused for all later steps in that round.
 
+### Validated Accepted Prefix
+
+Interop should also publish an in-memory validated boundary for read-side consumers.
+
+Suggested shape:
+
+```go
+type AcceptedBoundary struct {
+    Timestamp uint64
+    Valid     bool
+}
+```
+
+The rule is:
+
+- `verifiedDB` is durable storage
+- `AcceptedBoundary` is the read-side promise
+
+Read-side APIs should only serve results up to the validated boundary, not blindly up to the durable DB tail.
+
 ### Deny Entry Metadata
 
 The denylist key can remain:
@@ -110,9 +132,43 @@ type DenyEntry struct {
 }
 ```
 
+To preserve repeated denials of the same payload under different accepted worlds, a single `(height, payloadHash)` slot should be able to hold more than one entry version:
+
+```go
+type DenyBucket struct {
+    Entries []DenyEntry // newest first
+}
+```
+
 This is intentionally simple.
 
 It allows the supernode to validate a stored deny entry against the current accepted world without inventing a separate anchor metadata format.
+
+### Round Outcome
+
+Interop needs an explicit round outcome rather than overloading "empty result means no progress."
+
+Suggested shape:
+
+```go
+type RoundOutcome uint8
+
+const (
+    RoundCommitted RoundOutcome = iota
+    RoundWait
+    RoundRepair
+    RoundInvalidated
+)
+```
+
+This lets `progressAndRecord()` update `currentL1` and the validated accepted boundary correctly.
+
+Recommended handling:
+
+- `RoundCommitted`: set `currentL1` from the committed result
+- `RoundWait`: keep `currentL1` unchanged
+- `RoundRepair`: lower or clear `currentL1`
+- `RoundInvalidated`: keep `currentL1` unchanged unless the invalidation path already reset it
 
 ### Consistency Checker
 
@@ -139,6 +195,37 @@ Recommended implementations:
   - stronger than the by-number version
 
 The control flow should depend on the interface, not on the details of the first checker.
+
+### By-Number Checker V1 Predicate
+
+The first checker should be concrete enough to implement and test.
+
+For any `VerifiedResult`:
+
+- every `L1Heads[chain]` must match `L1BlockRefByNumber(L1Heads[chain].Number).Hash`
+- `L1Inclusion` must equal the maximum block in `L1Heads`
+
+For `AcceptedResultConsistent(stored, current)`:
+
+- require exact equality of:
+  - `Timestamp`
+  - `L2Heads`
+  - `L1Heads`
+  - `L1Inclusion`
+- and require the canonical-by-number checks above for `current`
+
+For `FrontierConsistent(accepted, frontier)`:
+
+- require `frontier.Timestamp == accepted.Timestamp + 1`
+- require canonical-by-number checks for every `frontier.L1Heads[chain]`
+- require `frontier.L1Inclusion == max(frontier.L1Heads)`
+- require per-chain monotonicity:
+  - `frontier.L2Heads[chain].Number >= accepted.L2Heads[chain].Number`
+  - if the numbers are equal, the hashes must also be equal
+
+If the accepted snapshot check fails, the loop should return `RoundRepair`.
+
+If only the next frontier check fails, the loop should return `RoundWait`.
 
 ## Core Invariants
 
@@ -176,6 +263,16 @@ A deny entry should only apply while the accepted cross-safe world that justifie
 
 That means we should be able to avoid explicit denylist rewind if deny entries are validated against the current accepted world before being enforced.
 
+### 5. Read-Side Consumers Must See A Validated Prefix
+
+Read-side consumers should not trust newly stored accepted state until that state has passed the accepted-snapshot re-check.
+
+That means:
+
+- durable storage and read-side validity are separate concepts
+- a repair lowers the validated prefix before state is rewound
+- read APIs only serve data from the currently validated prefix
+
 ## Proposed Algorithm
 
 ### Step 0: Read the Current Accepted Boundary
@@ -201,10 +298,12 @@ Compare it to the stored accepted result at `lastTS` using the consistency check
 If they match:
 
 - proceed
+- publish `lastTS` as the validated accepted boundary
 
 If they do not match:
 
 - accepted interop state is stale
+- lower or clear the validated accepted boundary first
 - rewind interop-local state backward
 - return and retry on the next loop
 
@@ -224,13 +323,18 @@ Then:
 
 - rewind `verifiedDB` once to that boundary
 - rewind `logsDB` once to match that boundary
+  - if rewind conflicts at the retained head, clear that chain's `logsDB`
 - reset any in-memory accepted-state trackers
+- reset the validated accepted boundary to the retained timestamp
 - return
 
 If no accepted result remains:
 
 - clear interop-local accepted state
+- clear the validated accepted boundary
 - restart from activation behavior on the next loop
+
+This rewind path should be serialized with the existing `Reset()` mutation path so both flows cannot rewrite `verifiedDB`, `logsDB`, and in-memory accepted-state tracking concurrently.
 
 ### Step 3: Freeze the Candidate Frontier
 
@@ -251,7 +355,7 @@ This check should be expressed in terms of the frozen per-chain `(L2Head, L1Head
 
 If the frontier is inconsistent:
 
-- return no progress
+- return `RoundWait`
 - do not invalidate blocks
 - do not rewind accepted state
 - retry later
@@ -259,12 +363,6 @@ If the frontier is inconsistent:
 If the frontier is consistent:
 
 - proceed
-
-Open question:
-
-- the exact frontier consistency predicate still needs to be nailed down
-- first implementation should use the by-number checker
-- the check should be explicit and testable, not implicit in later log loading
 
 ### Step 5: Load Logs From the Frozen Frontier
 
@@ -279,6 +377,7 @@ If the frontier passes:
 - load logs
 - verify messages / cycles
 - if valid, commit the new accepted snapshot
+- publish `RoundCommitted`
 
 That commit should include enough data to re-check the snapshot later:
 
@@ -328,7 +427,9 @@ If the denylist lookup hits:
 - the validator regenerates the candidate `Result` for the stored result timestamp
 - the validator runs the consistency checker
 - the validator compares the regenerated `Result` to the stored invalid `Result`
-- only return `true` if they still match and the payload is still in `InvalidHeads`
+- only return `true` if one stored version still matches and the payload is still in `InvalidHeads`
+- iterate stored deny entry versions newest first
+- optionally prune stale versions opportunistically
 
 This uses the same result primitive interop already knows how to produce, and avoids inventing a second metadata scheme.
 
@@ -347,6 +448,18 @@ The first version can keep misses cheap and focus on making hits safe.
 
 If we later find a need for stricter handling in the accepted region, we can add it.
 
+### Step 8: Read-Side Lookup Semantics
+
+Read-side methods should consult the validated accepted prefix, not only the durable DB tail.
+
+Concretely:
+
+- `LatestVerifiedL2Block(chainID)` should return the head from the latest validated result for that chain
+- `VerifiedBlockAtL1(l1Block)` should only search the validated prefix
+- if no validated prefix exists, return empty / activation behavior
+
+This removes the stale-read window where the DB tail has drifted but the repair loop has not completed yet.
+
 ## Why This Is Better Than The Prior Plan
 
 ### Denylist Rewind Becomes Optional
@@ -354,6 +467,8 @@ If we later find a need for stricter handling in the accepted region, we can add
 Instead of physically rewinding denylist entries, we make them self-invalidating.
 
 That is simpler operationally and reduces coordination burden.
+
+Internally versioning deny entries also avoids losing history when the same payload is denied more than once under different accepted worlds.
 
 ### Repair Is Driven By Accepted Snapshot Drift
 
@@ -386,10 +501,11 @@ Extend the verified state from:
 to also include:
 
 - per-chain `L1Heads`
+- an in-memory validated accepted boundary for readers
 
 ### Denylist
 
-Change denylist entries from raw hash lists to structured records that store the full invalid `Result`.
+Change denylist entries from raw hash lists to structured records that store versioned full invalid `Result` values.
 
 That gives us:
 
@@ -416,8 +532,10 @@ Story:
 
 Assert:
 
-- interop rewinds one verified timestamp
+- interop scans backward to the newest consistent accepted timestamp
+- interop rewinds once to that retained timestamp
 - corresponding `logsDB` state is rewound
+  - or cleared on conflict at the retained head
 - no new commit occurs in that round
 
 #### 2. Inconsistent Frontier Waits
@@ -432,6 +550,7 @@ Assert:
 - no commit
 - no invalidation
 - no rewind
+- validated accepted boundary does not advance
 - later retry succeeds once frontier becomes coherent
 
 #### 3. Deny Entry Self-Invalidates
@@ -445,6 +564,7 @@ Assert:
 
 - `IsDenied()` returns `false`
 - no explicit denylist rewind was required
+- if more than one deny-entry version exists for the same payload, the newest still-valid version wins
 
 #### 4. Fast Miss Above Verified Prefix
 
@@ -464,6 +584,7 @@ Add pure tests for:
 - snapshot equality / mismatch decisions
 - frontier consistency predicate
 - deny-entry result validation
+- round outcome handling for `currentL1` and validated boundary updates
 
 These should be easy to table-test with synthetic snapshots.
 
@@ -475,12 +596,16 @@ These should be easy to table-test with synthetic snapshots.
 - add helpers to collect accepted and frontier `VerifiedResult` values
 - add the checker abstraction
 - add pure comparison helpers
+- add explicit round outcomes
+- add validated accepted boundary tracking
 
 ### Phase 2: Accepted-State Repair
 
 - re-check the last accepted result before processing the next timestamp
 - scan backward to the newest consistent accepted timestamp
 - rewind `verifiedDB` and `logsDB` once
+- clear `logsDB` on rewind conflict
+- serialize repair with `Reset()`
 
 ### Phase 3: Frozen Frontier
 
@@ -491,6 +616,7 @@ These should be easy to table-test with synthetic snapshots.
 ### Phase 4: Self-Validating Deny Entries
 
 - extend deny entries to store full invalid `Result` values
+- allow multiple deny-entry versions per `(height, payloadHash)`
 - add a deny-entry validator on the supernode side
 - make `IsDenied()` call that validator on hits before returning `true`
 - add the fast miss-above-verified-prefix path
@@ -500,13 +626,11 @@ These should be easy to table-test with synthetic snapshots.
 1. Should V2 rewind one timestamp at a time, or scan backward to the newest matching timestamp and rewind once?
    Resolved: scan backward to the newest consistent accepted timestamp, then rewind once.
 
-2. What is the exact frontier consistency predicate for the by-number checker?
+2. Do we want deny entries to store the full invalid `Result` directly in the denylist indefinitely, or split that into a separate result store later if storage duplication becomes annoying?
 
-3. Do we want deny entries to store the full invalid `Result` directly in the denylist, or split that into a separate result store later if storage duplication becomes annoying?
+3. For deny hits ahead of the verified prefix, is result regeneration plus comparison enough, or do we want an additional fast namespace check later?
 
-4. For deny hits ahead of the verified prefix, is result regeneration plus comparison enough, or do we want an additional fast namespace check later?
-
-5. Do we want to keep storing `L1Inclusion` explicitly, or derive it from per-chain `L1Heads`?
+4. Do we want to keep storing `L1Inclusion` explicitly, or derive it from per-chain `L1Heads`?
 
 ## Recommendation
 
@@ -518,8 +642,8 @@ The strongest parts of this plan are:
 - frozen frontier gate
 - self-validating deny entries
 
-The two things that need the most care during review are:
+The three things that need the most care during review are:
 
-- the precise frontier consistency predicate
 - the deny-entry validation path and storage shape
 - the read/write boundary between `IsDenied()` and the internal deny-entry validator
+- the validated-prefix/read-side behavior
