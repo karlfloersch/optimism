@@ -407,7 +407,7 @@ func TestInvalidateBlock(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		rewound, err := c.InvalidateBlock(ctx, 0, common.HexToHash("0xgenesis"))
+		rewound, err := c.InvalidateBlock(ctx, 0, common.HexToHash("0xgenesis"), nil)
 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "cannot invalidate genesis block")
@@ -450,7 +450,7 @@ func TestInvalidateBlock(t *testing.T) {
 
 			// Call InvalidateBlock
 			ctx := context.Background()
-			rewound, err := c.InvalidateBlock(ctx, tt.height, tt.payloadHash)
+			rewound, err := c.InvalidateBlock(ctx, tt.height, tt.payloadHash, nil)
 			require.NoError(t, err)
 
 			// Verify rewind behavior

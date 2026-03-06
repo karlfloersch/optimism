@@ -1,0 +1,95 @@
+package interop
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum/go-ethereum"
+)
+
+func (i *Interop) setValidatedBoundary(ts uint64, valid bool) {
+	i.validated = AcceptedBoundary{Timestamp: ts, Valid: valid}
+}
+
+func (i *Interop) clearValidatedBoundary() {
+	i.validated = AcceptedBoundary{}
+}
+
+func (i *Interop) validatedTimestamp() (uint64, bool) {
+	return i.validated.Timestamp, i.validated.Valid
+}
+
+func (i *Interop) collectSnapshot(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (VerifiedResult, error) {
+	if blocksAtTimestamp == nil {
+		var err error
+		blocksAtTimestamp, err = i.checkChainsReady(ts)
+		if err != nil {
+			return VerifiedResult{}, err
+		}
+	}
+	result := VerifiedResult{
+		Timestamp: ts,
+		L1Heads:   make(map[eth.ChainID]eth.BlockID, len(blocksAtTimestamp)),
+		L2Heads:   cloneBlockMap(blocksAtTimestamp),
+	}
+	for chainID, block := range blocksAtTimestamp {
+		chain, ok := i.chains[chainID]
+		if !ok {
+			return VerifiedResult{}, fmt.Errorf("chain %s not found", chainID)
+		}
+		_, l1Block, err := chain.OptimisticAt(i.ctx, ts)
+		if err != nil {
+			return VerifiedResult{}, fmt.Errorf("chain %s: failed to get L1 head for block %s: %w", chainID, block, err)
+		}
+		result.L1Heads[chainID] = l1Block
+	}
+	result.L1Inclusion = maxL1Head(result.L1Heads)
+	return result, nil
+}
+
+func (i *Interop) collectSnapshotAtTimestamp(ts uint64) (VerifiedResult, error) {
+	snapshot, err := i.collectSnapshot(ts, nil)
+	if err != nil {
+		if errorsIsNotFound(err) {
+			return VerifiedResult{}, ethereum.NotFound
+		}
+		return VerifiedResult{}, err
+	}
+	return snapshot, nil
+}
+
+// l1Inclusion returns the maximum L1 head for the supplied timestamp snapshot.
+// It remains as a small helper for tests and callers that only need the derived anchor.
+func (i *Interop) l1Inclusion(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (eth.BlockID, error) {
+	l1Inclusion := eth.BlockID{}
+	for chainID := range blocksAtTimestamp {
+		chain, ok := i.chains[chainID]
+		if !ok {
+			continue
+		}
+		_, l1Block, err := chain.OptimisticAt(i.ctx, ts)
+		if err != nil {
+			return eth.BlockID{}, fmt.Errorf("chain %s: failed to get L1 inclusion: %w", chainID, err)
+		}
+		if l1Block.Number >= l1Inclusion.Number {
+			l1Inclusion = l1Block
+		}
+	}
+	return l1Inclusion, nil
+}
+
+func cloneBlockMap(in map[eth.ChainID]eth.BlockID) map[eth.ChainID]eth.BlockID {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[eth.ChainID]eth.BlockID, len(in))
+	for chainID, block := range in {
+		out[chainID] = block
+	}
+	return out
+}
+
+func errorsIsNotFound(err error) bool {
+	return errors.Is(err, ethereum.NotFound)
+}

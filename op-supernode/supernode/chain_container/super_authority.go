@@ -10,6 +10,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+type denyEntryValidator interface {
+	ValidateDeniedEntry(chainID eth.ChainID, entry DenyEntry) (bool, error)
+}
+
 // FullyVerifiedL2Head returns the fully verified L2 head block identifier.
 // The second return value indicates whether the caller should fall back to local-safe.
 // Returns (empty, true) only when no verifiers are registered.
@@ -88,7 +92,44 @@ func (c *simpleChainContainer) IsDenied(height uint64, payloadHash common.Hash) 
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
-	return c.denyList.Contains(height, payloadHash)
+	entries, err := c.denyList.GetEntries(height, payloadHash)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) == 0 {
+		return false, nil
+	}
+	validators := make([]denyEntryValidator, 0, len(c.verifiers))
+	for _, verifier := range c.verifiers {
+		if validator, ok := verifier.(denyEntryValidator); ok {
+			validators = append(validators, validator)
+		}
+	}
+	if len(validators) == 0 {
+		return true, nil
+	}
+
+	var firstErr error
+	anyFalse := false
+	for _, entry := range entries {
+		for _, validator := range validators {
+			valid, err := validator.ValidateDeniedEntry(c.chainID, entry)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if valid {
+				return true, nil
+			}
+			anyFalse = true
+		}
+	}
+	if anyFalse {
+		return false, nil
+	}
+	return false, firstErr
 }
 
 // Interface satisfaction static check

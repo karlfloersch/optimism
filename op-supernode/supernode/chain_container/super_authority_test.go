@@ -17,6 +17,7 @@ type mockVerificationActivityForSuperAuthority struct {
 	latestVerifiedTS     uint64
 	latestFinalizedBlock eth.BlockID
 	latestFinalizedTS    uint64
+	validateDeniedFn     func(chainID eth.ChainID, entry DenyEntry) (bool, error)
 }
 
 func (m *mockVerificationActivityForSuperAuthority) Start(ctx context.Context) error { return nil }
@@ -34,6 +35,12 @@ func (m *mockVerificationActivityForSuperAuthority) LatestVerifiedL2Block(chainI
 func (m *mockVerificationActivityForSuperAuthority) Reset(eth.ChainID, uint64, eth.BlockRef) {}
 func (m *mockVerificationActivityForSuperAuthority) VerifiedBlockAtL1(chainID eth.ChainID, l1BlockRef eth.L1BlockRef) (eth.BlockID, uint64) {
 	return m.latestFinalizedBlock, m.latestFinalizedTS
+}
+func (m *mockVerificationActivityForSuperAuthority) ValidateDeniedEntry(chainID eth.ChainID, entry DenyEntry) (bool, error) {
+	if m.validateDeniedFn == nil {
+		return false, nil
+	}
+	return m.validateDeniedFn(chainID, entry)
 }
 
 var _ activity.VerificationActivity = (*mockVerificationActivityForSuperAuthority)(nil)
@@ -89,6 +96,44 @@ func TestChainContainer_FullyVerifiedL2Head_NoVerifiers(t *testing.T) {
 	result, useLocalSafe := cc.FullyVerifiedL2Head()
 	require.Equal(t, eth.BlockID{}, result, "should return empty BlockID with no verifiers")
 	require.True(t, useLocalSafe, "should signal fallback to local-safe when no verifiers registered")
+}
+
+func TestChainContainer_IsDenied_UsesValidator(t *testing.T) {
+	t.Parallel()
+
+	chainID := eth.ChainIDFromUInt64(420)
+	cc := newTestChainContainer(t, chainID)
+
+	dl, err := OpenDenyList(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dl.Close() })
+
+	hash := eth.BlockID{Number: 100, Hash: [32]byte{0xaa}}.Hash
+	require.NoError(t, dl.AddEntry(100, DenyEntry{PayloadHash: hash}))
+	cc.denyList = dl
+
+	verifier := &mockVerificationActivityForSuperAuthority{
+		validateDeniedFn: func(gotChainID eth.ChainID, entry DenyEntry) (bool, error) {
+			require.Equal(t, chainID, gotChainID)
+			require.Equal(t, hash, entry.PayloadHash)
+			return false, nil
+		},
+	}
+	cc.verifiers = []activity.VerificationActivity{verifier}
+
+	denied, err := cc.IsDenied(100, hash)
+	require.NoError(t, err)
+	require.False(t, denied)
+
+	verifier.validateDeniedFn = func(gotChainID eth.ChainID, entry DenyEntry) (bool, error) {
+		require.Equal(t, chainID, gotChainID)
+		require.Equal(t, hash, entry.PayloadHash)
+		return true, nil
+	}
+
+	denied, err = cc.IsDenied(100, hash)
+	require.NoError(t, err)
+	require.True(t, denied)
 }
 
 // TestChainContainer_FullyVerifiedL2Head_OneUnverified tests that FullyVerifiedL2Head

@@ -10,6 +10,7 @@ import (
 type VerifiedResult struct {
 	Timestamp   uint64                      `json:"timestamp"`
 	L1Inclusion eth.BlockID                 `json:"l1Inclusion"`
+	L1Heads     map[eth.ChainID]eth.BlockID `json:"l1Heads"`
 	L2Heads     map[eth.ChainID]eth.BlockID `json:"l2Heads"`
 }
 
@@ -18,6 +19,7 @@ type VerifiedResult struct {
 type Result struct {
 	Timestamp    uint64                      `json:"timestamp"`
 	L1Inclusion  eth.BlockID                 `json:"l1Inclusion"`
+	L1Heads      map[eth.ChainID]eth.BlockID `json:"l1Heads"`
 	L2Heads      map[eth.ChainID]eth.BlockID `json:"l2Heads"`
 	InvalidHeads map[eth.ChainID]eth.BlockID `json:"invalidHeads"`
 }
@@ -27,13 +29,14 @@ func (r *Result) IsValid() bool {
 }
 
 func (r *Result) IsEmpty() bool {
-	return r.L1Inclusion == (eth.BlockID{}) && len(r.L2Heads) == 0 && len(r.InvalidHeads) == 0
+	return r.L1Inclusion == (eth.BlockID{}) && len(r.L1Heads) == 0 && len(r.L2Heads) == 0 && len(r.InvalidHeads) == 0
 }
 
 func (r *Result) ToVerifiedResult() VerifiedResult {
 	return VerifiedResult{
 		Timestamp:   r.Timestamp,
 		L1Inclusion: r.L1Inclusion,
+		L1Heads:     r.L1Heads,
 		L2Heads:     r.L2Heads,
 	}
 }

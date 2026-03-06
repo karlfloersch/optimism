@@ -94,7 +94,7 @@ var (
 // loadLogs loads and persists logs for the given timestamp for all chains.
 // The previous timestamp MUST already be sealed in the database; if not, an error is returned.
 // For the activation timestamp (first timestamp), the logsDB must be empty.
-func (i *Interop) loadLogs(ts uint64) error {
+func (i *Interop) loadLogs(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) error {
 	for chainID, chain := range i.chains {
 		db := i.logsDBs[chainID]
 
@@ -105,14 +105,13 @@ func (i *Interop) loadLogs(ts uint64) error {
 			return err
 		}
 
-		// Get the block at timestamp ts
-		block, err := chain.LocalSafeBlockAtTimestamp(i.ctx, ts)
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to get block at timestamp %d: %w", chainID, ts, err)
+		block, ok := blocksAtTimestamp[chainID]
+		if !ok {
+			return fmt.Errorf("chain %s: missing frozen block at timestamp %d", chainID, ts)
 		}
 
 		// Fetch receipts for the block
-		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, block.ID())
+		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, block)
 		if err != nil {
 			return fmt.Errorf("chain %s: failed to fetch receipts for block %d: %w", chainID, block.Number, err)
 		}

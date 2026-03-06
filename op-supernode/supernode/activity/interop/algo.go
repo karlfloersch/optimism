@@ -29,27 +29,6 @@ var (
 
 type blockPerChain = map[eth.ChainID]eth.BlockID
 
-// l1Inclusion returns the earliest L1 block such that all L2 blocks at the supplied timestamp were derived
-// from a source at or before that L1 block.
-func (i *Interop) l1Inclusion(ts uint64, blocksAtTimestamp blockPerChain) (eth.BlockID, error) {
-	l1Inclusion := eth.BlockID{}
-	for chainID := range blocksAtTimestamp {
-		chain, ok := i.chains[chainID]
-		if !ok {
-			continue
-		}
-		_, l1Block, err := chain.OptimisticAt(i.ctx, ts)
-		if err != nil {
-			i.log.Error("failed to get L1 inclusion for L2 block", "chainID", chainID, "timestamp", ts, "err", err)
-			return eth.BlockID{}, fmt.Errorf("chain %s: failed to get L1 inclusion: %w", chainID, err)
-		}
-		if l1Block.Number >= l1Inclusion.Number {
-			l1Inclusion = l1Block
-		}
-	}
-	return l1Inclusion, nil
-}
-
 // verifyInteropMessages validates all executing messages at the given timestamp.
 // Returns a Result indicating whether all messages are valid or which chains have invalid blocks.
 //
@@ -64,12 +43,6 @@ func (i *Interop) verifyInteropMessages(ts uint64, blocksAtTimestamp blockPerCha
 		Timestamp:    ts,
 		L2Heads:      make(blockPerChain),
 		InvalidHeads: make(blockPerChain),
-	}
-
-	if l1Inclusion, err := i.l1Inclusion(ts, blocksAtTimestamp); err != nil {
-		return Result{}, err
-	} else {
-		result.L1Inclusion = l1Inclusion
 	}
 
 	for chainID, expectedBlock := range blocksAtTimestamp {

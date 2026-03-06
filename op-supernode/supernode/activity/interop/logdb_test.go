@@ -543,11 +543,15 @@ func TestLoadLogs_ParentHashMismatch(t *testing.T) {
 	defer func() { _ = interop.Stop(context.Background()) }()
 
 	// Load logs for activation timestamp
-	err := interop.loadLogs(1000)
+	err := interop.loadLogs(1000, map[eth.ChainID]eth.BlockID{
+		chainID: {Number: 100, Hash: common.Hash{0x01}},
+	})
 	require.NoError(t, err)
 
 	// Try to load logs for 1001 - should fail due to parent hash mismatch
-	err = interop.loadLogs(1001)
+	err = interop.loadLogs(1001, map[eth.ChainID]eth.BlockID{
+		chainID: {Number: 101, Hash: common.Hash{0x02}},
+	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrParentHashMismatch)
 }
@@ -678,7 +682,7 @@ func (m *statefulMockChainContainer) BlockTime() uint64 { return 1 }
 func (m *statefulMockChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
 	return nil
 }
-func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error) {
 	return false, nil
 }
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {

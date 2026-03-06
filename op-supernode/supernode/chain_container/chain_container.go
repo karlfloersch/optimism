@@ -54,7 +54,7 @@ type ChainContainer interface {
 	// InvalidateBlock adds a block to the deny list and triggers a rewind if the chain
 	// currently uses that block at the specified height.
 	// Returns true if a rewind was triggered, false otherwise.
-	InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error)
+	InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.

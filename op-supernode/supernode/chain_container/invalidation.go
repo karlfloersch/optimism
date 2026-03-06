@@ -3,6 +3,7 @@ package chain_container
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,11 @@ var denyListBucketName = []byte("denied_blocks")
 type DenyList struct {
 	db *bolt.DB
 	mu sync.RWMutex
+}
+
+type DenyEntry struct {
+	PayloadHash common.Hash     `json:"payloadHash"`
+	Result      json.RawMessage `json:"result,omitempty"`
 }
 
 // OpenDenyList opens or creates a DenyList at the given data directory.
@@ -61,6 +67,11 @@ func heightToKey(height uint64) []byte {
 // Add adds a payload hash to the deny list at the given block height.
 // Multiple hashes can be denied at the same height.
 func (d *DenyList) Add(height uint64, payloadHash common.Hash) error {
+	return d.AddEntry(height, DenyEntry{PayloadHash: payloadHash})
+}
+
+// AddEntry adds a structured deny entry at the given block height.
+func (d *DenyList) AddEntry(height uint64, entry DenyEntry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -68,25 +79,16 @@ func (d *DenyList) Add(height uint64, payloadHash common.Hash) error {
 
 	return d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-
-		// Get existing hashes at this height
-		existing := b.Get(key)
-		var hashes []byte
-		if existing != nil {
-			// Check if hash already exists
-			for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-				if common.BytesToHash(existing[i:i+common.HashLength]) == payloadHash {
-					// Already denied
-					return nil
-				}
-			}
-			hashes = make([]byte, len(existing), len(existing)+common.HashLength)
-			copy(hashes, existing)
+		entries, err := decodeEntries(b.Get(key))
+		if err != nil {
+			return err
 		}
-
-		// Append the new hash
-		hashes = append(hashes, payloadHash.Bytes()...)
-		return b.Put(key, hashes)
+		entries = append([]DenyEntry{entry}, entries...)
+		encoded, err := json.Marshal(entries)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, encoded)
 	})
 }
 
@@ -100,14 +102,12 @@ func (d *DenyList) Contains(height uint64, payloadHash common.Hash) (bool, error
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-		existing := b.Get(key)
-		if existing == nil {
-			return nil
+		entries, err := decodeEntries(b.Get(key))
+		if err != nil {
+			return err
 		}
-
-		// Search for the hash in the list
-		for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-			if common.BytesToHash(existing[i:i+common.HashLength]) == payloadHash {
+		for _, entry := range entries {
+			if entry.PayloadHash == payloadHash {
 				found = true
 				return nil
 			}
@@ -128,18 +128,51 @@ func (d *DenyList) GetDeniedHashes(height uint64) ([]common.Hash, error) {
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-		existing := b.Get(key)
-		if existing == nil {
+		entries, err := decodeEntries(b.Get(key))
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
 			return nil
 		}
-
-		for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-			hashes = append(hashes, common.BytesToHash(existing[i:i+common.HashLength]))
+		seen := make(map[common.Hash]struct{})
+		for _, entry := range entries {
+			if _, ok := seen[entry.PayloadHash]; ok {
+				continue
+			}
+			seen[entry.PayloadHash] = struct{}{}
+			hashes = append(hashes, entry.PayloadHash)
 		}
 		return nil
 	})
 
 	return hashes, err
+}
+
+// GetEntries returns all deny entry versions for a payload at the given block height.
+// Entries are returned newest-first.
+func (d *DenyList) GetEntries(height uint64, payloadHash common.Hash) ([]DenyEntry, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	key := heightToKey(height)
+	var entries []DenyEntry
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		decoded, err := decodeEntries(b.Get(key))
+		if err != nil {
+			return err
+		}
+		for _, entry := range decoded {
+			if entry.PayloadHash == payloadHash {
+				entries = append(entries, entry)
+			}
+		}
+		return nil
+	})
+
+	return entries, err
 }
 
 // Close closes the database.
@@ -151,7 +184,7 @@ func (d *DenyList) Close() error {
 // currently uses that block at the specified height.
 // Returns true if a rewind was triggered, false otherwise.
 // Note: Genesis block (height=0) cannot be invalidated as there is no prior block to rewind to.
-func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error) {
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
@@ -162,7 +195,7 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	}
 
 	// Add to deny list first
-	if err := c.denyList.Add(height, payloadHash); err != nil {
+	if err := c.denyList.AddEntry(height, DenyEntry{PayloadHash: payloadHash, Result: resultMetadata}); err != nil {
 		return false, fmt.Errorf("failed to add block to deny list: %w", err)
 	}
 
@@ -212,4 +245,23 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	)
 
 	return true, nil
+}
+
+func decodeEntries(raw []byte) ([]DenyEntry, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var entries []DenyEntry
+	if err := json.Unmarshal(raw, &entries); err == nil {
+		return entries, nil
+	}
+	// Legacy support: raw concatenated hashes.
+	if len(raw)%common.HashLength != 0 {
+		return nil, fmt.Errorf("invalid deny list payload")
+	}
+	entries = make([]DenyEntry, 0, len(raw)/common.HashLength)
+	for i := 0; i+common.HashLength <= len(raw); i += common.HashLength {
+		entries = append(entries, DenyEntry{PayloadHash: common.BytesToHash(raw[i : i+common.HashLength])})
+	}
+	return entries, nil
 }
