@@ -17,6 +17,7 @@ type mockVerificationActivityForSuperAuthority struct {
 	latestVerifiedTS     uint64
 	latestFinalizedBlock eth.BlockID
 	latestFinalizedTS    uint64
+	validateCheckpointFn func(chainID eth.ChainID) (bool, bool, error)
 	validateDeniedFn     func(chainID eth.ChainID, entry DenyEntry) (bool, error)
 }
 
@@ -41,6 +42,12 @@ func (m *mockVerificationActivityForSuperAuthority) ValidateDeniedEntry(chainID 
 		return false, nil
 	}
 	return m.validateDeniedFn(chainID, entry)
+}
+func (m *mockVerificationActivityForSuperAuthority) ValidateAcceptedCheckpoint(chainID eth.ChainID) (bool, bool, error) {
+	if m.validateCheckpointFn == nil {
+		return false, false, nil
+	}
+	return m.validateCheckpointFn(chainID)
 }
 
 var _ activity.VerificationActivity = (*mockVerificationActivityForSuperAuthority)(nil)
@@ -113,6 +120,10 @@ func TestChainContainer_IsDenied_UsesValidator(t *testing.T) {
 	cc.denyList = dl
 
 	verifier := &mockVerificationActivityForSuperAuthority{
+		validateCheckpointFn: func(gotChainID eth.ChainID) (bool, bool, error) {
+			require.Equal(t, chainID, gotChainID)
+			return true, true, nil
+		},
 		validateDeniedFn: func(gotChainID eth.ChainID, entry DenyEntry) (bool, error) {
 			require.Equal(t, chainID, gotChainID)
 			require.Equal(t, hash, entry.PayloadHash)
@@ -134,6 +145,61 @@ func TestChainContainer_IsDenied_UsesValidator(t *testing.T) {
 	denied, err = cc.IsDenied(100, hash)
 	require.NoError(t, err)
 	require.True(t, denied)
+}
+
+func TestChainContainer_IsDenied_MissSkipsWithoutValidatedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	chainID := eth.ChainIDFromUInt64(420)
+	cc := newTestChainContainer(t, chainID)
+
+	dl, err := OpenDenyList(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dl.Close() })
+	cc.denyList = dl
+
+	verifier := &mockVerificationActivityForSuperAuthority{
+		validateCheckpointFn: func(gotChainID eth.ChainID) (bool, bool, error) {
+			require.Equal(t, chainID, gotChainID)
+			return false, false, nil
+		},
+	}
+	cc.verifiers = []activity.VerificationActivity{verifier}
+
+	denied, err := cc.IsDenied(100, eth.BlockID{Number: 100, Hash: [32]byte{0xaa}}.Hash)
+	require.NoError(t, err)
+	require.False(t, denied)
+}
+
+func TestChainContainer_IsDenied_HitFailsOpenOnStaleCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	chainID := eth.ChainIDFromUInt64(420)
+	cc := newTestChainContainer(t, chainID)
+
+	dl, err := OpenDenyList(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dl.Close() })
+
+	hash := eth.BlockID{Number: 100, Hash: [32]byte{0xaa}}.Hash
+	require.NoError(t, dl.AddEntry(100, DenyEntry{PayloadHash: hash}))
+	cc.denyList = dl
+
+	verifier := &mockVerificationActivityForSuperAuthority{
+		validateCheckpointFn: func(gotChainID eth.ChainID) (bool, bool, error) {
+			require.Equal(t, chainID, gotChainID)
+			return true, false, nil
+		},
+		validateDeniedFn: func(gotChainID eth.ChainID, entry DenyEntry) (bool, error) {
+			t.Fatal("deny entry validator should not run when checkpoint is stale")
+			return false, nil
+		},
+	}
+	cc.verifiers = []activity.VerificationActivity{verifier}
+
+	denied, err := cc.IsDenied(100, hash)
+	require.NoError(t, err)
+	require.False(t, denied)
 }
 
 // TestChainContainer_FullyVerifiedL2Head_OneUnverified tests that FullyVerifiedL2Head

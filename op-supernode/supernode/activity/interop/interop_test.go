@@ -1212,6 +1212,42 @@ func TestValidateDeniedEntry(t *testing.T) {
 	require.False(t, valid)
 }
 
+func TestValidateAcceptedCheckpoint(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	stored := VerifiedResult{
+		Timestamp:   1000,
+		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 100, Hash: common.HexToHash("0x100")},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+		},
+	}
+	require.NoError(t, h.interop.verifiedDB.Commit(stored))
+	h.interop.mu.Lock()
+	h.interop.setValidatedBoundary(stored.Timestamp, true)
+	h.interop.mu.Unlock()
+
+	hasCheckpoint, valid, err := h.interop.ValidateAcceptedCheckpoint(chainID)
+	require.NoError(t, err)
+	require.True(t, hasCheckpoint)
+	require.True(t, valid)
+
+	h.Mock(10).currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x999")}
+
+	hasCheckpoint, valid, err = h.interop.ValidateAcceptedCheckpoint(chainID)
+	require.NoError(t, err)
+	require.True(t, hasCheckpoint)
+	require.False(t, valid)
+}
+
 // =============================================================================
 // TestInterop_FullCycle
 // =============================================================================

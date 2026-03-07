@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum/go-ethereum"
 	cc "github.com/ethereum-optimism/optimism/op-supernode/supernode/chain_container"
 )
 
@@ -86,4 +87,37 @@ func (i *Interop) ValidateDeniedEntry(chainID eth.ChainID, entry cc.DenyEntry) (
 	}
 	valid, err := i.checker.AcceptedResultConsistent(i.ctx, *meta.Base, base)
 	return valid, err
+}
+
+func (i *Interop) ValidateAcceptedCheckpoint(chainID eth.ChainID) (bool, bool, error) {
+	_ = chainID
+
+	i.mu.RLock()
+	validatedTS, ok := i.validatedTimestamp()
+	i.mu.RUnlock()
+	if !ok {
+		return false, false, nil
+	}
+
+	stored, err := i.verifiedDB.Get(validatedTS)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return true, false, nil
+		}
+		return true, false, err
+	}
+
+	current, err := i.collectSnapshotAtTimestamp(validatedTS)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return true, false, nil
+		}
+		return true, false, err
+	}
+
+	valid, err := i.checker.AcceptedResultConsistent(i.ctx, stored, current)
+	if err != nil {
+		return true, false, err
+	}
+	return true, valid, nil
 }

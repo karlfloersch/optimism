@@ -14,6 +14,10 @@ type denyEntryValidator interface {
 	ValidateDeniedEntry(chainID eth.ChainID, entry DenyEntry) (bool, error)
 }
 
+type denyCheckpointValidator interface {
+	ValidateAcceptedCheckpoint(chainID eth.ChainID) (bool, bool, error)
+}
+
 // FullyVerifiedL2Head returns the fully verified L2 head block identifier.
 // The second return value indicates whether the caller should fall back to local-safe.
 // Returns (empty, true) only when no verifiers are registered.
@@ -97,28 +101,86 @@ func (c *simpleChainContainer) IsDenied(height uint64, payloadHash common.Hash) 
 		return false, err
 	}
 	if len(entries) == 0 {
+		checkpointValidators := make([]denyCheckpointValidator, 0, len(c.verifiers))
+		for _, verifier := range c.verifiers {
+			if validator, ok := verifier.(denyCheckpointValidator); ok {
+				checkpointValidators = append(checkpointValidators, validator)
+			}
+		}
+		if len(checkpointValidators) == 0 {
+			return false, nil
+		}
+		// If nothing has been cross-validated yet, a deny miss is the expected fast path.
+		hasValidatedCheckpoint := false
+		for _, validator := range checkpointValidators {
+			hasCheckpoint, valid, err := validator.ValidateAcceptedCheckpoint(c.chainID)
+			if err != nil {
+				c.log.Warn("failed to validate accepted checkpoint for deny miss",
+					"chainID", c.chainID,
+					"height", height,
+					"payloadHash", payloadHash,
+					"err", err,
+				)
+				return false, nil
+			}
+			if !hasCheckpoint {
+				continue
+			}
+			hasValidatedCheckpoint = true
+			if !valid {
+				return false, nil
+			}
+		}
+		if !hasValidatedCheckpoint {
+			return false, nil
+		}
 		return false, nil
 	}
-	validators := make([]denyEntryValidator, 0, len(c.verifiers))
+	entryValidators := make([]denyEntryValidator, 0, len(c.verifiers))
+	checkpointValidators := make([]denyCheckpointValidator, 0, len(c.verifiers))
 	for _, verifier := range c.verifiers {
 		if validator, ok := verifier.(denyEntryValidator); ok {
-			validators = append(validators, validator)
+			entryValidators = append(entryValidators, validator)
+		}
+		if validator, ok := verifier.(denyCheckpointValidator); ok {
+			checkpointValidators = append(checkpointValidators, validator)
 		}
 	}
-	if len(validators) == 0 {
+	if len(entryValidators) == 0 {
 		return true, nil
 	}
 
-	var firstErr error
+	for _, validator := range checkpointValidators {
+		hasCheckpoint, valid, err := validator.ValidateAcceptedCheckpoint(c.chainID)
+		if err != nil {
+			c.log.Warn("failed to validate accepted checkpoint for deny hit",
+				"chainID", c.chainID,
+				"height", height,
+				"payloadHash", payloadHash,
+				"err", err,
+			)
+			return false, nil
+		}
+		if !hasCheckpoint {
+			continue
+		}
+		if !valid {
+			return false, nil
+		}
+	}
+
 	anyFalse := false
 	for _, entry := range entries {
-		for _, validator := range validators {
+		for _, validator := range entryValidators {
 			valid, err := validator.ValidateDeniedEntry(c.chainID, entry)
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
+				c.log.Warn("failed to validate deny entry",
+					"chainID", c.chainID,
+					"height", height,
+					"payloadHash", payloadHash,
+					"err", err,
+				)
+				return false, nil
 			}
 			if valid {
 				return true, nil
@@ -129,7 +191,7 @@ func (c *simpleChainContainer) IsDenied(height uint64, payloadHash common.Hash) 
 	if anyFalse {
 		return false, nil
 	}
-	return false, firstErr
+	return false, nil
 }
 
 // Interface satisfaction static check
