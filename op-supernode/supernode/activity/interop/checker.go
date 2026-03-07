@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 type L1BlockRefSource interface {
@@ -66,6 +67,11 @@ func (c *ByNumberChecker) snapshotCanonical(ctx context.Context, snapshot Verifi
 		return true, nil
 	}
 	for _, head := range snapshot.L1Heads {
+		// Genesis L2 snapshots may only record the L1 block number and leave the
+		// hash unset. In that case, treat block 0 as canonical-by-number.
+		if head.Number == 0 && head.Hash == (common.Hash{}) {
+			continue
+		}
 		canonical, err := c.l1.L1BlockRefByNumber(ctx, head.Number)
 		if err != nil {
 			return false, err

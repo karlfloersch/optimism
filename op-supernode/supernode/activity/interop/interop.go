@@ -415,7 +415,7 @@ func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, resu
 	if !ok {
 		return fmt.Errorf("chain %s not found", chainID)
 	}
-	metadata, err := i.denyEntryMetadata(result)
+	metadata, err := i.denyEntryMetadata(chainID, result)
 	if err != nil {
 		return err
 	}

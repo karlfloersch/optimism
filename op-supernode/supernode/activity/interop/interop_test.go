@@ -1150,12 +1150,13 @@ func TestRepairAcceptedState_RewindsToNewestConsistentTimestamp(t *testing.T) {
 func TestValidateDeniedEntry(t *testing.T) {
 	h := newInteropTestHarness(t).
 		WithChain(10, func(m *mockChainContainer) {
+			m.blockTime = 2
 			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}
 		}).
 		Build()
 
 	chainID := h.Mock(10).id
-	stored := Result{
+	base := VerifiedResult{
 		Timestamp:   1000,
 		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
 		L1Heads: map[eth.ChainID]eth.BlockID{
@@ -1164,15 +1165,30 @@ func TestValidateDeniedEntry(t *testing.T) {
 		L2Heads: map[eth.ChainID]eth.BlockID{
 			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
 		},
+	}
+	require.NoError(t, h.interop.verifiedDB.Commit(base))
+	h.interop.mu.Lock()
+	h.interop.setValidatedBoundary(base.Timestamp, true)
+	h.interop.mu.Unlock()
+
+	stored := Result{
+		Timestamp:   1002,
+		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 100, Hash: common.HexToHash("0x100")},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 1002, Hash: common.BigToHash(big.NewInt(1002))},
+		},
 		InvalidHeads: map[eth.ChainID]eth.BlockID{
-			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+			chainID: {Number: 1002, Hash: common.BigToHash(big.NewInt(1002))},
 		},
 	}
-	metadata, err := h.interop.denyEntryMetadata(stored)
+	metadata, err := h.interop.denyEntryMetadata(chainID, stored)
 	require.NoError(t, err)
 
 	entry := cc.DenyEntry{
-		PayloadHash: common.BigToHash(big.NewInt(1000)),
+		PayloadHash: common.BigToHash(big.NewInt(1002)),
 		Result:      metadata,
 	}
 
@@ -1180,7 +1196,16 @@ func TestValidateDeniedEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, valid)
 
-	h.Mock(10).currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x101")}
+	_, err = h.interop.verifiedDB.RewindAfter(base.Timestamp - 1)
+	require.NoError(t, err)
+
+	valid, err = h.interop.ValidateDeniedEntry(chainID, entry)
+	require.NoError(t, err)
+	require.True(t, valid)
+
+	h.interop.mu.Lock()
+	h.interop.setValidatedBoundary(base.Timestamp-1, true)
+	h.interop.mu.Unlock()
 
 	valid, err = h.interop.ValidateDeniedEntry(chainID, entry)
 	require.NoError(t, err)
@@ -1308,6 +1333,8 @@ var _ eth.BlockInfo = (*mockBlockInfo)(nil)
 type mockChainContainer struct {
 	id eth.ChainID
 
+	blockTime uint64
+
 	currentL1    eth.BlockRef
 	currentL1Err error
 
@@ -1425,7 +1452,12 @@ func (m *mockChainContainer) SyncStatus(ctx context.Context) (*eth.SyncStatus, e
 func (m *mockChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
 	return nil
 }
-func (m *mockChainContainer) BlockTime() uint64 { return 1 }
+func (m *mockChainContainer) BlockTime() uint64 {
+	if m.blockTime == 0 {
+		return 1
+	}
+	return m.blockTime
+}
 func (m *mockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

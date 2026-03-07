@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
 // TestSupernodeInteropVerifiedAt tests that the VerifiedAt endpoint returns
@@ -72,12 +73,16 @@ func TestSupernodeInteropChainLag(gt *testing.T) {
 	statusA := sys.L2ACL.SyncStatus()
 	statusB := sys.L2BCL.SyncStatus()
 	baselineTimestamp := statusA.LocalSafeL2.Time
+	var baselineRoot eth.Bytes32
 
 	// Wait for baseline timestamp to be verified before proceeding
 	t.Require().Eventually(func() bool {
 		resp, err := snClient.SuperRootAtTimestamp(ctx, baselineTimestamp)
 		if err != nil {
 			return false
+		}
+		if resp.Data != nil {
+			baselineRoot = resp.Data.SuperRoot
 		}
 		return resp.Data != nil
 	}, 60*time.Second, time.Second, "baseline timestamp should be verified before stopping batcher")
@@ -169,8 +174,16 @@ func TestSupernodeInteropChainLag(gt *testing.T) {
 		t.Require().Nil(resp.Data,
 			"timestamp should NOT be verified - chain B unsafe is ahead but safe is behind")
 
+		// KEY ASSERTION 3b: previously accepted state should remain available.
+		// This is a frontier wait, not a repair.
+		baselineResp, err := snClient.SuperRootAtTimestamp(ctx, baselineTimestamp)
+		t.Require().NoError(err, "baseline SuperRootAtTimestamp should not error")
+		t.Require().NotNil(baselineResp.Data, "baseline timestamp should remain verified during a frontier wait")
+		t.Require().Equal(baselineRoot, baselineResp.Data.SuperRoot, "frontier lag should not rewrite the last accepted super-root")
+
 		t.Logger().Info("confirmed: timestamp not verified despite chain B unsafe being ahead",
 			"ahead_timestamp", aheadTimestamp,
+			"baseline_timestamp", baselineTimestamp,
 			"chainB_unsafe", newStatusB.UnsafeL2.Number,
 			"chainB_local_safe", newStatusB.LocalSafeL2.Number,
 		)
