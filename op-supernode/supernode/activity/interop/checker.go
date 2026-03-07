@@ -56,6 +56,18 @@ func (c *ByNumberChecker) FrontierConsistent(ctx context.Context, accepted Verif
 			return false, nil
 		}
 	}
+	for chainID, frontierHead := range frontier.L1Heads {
+		acceptedHead, ok := accepted.L1Heads[chainID]
+		if !ok {
+			return false, nil
+		}
+		if frontierHead.Number < acceptedHead.Number {
+			return false, nil
+		}
+		if frontierHead.Number == acceptedHead.Number && frontierHead.Hash != acceptedHead.Hash {
+			return false, nil
+		}
+	}
 	return true, nil
 }
 

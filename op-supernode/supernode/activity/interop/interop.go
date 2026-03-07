@@ -53,8 +53,10 @@ type Interop struct {
 	cancel  context.CancelFunc
 	started bool
 
-	currentL1 eth.BlockID
-	validated AcceptedBoundary
+	currentL1  eth.BlockID
+	validated  AcceptedBoundary
+	pending    []pendingReset
+	skipRepair AcceptedBoundary
 
 	verifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
@@ -72,6 +74,12 @@ type Interop struct {
 type AcceptedBoundary struct {
 	Timestamp uint64
 	Valid     bool
+}
+
+type pendingReset struct {
+	chainID          eth.ChainID
+	timestamp        uint64
+	invalidatedBlock eth.BlockRef
 }
 
 type RoundOutcome uint8
@@ -215,6 +223,15 @@ func (i *Interop) Resume() {
 // progressAndRecord attempts to progress interop and record the result.
 // Returns (madeProgress, error) where madeProgress indicates if we advanced the verified timestamp.
 func (i *Interop) progressAndRecord() (bool, error) {
+	appliedReset, err := i.applyPendingResets()
+	if err != nil {
+		i.log.Error("failed to apply pending resets", "err", err)
+		return false, err
+	}
+	if appliedReset {
+		return false, nil
+	}
+
 	if _, err := i.collectCurrentL1(); err != nil {
 		i.log.Error("failed to collect current L1", "err", err)
 		return false, err
@@ -233,6 +250,15 @@ func (i *Interop) progressAndRecord() (bool, error) {
 		i.log.Error("failed to handle result", "err", err)
 		return false, err
 	}
+
+	appliedReset, err = i.applyPendingResets()
+	if err != nil {
+		i.log.Error("failed to apply pending resets", "err", err)
+		return false, err
+	}
+	if appliedReset {
+		return false, nil
+	}
 	i.mu.Lock()
 	switch outcome {
 	case RoundCommitted:
@@ -245,6 +271,49 @@ func (i *Interop) progressAndRecord() (bool, error) {
 	}
 	i.mu.Unlock()
 	return outcome == RoundCommitted, nil
+}
+
+func (i *Interop) applyPendingResets() (bool, error) {
+	i.mu.Lock()
+	resets := i.pending
+	i.pending = nil
+	i.mu.Unlock()
+
+	if len(resets) == 0 {
+		return false, nil
+	}
+	for _, reset := range resets {
+		if err := i.applyReset(reset); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+func (i *Interop) applyReset(reset pendingReset) error {
+	i.log.Warn("applying queued reset",
+		"chainID", reset.chainID,
+		"timestamp", reset.timestamp,
+		"invalidatedBlock", reset.invalidatedBlock,
+	)
+
+	db, dbOk := i.logsDBs[reset.chainID]
+	if !dbOk {
+		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)
+		return nil
+	}
+
+	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
+	i.resetVerifiedDB(reset.timestamp)
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.currentL1 = eth.BlockID{}
+	if reset.timestamp < i.validated.Timestamp {
+		i.setValidatedBoundary(reset.timestamp, true)
+	}
+	i.skipRepair = AcceptedBoundary{Timestamp: reset.timestamp, Valid: true}
+	return nil
 }
 
 // collectCurrentL1 collects the current L1 head of all chains,
@@ -274,12 +343,26 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 
 	lastTimestamp, initialized := i.verifiedDB.LastTimestamp()
 	if initialized {
-		repaired, err := i.repairAcceptedState(lastTimestamp)
-		if err != nil {
-			return Result{}, RoundWait, err
-		}
-		if repaired {
-			return Result{}, RoundRepair, nil
+		i.mu.RLock()
+		skipRepairTS, skipRepair := i.skipRepair.Timestamp, i.skipRepair.Valid
+		i.mu.RUnlock()
+		if skipRepair && lastTimestamp <= skipRepairTS {
+			i.log.Debug("skipping accepted-state repair after explicit reset", "lastTimestamp", lastTimestamp, "skipRepairThrough", skipRepairTS)
+		} else {
+			if skipRepair {
+				i.mu.Lock()
+				if i.skipRepair.Valid && lastTimestamp > i.skipRepair.Timestamp {
+					i.skipRepair = AcceptedBoundary{}
+				}
+				i.mu.Unlock()
+			}
+			repaired, err := i.repairAcceptedState(lastTimestamp)
+			if err != nil {
+				return Result{}, RoundWait, err
+			}
+			if repaired {
+				return Result{}, RoundRepair, nil
+			}
 		}
 	}
 
@@ -562,32 +645,23 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 }
 
 // Reset is called when a chain container resets due to an invalidated block.
-// It prunes the logsDB and verifiedDB for that chain at and after the timestamp.
-// The invalidatedBlock contains the block info that triggered the reset.
+// It enqueues the reset so the interop loop can apply it serially with other
+// interop state mutations. The invalidatedBlock contains the block info that
+// triggered the reset.
 func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	i.log.Warn("Reset called",
+	i.log.Warn("Reset queued",
 		"chainID", chainID,
 		"timestamp", timestamp,
 		"invalidatedBlock", invalidatedBlock,
 	)
-
-	db, dbOk := i.logsDBs[chainID]
-	if !dbOk {
-		i.log.Error("logsDB not found for reset", "chainID", chainID)
-		return
-	}
-
-	i.resetLogsDB(chainID, db, invalidatedBlock)
-	i.resetVerifiedDB(timestamp)
-
-	// Reset the currentL1 to force re-evaluation
-	i.currentL1 = eth.BlockID{}
-	if timestamp < i.validated.Timestamp {
-		i.setValidatedBoundary(timestamp, true)
-	}
+	i.pending = append(i.pending, pendingReset{
+		chainID:          chainID,
+		timestamp:        timestamp,
+		invalidatedBlock: invalidatedBlock,
+	})
 }
 
 // resetLogsDB rewinds or clears the logsDB for a chain to the block before the invalidated block.

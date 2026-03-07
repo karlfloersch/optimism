@@ -1,4 +1,4 @@
-package reorg
+package strongconsistency
 
 import (
 	"testing"
@@ -18,7 +18,7 @@ import (
 // 1. a timestamp is accepted and exposed through SuperRootAtTimestamp
 // 2. an L1 reorg invalidates that accepted world
 // 3. the accepted timestamp temporarily disappears while interop repairs
-// 4. the timestamp is revalidated on the new canonical L1
+// 4. the timestamp is revalidated against a different accepted L1 world
 // 5. once interop is resumed, the next timestamp validates normally
 func TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers(gt *testing.T) {
 	t := devtest.SerialT(gt)
@@ -36,6 +36,7 @@ func TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers(gt *testing.T) {
 	acceptedResp := sys.Supernode.SuperRootAtTimestamp(acceptedTS)
 	require.NotNil(t, acceptedResp.Data, "accepted timestamp should be validated before the reorg")
 	require.NotEmpty(t, acceptedResp.OptimisticAtTimestamp, "accepted timestamp should expose per-chain optimistic outputs")
+	preReorgRequiredL1 := acceptedResp.Data.VerifiedRequiredL1
 
 	reorgTarget := acceptedResp.Data.VerifiedRequiredL1
 	require.Greater(t, reorgTarget.Number, uint64(0), "accepted timestamp should depend on a non-genesis required L1 block")
@@ -78,6 +79,10 @@ func TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers(gt *testing.T) {
 		resp := sys.Supernode.SuperRootAtTimestamp(acceptedTS)
 		return resp.Data != nil
 	}, 2*time.Minute, time.Second, "accepted timestamp should be revalidated on the new canonical L1")
+
+	repairedResp := sys.Supernode.SuperRootAtTimestamp(acceptedTS)
+	require.NotNil(t, repairedResp.Data, "accepted timestamp should be available after repair")
+	require.NotEqual(t, preReorgRequiredL1, repairedResp.Data.VerifiedRequiredL1, "repair should revalidate the timestamp against a different accepted L1 world")
 
 	frontierResp := sys.Supernode.SuperRootAtTimestamp(pausedTS)
 	require.Nil(t, frontierResp.Data, "paused frontier timestamp should remain unavailable before resume")

@@ -1542,6 +1542,26 @@ func TestReset(t *testing.T) {
 		run   func(t *testing.T, h *interopTestHarness, mockLogsDB *mockLogsDBForInterop)
 	}{
 		{
+			name: "queues reset without applying immediately",
+			setup: func(h *interopTestHarness) (*interopTestHarness, *mockLogsDBForInterop) {
+				h.WithChain(10, nil).Build()
+				mockLogsDB := &mockLogsDBForInterop{}
+				h.interop.logsDBs[h.Mock(10).id] = mockLogsDB
+				return h, mockLogsDB
+			},
+			run: func(t *testing.T, h *interopTestHarness, mockLogsDB *mockLogsDBForInterop) {
+				h.interop.currentL1 = eth.BlockID{Number: 500, Hash: common.HexToHash("0xL1")}
+				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xPARENT")}
+
+				h.interop.Reset(h.Mock(10).id, 100, invalidatedBlock)
+
+				require.Equal(t, eth.BlockID{Number: 500, Hash: common.HexToHash("0xL1")}, h.interop.currentL1)
+				require.Len(t, mockLogsDB.rewindCalls, 0)
+				require.Equal(t, 0, mockLogsDB.clearCalls)
+				require.Len(t, h.interop.pending, 1)
+			},
+		},
+		{
 			name: "rewinds logsDB to parent of invalidated block",
 			setup: func(h *interopTestHarness) (*interopTestHarness, *mockLogsDBForInterop) {
 				h.WithChain(10, nil).Build()
@@ -1554,6 +1574,9 @@ func TestReset(t *testing.T) {
 				// logsDB rewinds to parent of invalidated block (Number-1, ParentHash)
 				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xPARENT")}
 				h.interop.Reset(h.Mock(10).id, 100, invalidatedBlock)
+				applied, err := h.interop.applyPendingResets()
+				require.NoError(t, err)
+				require.True(t, applied)
 
 				// Should rewind to block 99 (parent of invalidated block 100)
 				require.Len(t, mockLogsDB.rewindCalls, 1)
@@ -1577,6 +1600,9 @@ func TestReset(t *testing.T) {
 				// Since firstSealedBlock.Number (5) > targetBlock.Number (0), Clear is called
 				invalidatedBlock := eth.BlockRef{Number: 1, ParentHash: common.Hash{}}
 				h.interop.Reset(h.Mock(10).id, 1, invalidatedBlock)
+				applied, err := h.interop.applyPendingResets()
+				require.NoError(t, err)
+				require.True(t, applied)
 
 				require.Len(t, mockLogsDB.rewindCalls, 0)
 				require.Equal(t, 1, mockLogsDB.clearCalls)
@@ -1607,6 +1633,9 @@ func TestReset(t *testing.T) {
 				// Reset at timestamp 100 (timestamp 100 is first NOT removed, so 101, 102 are removed)
 				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.Hash{}}
 				h.interop.Reset(mock.id, 100, invalidatedBlock)
+				applied, err := h.interop.applyPendingResets()
+				require.NoError(t, err)
+				require.True(t, applied)
 
 				// Verify results at 98, 99, 100 still exist (100 is first NOT removed)
 				has, _ := h.interop.verifiedDB.Has(98)
@@ -1638,6 +1667,9 @@ func TestReset(t *testing.T) {
 
 				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.Hash{}}
 				h.interop.Reset(h.Mock(10).id, 100, invalidatedBlock)
+				applied, err := h.interop.applyPendingResets()
+				require.NoError(t, err)
+				require.True(t, applied)
 
 				require.Equal(t, eth.BlockID{}, h.interop.currentL1)
 			},
@@ -1653,6 +1685,9 @@ func TestReset(t *testing.T) {
 				unknownChain := eth.ChainIDFromUInt64(999)
 				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.Hash{}}
 				h.interop.Reset(unknownChain, 100, invalidatedBlock)
+				applied, err := h.interop.applyPendingResets()
+				require.NoError(t, err)
+				require.True(t, applied)
 				// Just verify it didn't panic
 			},
 		},

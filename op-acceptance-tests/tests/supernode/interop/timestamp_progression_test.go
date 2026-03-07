@@ -132,18 +132,28 @@ func TestSupernodeInteropChainLag(gt *testing.T) {
 		"chainB_unsafe", bStoppedStatus.UnsafeL2.Number,
 	)
 
-	// Watch local safe/unsafe and verified for 30 seconds
-	// First wait for chain A to advance past chain B's frozen local safe head
-	start = time.Now()
+	// First capture the first timestamp where chain A is ahead of chain B's frozen local-safe head.
 	var aheadTimestamp uint64
-	for {
-		if time.Since(start) > 30*time.Second {
-			break
+	t.Require().Eventually(func() bool {
+		newStatusA := sys.L2ACL.SyncStatus()
+		newStatusB := sys.L2BCL.SyncStatus()
+		if newStatusA.LocalSafeL2.Time <= bStoppedSafeTime {
+			return false
 		}
+		t.Require().Greater(newStatusB.UnsafeL2.Number, bStoppedSafeNum,
+			"chain B unsafe head should advance even with batcher stopped")
+		t.Require().Equal(bStoppedSafeNum, newStatusB.LocalSafeL2.Number,
+			"chain B local safe head should be frozen with batcher stopped")
+		aheadTimestamp = newStatusA.LocalSafeL2.Time
+		return true
+	}, 30*time.Second, time.Second, "chain A should advance past chain B's frozen safe timestamp")
 
+	// Keep asserting against that fixed blocked frontier timestamp. This proves the
+	// same candidate stays unverified during the lag instead of chasing a moving target.
+	start = time.Now()
+	for time.Since(start) <= 30*time.Second {
 		time.Sleep(time.Second)
 
-		// Check the state
 		newStatusA := sys.L2ACL.SyncStatus()
 		newStatusB := sys.L2BCL.SyncStatus()
 
@@ -153,40 +163,23 @@ func TestSupernodeInteropChainLag(gt *testing.T) {
 			"chainB_local_safe", newStatusB.LocalSafeL2.Number,
 			"chainB_local_safe_time", newStatusB.LocalSafeL2.Time,
 			"chainB_unsafe", newStatusB.UnsafeL2.Number,
+			"ahead_timestamp", aheadTimestamp,
 		)
 
-		// KEY ASSERTION 1: Chain B's unsafe head should have advanced (CL is still running)
 		t.Require().Greater(newStatusB.UnsafeL2.Number, bStoppedSafeNum,
 			"chain B unsafe head should advance even with batcher stopped")
-
-		// KEY ASSERTION 2: Chain B's safe head should be frozen (no batches)
 		t.Require().Equal(bStoppedSafeNum, newStatusB.LocalSafeL2.Number,
 			"chain B local safe head should be frozen with batcher stopped")
 
-		// Use chain A's ahead timestamp for verification check
-		aheadTimestamp = newStatusA.LocalSafeL2.Time
-
-		// KEY ASSERTION 3: The timestamp should NOT be verified
-		// Even though chain B's unsafe head is past this timestamp,
-		// verification requires SAFE heads on all chains
 		resp, err := snClient.SuperRootAtTimestamp(ctx, aheadTimestamp)
 		t.Require().NoError(err, "SuperRootAtTimestamp should not error")
 		t.Require().Nil(resp.Data,
-			"timestamp should NOT be verified - chain B unsafe is ahead but safe is behind")
+			"fixed ahead timestamp should remain unverified while chain B safe is behind")
 
-		// KEY ASSERTION 3b: previously accepted state should remain available.
-		// This is a frontier wait, not a repair.
 		baselineResp, err := snClient.SuperRootAtTimestamp(ctx, baselineTimestamp)
 		t.Require().NoError(err, "baseline SuperRootAtTimestamp should not error")
 		t.Require().NotNil(baselineResp.Data, "baseline timestamp should remain verified during a frontier wait")
 		t.Require().Equal(baselineRoot, baselineResp.Data.SuperRoot, "frontier lag should not rewrite the last accepted super-root")
-
-		t.Logger().Info("confirmed: timestamp not verified despite chain B unsafe being ahead",
-			"ahead_timestamp", aheadTimestamp,
-			"baseline_timestamp", baselineTimestamp,
-			"chainB_unsafe", newStatusB.UnsafeL2.Number,
-			"chainB_local_safe", newStatusB.LocalSafeL2.Number,
-		)
 	}
 
 	// Resume the batcher
