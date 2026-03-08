@@ -1733,6 +1733,9 @@ func TestVerifiedBlockAtL1(t *testing.T) {
 			})
 			require.NoError(t, err)
 		}
+		h.interop.mu.Lock()
+		h.interop.setValidatedBoundary(110, true)
+		h.interop.mu.Unlock()
 
 		// Query for L1 block 1059 — should match timestamp 105 (L1Inclusion.Number=1050 <= 1059)
 		// but not timestamp 106 (L1Inclusion.Number=1060 > 1059)
