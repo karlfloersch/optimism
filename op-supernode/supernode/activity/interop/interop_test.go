@@ -1176,6 +1176,36 @@ func TestRepairAcceptedState_IgnoresRepairResetSentinel(t *testing.T) {
 	h.interop.mu.RUnlock()
 }
 
+func TestRepairAcceptedState_ClearsDenyListWhenNoAcceptedPrefixRemains(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithActivation(0).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 0, Hash: common.Hash{}}
+			m.blockAtTimestamp = eth.L2BlockRef{}
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   0,
+		L1Inclusion: eth.BlockID{Number: 0, Hash: common.Hash{}},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 0, Hash: common.Hash{}},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 0, Hash: common.HexToHash("0xdead")},
+		},
+	}))
+
+	repaired, err := h.interop.repairAcceptedState(0)
+	require.NoError(t, err)
+	require.True(t, repaired)
+	require.Equal(t, 1, h.Mock(10).clearDenyListCalls)
+	require.Empty(t, h.Mock(10).pruneDenyListCalls)
+	require.Len(t, h.Mock(10).rewindCalls, 1)
+	require.Equal(t, uint64(0), h.Mock(10).rewindCalls[0].timestamp)
+}
+
 func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
 	h := newInteropTestHarness(t).
 		WithChain(10, func(m *mockChainContainer) {
@@ -1206,6 +1236,22 @@ func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
 
 	require.Len(t, h.Mock(10).pruneDenyListInconsistentCalls, 1)
 	require.Empty(t, h.Mock(10).rewindCalls)
+}
+
+func TestCollectSnapshot_RejectsMixedL2AndL1Views(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithChain(10, func(m *mockChainContainer) {
+			m.blockAtTimestamp = eth.L2BlockRef{Number: 1000, Hash: common.BigToHash(big.NewInt(1000))}
+			m.optimisticL2 = eth.BlockID{Number: 2000, Hash: common.BigToHash(big.NewInt(2000))}
+			m.optimisticL1 = eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")}
+		}).
+		Build()
+
+	_, err := h.interop.collectSnapshot(1000, map[eth.ChainID]eth.BlockID{
+		h.Mock(10).id: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, errSnapshotMoved)
 }
 
 // =============================================================================
@@ -1354,6 +1400,8 @@ type mockChainContainer struct {
 	pruneDenyListCalls             []uint64
 	pruneDenyListRet               bool
 	pruneDenyListErr               error
+	clearDenyListCalls             int
+	clearDenyListErr               error
 	pruneDenyListInconsistentCalls [][]byte
 	pruneDenyListInconsistentRet   bool
 	pruneDenyListInconsistentErr   error
@@ -1422,7 +1470,10 @@ func (m *mockChainContainer) OptimisticAt(ctx context.Context, ts uint64) (eth.B
 	}
 	l2 := m.optimisticL2
 	if l2 == (eth.BlockID{}) {
-		l2 = m.blockAtTimestamp.ID()
+		l2 = eth.BlockID{
+			Number: ts,
+			Hash:   common.BigToHash(big.NewInt(int64(ts))),
+		}
 	}
 	l1 := m.optimisticL1
 	if l1 == (eth.BlockID{}) {
@@ -1483,6 +1534,12 @@ func (m *mockChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) 
 	defer m.mu.Unlock()
 	m.pruneDenyListCalls = append(m.pruneDenyListCalls, timestamp)
 	return m.pruneDenyListRet, m.pruneDenyListErr
+}
+func (m *mockChainContainer) ClearDenyList() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearDenyListCalls++
+	return m.clearDenyListErr
 }
 func (m *mockChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
 	m.mu.Lock()

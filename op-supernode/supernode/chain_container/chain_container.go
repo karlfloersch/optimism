@@ -58,6 +58,8 @@ type ChainContainer interface {
 	// PruneDenyListAfter removes deny entries created after the given interop timestamp.
 	// Returns true if any entries were removed.
 	PruneDenyListAfter(timestamp uint64) (bool, error)
+	// ClearDenyList removes all deny entries for this chain.
+	ClearDenyList() error
 	// PruneDenyListInconsistentWith removes deny entries for the same interop
 	// timestamp whose stored frontier snapshot differs from the supplied snapshot.
 	// Returns true if any entries were removed.

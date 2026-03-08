@@ -647,6 +647,28 @@ func TestDenyList_PruneInconsistentWithSnapshot(t *testing.T) {
 	require.True(t, found, "entries for other timestamps should remain")
 }
 
+func TestDenyList_Clear(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dl, err := OpenDenyList(dir)
+	require.NoError(t, err)
+	defer dl.Close()
+
+	require.NoError(t, dl.AddEntry(10, DenyEntry{PayloadHash: common.HexToHash("0xaaaa")}))
+	require.NoError(t, dl.AddEntry(11, DenyEntry{PayloadHash: common.HexToHash("0xbbbb")}))
+
+	require.NoError(t, dl.Clear())
+
+	found, err := dl.Contains(10, common.HexToHash("0xaaaa"))
+	require.NoError(t, err)
+	require.False(t, found)
+
+	found, err = dl.Contains(11, common.HexToHash("0xbbbb"))
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
 func testLogger() gethlog.Logger {
 	return gethlog.New()
 }

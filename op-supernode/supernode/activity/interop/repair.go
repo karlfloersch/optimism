@@ -38,12 +38,19 @@ func (i *Interop) repairAcceptedState(lastTimestamp uint64) (bool, error) {
 
 	affectedChains := make([]eth.ChainID, 0, len(i.chains))
 	for chainID, chain := range i.chains {
-		removed, err := chain.PruneDenyListAfter(repairTS)
-		if err != nil {
-			return false, err
-		}
-		if removed {
+		if keep == nil {
+			if err := chain.ClearDenyList(); err != nil {
+				return false, err
+			}
 			affectedChains = append(affectedChains, chainID)
+		} else {
+			removed, err := chain.PruneDenyListAfter(repairTS)
+			if err != nil {
+				return false, err
+			}
+			if removed {
+				affectedChains = append(affectedChains, chainID)
+			}
 		}
 	}
 

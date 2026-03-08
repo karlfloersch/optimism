@@ -8,6 +8,8 @@ import (
 	"github.com/ethereum/go-ethereum"
 )
 
+var errSnapshotMoved = errors.New("snapshot moved during collection")
+
 func (i *Interop) setValidatedBoundary(ts uint64, valid bool) {
 	i.validated = AcceptedBoundary{Timestamp: ts, Valid: valid}
 }
@@ -38,9 +40,12 @@ func (i *Interop) collectSnapshot(ts uint64, blocksAtTimestamp map[eth.ChainID]e
 		if !ok {
 			return VerifiedResult{}, fmt.Errorf("chain %s not found", chainID)
 		}
-		_, l1Block, err := chain.OptimisticAt(i.ctx, ts)
+		optimisticL2, l1Block, err := chain.OptimisticAt(i.ctx, ts)
 		if err != nil {
 			return VerifiedResult{}, fmt.Errorf("chain %s: failed to get L1 head for block %s: %w", chainID, block, err)
+		}
+		if optimisticL2 != block {
+			return VerifiedResult{}, fmt.Errorf("chain %s: %w (frozen_l2=%s optimistic_l2=%s timestamp=%d)", chainID, errSnapshotMoved, block, optimisticL2, ts)
 		}
 		result.L1Heads[chainID] = l1Block
 	}

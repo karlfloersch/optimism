@@ -222,6 +222,19 @@ func (d *DenyList) PruneAfterTimestamp(timestamp uint64, decode denyEntryTimesta
 	return removed, err
 }
 
+func (d *DenyList) Clear() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.DeleteBucket(denyListBucketName); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(denyListBucketName)
+		return err
+	})
+}
+
 // PruneInconsistentWithSnapshot removes deny entries for the same timestamp whose
 // stored frontier snapshot differs from the supplied snapshot. Entries that
 // cannot be decoded are removed conservatively to avoid stale deny state.
@@ -361,6 +374,13 @@ func (c *simpleChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error
 		return false, fmt.Errorf("deny list not initialized")
 	}
 	return c.denyList.PruneAfterTimestamp(timestamp, denyEntryDecisionTimestamp)
+}
+
+func (c *simpleChainContainer) ClearDenyList() error {
+	if c.denyList == nil {
+		return fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.Clear()
 }
 
 func (c *simpleChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {

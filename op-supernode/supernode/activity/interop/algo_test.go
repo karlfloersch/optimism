@@ -81,7 +81,7 @@ func TestL1Inclusion(t *testing.T) {
 				interop := &Interop{
 					log:     gethlog.New(),
 					logsDBs: map[eth.ChainID]LogsDB{},
-					chains:  map[eth.ChainID]cc.ChainContainer{chainID: &algoMockChain{id: chainID, optimisticL1: l1Block}},
+					chains:  map[eth.ChainID]cc.ChainContainer{chainID: &algoMockChain{id: chainID, optimisticL1: l1Block, optimisticL2: expectedBlock}},
 				}
 				return interop, 1000, map[eth.ChainID]eth.BlockID{chainID: expectedBlock}
 			},
@@ -95,6 +95,9 @@ func TestL1Inclusion(t *testing.T) {
 				chain1ID := eth.ChainIDFromUInt64(10)
 				chain2ID := eth.ChainIDFromUInt64(8453)
 				chain3ID := eth.ChainIDFromUInt64(420)
+				chain1Block := eth.BlockID{Number: 100, Hash: common.HexToHash("0x1")}
+				chain2Block := eth.BlockID{Number: 200, Hash: common.HexToHash("0x2")}
+				chain3Block := eth.BlockID{Number: 150, Hash: common.HexToHash("0x3")}
 
 				// Chain 1 has L1 at 60 (highest - should be selected)
 				// Chain 2 has L1 at 45 (earliest)
@@ -103,15 +106,15 @@ func TestL1Inclusion(t *testing.T) {
 					log:     gethlog.New(),
 					logsDBs: map[eth.ChainID]LogsDB{},
 					chains: map[eth.ChainID]cc.ChainContainer{
-						chain1ID: &algoMockChain{id: chain1ID, optimisticL1: eth.BlockID{Number: 60, Hash: common.HexToHash("0xL1_1")}},
-						chain2ID: &algoMockChain{id: chain2ID, optimisticL1: eth.BlockID{Number: 45, Hash: common.HexToHash("0xL1_2")}},
-						chain3ID: &algoMockChain{id: chain3ID, optimisticL1: eth.BlockID{Number: 50, Hash: common.HexToHash("0xL1_3")}},
+						chain1ID: &algoMockChain{id: chain1ID, optimisticL1: eth.BlockID{Number: 60, Hash: common.HexToHash("0xL1_1")}, optimisticL2: chain1Block},
+						chain2ID: &algoMockChain{id: chain2ID, optimisticL1: eth.BlockID{Number: 45, Hash: common.HexToHash("0xL1_2")}, optimisticL2: chain2Block},
+						chain3ID: &algoMockChain{id: chain3ID, optimisticL1: eth.BlockID{Number: 50, Hash: common.HexToHash("0xL1_3")}, optimisticL2: chain3Block},
 					},
 				}
 				return interop, 1000, map[eth.ChainID]eth.BlockID{
-					chain1ID: {Number: 100, Hash: common.HexToHash("0x1")},
-					chain2ID: {Number: 200, Hash: common.HexToHash("0x2")},
-					chain3ID: {Number: 150, Hash: common.HexToHash("0x3")},
+					chain1ID: chain1Block,
+					chain2ID: chain2Block,
+					chain3ID: chain3Block,
 				}
 			},
 			validate: func(t *testing.T, l1 eth.BlockID) {
@@ -157,14 +160,15 @@ func TestL1Inclusion(t *testing.T) {
 				chainID := eth.ChainIDFromUInt64(10)
 				// L1 genesis block at number 0
 				l1Block := eth.BlockID{Number: 0, Hash: common.HexToHash("0xGenesisL1")}
+				l2Block := eth.BlockID{Number: 0, Hash: common.HexToHash("0x123")}
 
 				interop := &Interop{
 					log:     gethlog.New(),
 					logsDBs: map[eth.ChainID]LogsDB{},
-					chains:  map[eth.ChainID]cc.ChainContainer{chainID: &algoMockChain{id: chainID, optimisticL1: l1Block}},
+					chains:  map[eth.ChainID]cc.ChainContainer{chainID: &algoMockChain{id: chainID, optimisticL1: l1Block, optimisticL2: l2Block}},
 				}
 				return interop, 0, map[eth.ChainID]eth.BlockID{
-					chainID: {Number: 0, Hash: common.HexToHash("0x123")},
+					chainID: l2Block,
 				}
 			},
 			// Genesis blocks included at L1 block number 0 must not cause an error.
@@ -908,6 +912,9 @@ func (m *algoMockChain) InvalidateBlock(ctx context.Context, height uint64, payl
 }
 func (m *algoMockChain) PruneDenyListAfter(timestamp uint64) (bool, error) {
 	return false, nil
+}
+func (m *algoMockChain) ClearDenyList() error {
+	return nil
 }
 func (m *algoMockChain) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
 	return false, nil
