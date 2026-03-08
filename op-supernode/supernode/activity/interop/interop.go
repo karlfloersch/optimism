@@ -2,6 +2,7 @@ package interop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -42,7 +43,6 @@ type Interop struct {
 	chains              map[eth.ChainID]cc.ChainContainer
 	activationTimestamp uint64
 	dataDir             string
-	l1Source            L1BlockRefSource
 	checker             ConsistencyChecker
 
 	verifiedDB *VerifiedDB
@@ -141,7 +141,6 @@ func NewWithL1Source(
 		logsDBs:             logsDBs,
 		dataDir:             dataDir,
 		activationTimestamp: activationTimestamp,
-		l1Source:            l1Source,
 		checker:             NewByNumberChecker(l1Source),
 	}
 	// default to using the verifyInteropMessages function
@@ -506,7 +505,7 @@ func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, resu
 	if !ok {
 		return fmt.Errorf("chain %s not found", chainID)
 	}
-	metadata, err := i.denyEntryMetadata(chainID, result)
+	metadata, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}

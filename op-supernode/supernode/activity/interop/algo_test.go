@@ -119,31 +119,6 @@ func TestL1Inclusion(t *testing.T) {
 			},
 		},
 		{
-			name: "ChainNotInChainsMap_Skipped",
-			setup: func() (*Interop, uint64, map[eth.ChainID]eth.BlockID) {
-				chain1ID := eth.ChainIDFromUInt64(10)
-				chain2ID := eth.ChainIDFromUInt64(8453) // Not in chains map
-
-				l1Block1 := eth.BlockID{Number: 50, Hash: common.HexToHash("0xL1_1")}
-
-				interop := &Interop{
-					log:     gethlog.New(),
-					logsDBs: map[eth.ChainID]LogsDB{},
-					chains: map[eth.ChainID]cc.ChainContainer{
-						chain1ID: &algoMockChain{id: chain1ID, optimisticL1: l1Block1},
-						// chain2ID NOT in chains map
-					},
-				}
-				return interop, 1000, map[eth.ChainID]eth.BlockID{
-					chain1ID: {Number: 100, Hash: common.HexToHash("0x1")},
-					chain2ID: {Number: 200, Hash: common.HexToHash("0x2")},
-				}
-			},
-			validate: func(t *testing.T, l1 eth.BlockID) {
-				require.Equal(t, eth.BlockID{Number: 50, Hash: common.HexToHash("0xL1_1")}, l1)
-			},
-		},
-		{
 			name: "OptimisticAtError_ReturnsError",
 			setup: func() (*Interop, uint64, map[eth.ChainID]eth.BlockID) {
 				chainID := eth.ChainIDFromUInt64(10)
@@ -160,7 +135,7 @@ func TestL1Inclusion(t *testing.T) {
 				}
 			},
 			expectError: true,
-			errorMsg:    "failed to get L1 inclusion",
+			errorMsg:    "failed to get L1 head",
 		},
 		{
 			name: "NoChains_ReturnsEmpty",
@@ -203,7 +178,7 @@ func TestL1Inclusion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			interop, ts, blocks := tc.setup()
-			l1, err := interop.l1Inclusion(ts, blocks)
+			snapshot, err := interop.collectSnapshot(ts, blocks)
 
 			if tc.expectError {
 				require.Error(t, err)
@@ -215,7 +190,7 @@ func TestL1Inclusion(t *testing.T) {
 			}
 
 			if tc.validate != nil {
-				tc.validate(t, l1)
+				tc.validate(t, snapshot.L1Inclusion)
 			}
 		})
 	}

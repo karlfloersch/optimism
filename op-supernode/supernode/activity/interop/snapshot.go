@@ -59,26 +59,6 @@ func (i *Interop) collectSnapshotAtTimestamp(ts uint64) (VerifiedResult, error) 
 	return snapshot, nil
 }
 
-// l1Inclusion returns the maximum L1 head for the supplied timestamp snapshot.
-// It remains as a small helper for tests and callers that only need the derived anchor.
-func (i *Interop) l1Inclusion(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (eth.BlockID, error) {
-	l1Inclusion := eth.BlockID{}
-	for chainID := range blocksAtTimestamp {
-		chain, ok := i.chains[chainID]
-		if !ok {
-			continue
-		}
-		_, l1Block, err := chain.OptimisticAt(i.ctx, ts)
-		if err != nil {
-			return eth.BlockID{}, fmt.Errorf("chain %s: failed to get L1 inclusion: %w", chainID, err)
-		}
-		if l1Block.Number >= l1Inclusion.Number {
-			l1Inclusion = l1Block
-		}
-	}
-	return l1Inclusion, nil
-}
-
 func cloneBlockMap(in map[eth.ChainID]eth.BlockID) map[eth.ChainID]eth.BlockID {
 	if len(in) == 0 {
 		return nil

@@ -160,32 +160,6 @@ func (d *DenyList) GetDeniedHashes(height uint64) ([]common.Hash, error) {
 	return hashes, err
 }
 
-// GetEntries returns all deny entry versions for a payload at the given block height.
-// Entries are returned newest-first.
-func (d *DenyList) GetEntries(height uint64, payloadHash common.Hash) ([]DenyEntry, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	key := heightToKey(height)
-	var entries []DenyEntry
-
-	err := d.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(denyListBucketName)
-		decoded, err := decodeEntries(b.Get(key))
-		if err != nil {
-			return err
-		}
-		for _, entry := range decoded {
-			if entry.PayloadHash == payloadHash {
-				entries = append(entries, entry)
-			}
-		}
-		return nil
-	})
-
-	return entries, err
-}
-
 // PruneAfterTimestamp removes deny entries whose decoded decision timestamp is greater than timestamp.
 // Entries that cannot be decoded are removed conservatively to avoid stale denylist state surviving repairs.
 // Returns true if any entries were deleted.
