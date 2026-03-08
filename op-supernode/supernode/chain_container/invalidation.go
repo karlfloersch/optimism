@@ -35,6 +35,14 @@ type DenyEntry struct {
 
 type denyEntryTimestampDecoder func(entry DenyEntry) (uint64, error)
 
+type denyResultTimestamp struct {
+	Timestamp uint64 `json:"timestamp"`
+}
+
+type wrappedDenyResultTimestamp struct {
+	Result denyResultTimestamp `json:"result"`
+}
+
 // OpenDenyList opens or creates a DenyList at the given data directory.
 func OpenDenyList(dataDir string) (*DenyList, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -307,26 +315,22 @@ func (c *simpleChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
-	return c.denyList.PruneAfterTimestamp(timestamp, func(entry DenyEntry) (uint64, error) {
-		if len(entry.Result) == 0 {
-			return 0, errors.New("deny entry missing result metadata")
-		}
-		var result struct {
-			Timestamp uint64 `json:"timestamp"`
-		}
-		if err := json.Unmarshal(entry.Result, &result); err == nil && result.Timestamp != 0 {
-			return result.Timestamp, nil
-		}
-		var wrapped struct {
-			Result struct {
-				Timestamp uint64 `json:"timestamp"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(entry.Result, &wrapped); err == nil && wrapped.Result.Timestamp != 0 {
-			return wrapped.Result.Timestamp, nil
-		}
-		return 0, errors.New("deny entry missing decision timestamp")
-	})
+	return c.denyList.PruneAfterTimestamp(timestamp, denyEntryDecisionTimestamp)
+}
+
+func denyEntryDecisionTimestamp(entry DenyEntry) (uint64, error) {
+	if len(entry.Result) == 0 {
+		return 0, errors.New("deny entry missing result metadata")
+	}
+	var result denyResultTimestamp
+	if err := json.Unmarshal(entry.Result, &result); err == nil && result.Timestamp != 0 {
+		return result.Timestamp, nil
+	}
+	var wrapped wrappedDenyResultTimestamp
+	if err := json.Unmarshal(entry.Result, &wrapped); err == nil && wrapped.Result.Timestamp != 0 {
+		return wrapped.Result.Timestamp, nil
+	}
+	return 0, errors.New("deny entry missing decision timestamp")
 }
 
 func decodeEntries(raw []byte) ([]DenyEntry, error) {
