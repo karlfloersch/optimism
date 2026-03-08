@@ -21,7 +21,7 @@ import (
 // - The interop activity detects the invalid block
 // - The chain container is told to invalidate the block
 // - A reset/rewind is triggered if the chain is using that block
-// - A replacement block is built at the same height
+// - A replacement block is built at the same height (deposits-only)
 // - The replacement block's timestamp eventually becomes verified
 func TestSupernodeInteropInvalidMessageReplacement(gt *testing.T) {
 
