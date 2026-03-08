@@ -67,11 +67,28 @@ func (i *Interop) repairAcceptedState(lastTimestamp uint64) (bool, error) {
 		return false, nil
 	}
 
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	repairTS := uint64(0)
+	if keep != nil {
+		repairTS = keep.Timestamp
+	} else if i.activationTimestamp > 0 {
+		repairTS = i.activationTimestamp - 1
+	}
 
+	affectedChains := make([]eth.ChainID, 0, len(i.chains))
+	for chainID, chain := range i.chains {
+		removed, err := chain.PruneDenyListAfter(repairTS)
+		if err != nil {
+			return false, err
+		}
+		if removed {
+			affectedChains = append(affectedChains, chainID)
+		}
+	}
+
+	i.mu.Lock()
 	if keep == nil {
 		if _, err := i.verifiedDB.Rewind(0); err != nil {
+			i.mu.Unlock()
 			return false, err
 		}
 		for chainID, db := range i.logsDBs {
@@ -81,21 +98,34 @@ func (i *Interop) repairAcceptedState(lastTimestamp uint64) (bool, error) {
 		}
 		i.currentL1 = eth.BlockID{}
 		i.clearValidatedBoundary()
-		return true, nil
+		i.mu.Unlock()
+	} else {
+		if _, err := i.verifiedDB.RewindAfter(keep.Timestamp); err != nil {
+			i.mu.Unlock()
+			return false, err
+		}
+		for chainID, head := range keep.L2Heads {
+			db, ok := i.logsDBs[chainID]
+			if !ok {
+				continue
+			}
+			i.rewindLogsDBToHead(chainID, db, head)
+		}
+		i.currentL1 = eth.BlockID{}
+		i.setValidatedBoundary(keep.Timestamp, true)
+		i.mu.Unlock()
 	}
 
-	if _, err := i.verifiedDB.RewindAfter(keep.Timestamp); err != nil {
-		return false, err
-	}
-	for chainID, head := range keep.L2Heads {
-		db, ok := i.logsDBs[chainID]
+	for _, chainID := range affectedChains {
+		chain, ok := i.chains[chainID]
 		if !ok {
 			continue
 		}
-		i.rewindLogsDBToHead(chainID, db, head)
+		if err := chain.RewindEngine(i.ctx, repairTS, eth.BlockRef{}); err != nil {
+			return false, err
+		}
 	}
-	i.currentL1 = eth.BlockID{}
-	i.setValidatedBoundary(keep.Timestamp, true)
+
 	return true, nil
 }
 

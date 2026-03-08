@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,8 @@ type DenyEntry struct {
 	PayloadHash common.Hash     `json:"payloadHash"`
 	Result      json.RawMessage `json:"result,omitempty"`
 }
+
+type denyEntryTimestampDecoder func(entry DenyEntry) (uint64, error)
 
 // OpenDenyList opens or creates a DenyList at the given data directory.
 func OpenDenyList(dataDir string) (*DenyList, error) {
@@ -175,6 +178,59 @@ func (d *DenyList) GetEntries(height uint64, payloadHash common.Hash) ([]DenyEnt
 	return entries, err
 }
 
+// PruneAfterTimestamp removes deny entries whose decoded decision timestamp is greater than timestamp.
+// Entries that cannot be decoded are removed conservatively to avoid stale denylist state surviving repairs.
+// Returns true if any entries were deleted.
+func (d *DenyList) PruneAfterTimestamp(timestamp uint64, decode denyEntryTimestampDecoder) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var removed bool
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, raw := c.First(); k != nil; k, raw = c.Next() {
+			entries, err := decodeEntries(raw)
+			if err != nil {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				removed = true
+				continue
+			}
+
+			kept := entries[:0]
+			for _, entry := range entries {
+				decisionTS, err := decode(entry)
+				if err != nil || decisionTS > timestamp {
+					removed = true
+					continue
+				}
+				kept = append(kept, entry)
+			}
+
+			if len(kept) == 0 {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				continue
+			}
+			if len(kept) == len(entries) {
+				continue
+			}
+			encoded, err := json.Marshal(kept)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // Close closes the database.
 func (d *DenyList) Close() error {
 	return d.db.Close()
@@ -245,6 +301,32 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	)
 
 	return true, nil
+}
+
+func (c *simpleChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) {
+	if c.denyList == nil {
+		return false, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneAfterTimestamp(timestamp, func(entry DenyEntry) (uint64, error) {
+		if len(entry.Result) == 0 {
+			return 0, errors.New("deny entry missing result metadata")
+		}
+		var result struct {
+			Timestamp uint64 `json:"timestamp"`
+		}
+		if err := json.Unmarshal(entry.Result, &result); err == nil && result.Timestamp != 0 {
+			return result.Timestamp, nil
+		}
+		var wrapped struct {
+			Result struct {
+				Timestamp uint64 `json:"timestamp"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(entry.Result, &wrapped); err == nil && wrapped.Result.Timestamp != 0 {
+			return wrapped.Result.Timestamp, nil
+		}
+		return 0, errors.New("deny entry missing decision timestamp")
+	})
 }
 
 func decodeEntries(raw []byte) ([]DenyEntry, error) {

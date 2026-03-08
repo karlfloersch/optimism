@@ -297,6 +297,14 @@ func (i *Interop) applyReset(reset pendingReset) error {
 		"invalidatedBlock", reset.invalidatedBlock,
 	)
 
+	if reset.invalidatedBlock == (eth.BlockRef{}) {
+		i.log.Info("ignoring repair-reset callback; accepted-state repair already rewound interop state",
+			"chainID", reset.chainID,
+			"timestamp", reset.timestamp,
+		)
+		return nil
+	}
+
 	db, dbOk := i.logsDBs[reset.chainID]
 	if !dbOk {
 		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)

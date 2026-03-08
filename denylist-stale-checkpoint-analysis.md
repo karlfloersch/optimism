@@ -1,141 +1,71 @@
-# Denylist Stale-Checkpoint Analysis
+# Denylist Repair Analysis
 
-## Question
+## Problem
 
-Can a stale accepted checkpoint cause the supernode to apply a denylist entry that is no longer valid after an L1/L2 reorg, and if so, is that only a temporary liveness issue or can it permanently diverge the node?
+Anchoring denylist lookups to the currently accepted checkpoint was hard to reason about under reorgs.
 
-## Current Design
+The failure mode was:
 
-Today the relevant pieces are:
+1. A deny entry is created for an invalid frontier.
+2. L1/L2 reorgs before interop repairs the accepted checkpoint.
+3. The stale checkpoint still makes the deny entry look valid.
+4. op-node rejects a block that is now actually valid and may install a replacement block instead.
 
-- `verifiedDB` stores accepted interop snapshots (`VerifiedResult`).
-- `validated` tracks the highest accepted timestamp we currently trust.
-- denylist entries persist, but on a deny hit we do not trust raw storage alone.
-- instead, `ValidateDeniedEntry` checks the deny entry against the currently accepted checkpoint.
+That replacement can persist even after interop later realizes the checkpoint was stale.
 
-That means the denylist is logically guarded by the accepted checkpoint, not physically rewound.
+## Pivot
 
-## Failure Mode
+The simpler eventual-consistency design is:
 
-The dangerous case is:
+- keep denylist lookup dumb on the hot path
+- prune deny entries explicitly when accepted-state repair rewinds the interop prefix
+- reset any chain whose denylist lost entries, so any stale replacement blocks are rolled back too
 
-1. Accepted checkpoint `C` is still stored and marked validated.
-2. A deny entry `D` was created under `C`.
-3. An L1 reorg happens.
-4. The chain starts moving to the new world, but interop has not run repair yet.
-5. `C` is now stale, but still looks accepted locally.
-6. A payload `X` arrives that was invalid under `C` but is valid in the new world.
-7. `IsDenied(height(X), hash(X))` hits `D`.
-8. `ValidateDeniedEntry` validates `D` against stale checkpoint `C`.
-9. `IsDenied` returns `true`.
-10. op-node rejects `X` and requests a deposits-only replacement block.
-11. The replacement block is built and force-reset into the chain.
+This makes the denylist part of the repaired suffix, instead of trying to prove old deny entries live at lookup time.
 
-## Why This Can Be Permanent
+## Repair Rule
 
-This is not just a temporary false positive.
+When accepted-state repair finds the new kept timestamp `keepTS`:
 
-If the replacement block is installed:
+1. Rewind `verifiedDB` to `keepTS`.
+2. Rewind each `logsDB` to the kept per-chain `L2Head`.
+3. Prune each chain's denylist entries whose `Result.Timestamp > keepTS`.
+4. For each chain that had entries pruned, rewind the chain engine to `keepTS`.
 
-- the original valid block `X` may never be reintroduced,
-- later interop repair may disable the stale deny entry,
-- but that does not automatically restore `X`,
-- and another node that accepted `X` may continue on a different branch.
+If no accepted prefix remains:
 
-So a stale-checkpoint false deny can permanently push this node onto a different local-safe / cross-safe history.
+1. Rewind `verifiedDB` to empty.
+2. Clear all `logsDB`s.
+3. Prune all deny entries created at or after interop activation.
+4. Rewind affected chains to just before activation.
 
-## Comparison With a False Negative
+## Why This Is Easier To Reason About
 
-The opposite mistake is:
+- stale deny entries from the discarded suffix are removed directly
+- if one of those entries already caused a replacement block, the chain reset undoes it
+- deny lookups no longer depend on checkpoint freshness or live validator RPCs
+- eventual consistency is driven by one repair boundary: the kept interop timestamp
 
-- a deny miss when a block should have been denied.
+## Implementation Notes
 
-That is usually recoverable:
+- deny entries still store the invalid `Result`, but now only so repair can recover the decision timestamp
+- denylist lookup is back to raw `(height, payloadHash)` membership
+- accepted-state repair uses `PruneDenyListAfter(keepTS)` on each chain
+- repair-triggered chain rewinds use `RewindEngine(..., eth.BlockRef{})`; the zero block acts as a sentinel so interop ignores the callback because it already applied the local rewind itself
 
-- the block gets inserted,
-- interop later evaluates it,
-- if it is actually invalid, the existing invalidation / reset machinery can remove it.
+## Testing Focus
 
-So the two error modes are not symmetric:
+The keystone behavior to preserve is:
 
-- false positive deny: can permanently force a wrong replacement path
-- false negative deny: usually recoverable later by interop
+1. accept through timestamp `T`
+2. create deny decisions on the discarded suffix
+3. reorg so the accepted world rewinds to `keepTS < T`
+4. prune deny entries with decision timestamp `> keepTS`
+5. reset affected chains
+6. rebuild from the kept prefix and converge again
 
-Given that asymmetry, the safer bias is:
+The most important unit checks are:
 
-- never return `true` from `IsDenied` unless we are confident the checkpoint behind that deny entry is still live-valid
-- on uncertainty, prefer `false`
-
-## Recommended Rule
-
-Use this policy:
-
-1. If there is no accepted validated checkpoint and the denylist lookup is a miss:
-   return `false` immediately.
-
-2. Otherwise, before trusting either a deny hit or a deny miss, revalidate the currently accepted checkpoint live:
-   - re-collect a fresh snapshot for the validated timestamp
-   - compare it to the stored accepted snapshot using the consistency checker
-
-3. If that live revalidation fails or the checkpoint is stale:
-   - do not trust the deny result
-   - return `false`
-   - trigger or allow accepted-state repair to run
-
-4. Only if the accepted checkpoint is still live-valid:
-   - evaluate deny entries
-   - on a deny hit, validate the entry against that checkpoint
-   - on a deny miss, return `false`
-
-This is deliberately fail-open on deny uncertainty.
-
-## Why Recheck On Miss Too
-
-Rechecking only on deny hits still leaves an awkward split:
-
-- deny hit: "I need to prove the checkpoint is fresh"
-- deny miss: "I assume the checkpoint is fresh"
-
-If the accepted checkpoint is stale, both answers are suspect. Rechecking on both paths is simpler and easier to reason about.
-
-The one good fast path is:
-
-- no accepted validated checkpoint exists
-- denylist lookup is a miss
-
-In that case there is no accepted world to protect yet, so we can safely return `false` without extra work.
-
-## Tradeoff
-
-This makes `IsDenied` more expensive because it may trigger live snapshot validation even on misses after cross-validation has started.
-
-That cost is acceptable if the priority is eventual consistency and avoiding false positive deny decisions that can permanently alter the local chain.
-
-## Recommendation
-
-The robust version is:
-
-- keep deny entries persistent
-- do not physically rewind the denylist by default
-- but never trust a deny result unless the current accepted checkpoint has been revalidated live
-- recheck on both hits and misses once a validated checkpoint exists
-- keep the single fast path:
-- no validated checkpoint
-- deny miss
-- immediate `false`
-
-This is the smallest design change that closes the stale-checkpoint false-deny hole without redesigning the whole interop / denylist model.
-
-## Chosen Rule
-
-The implemented rule is:
-
-1. `IsDenied` looks up the raw denylist entry versions.
-2. If there is no deny entry and there is no validated checkpoint:
-   return `false` immediately.
-3. Otherwise, live-revalidate the currently accepted checkpoint.
-4. If that checkpoint is stale or the revalidation fails:
-   return `false`.
-5. Only if the checkpoint is still live-valid do we trust deny entries.
-
-This means we now recheck the accepted checkpoint on both deny hits and deny misses once cross-validation has begun.
+- pruning removes only entries after `keepTS`
+- accepted-state repair rewinds logs, verified state, and affected chains together
+- repair-reset callbacks do not double-apply interop rewinds

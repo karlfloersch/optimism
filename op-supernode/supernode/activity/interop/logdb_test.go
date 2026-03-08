@@ -685,6 +685,9 @@ func (m *statefulMockChainContainer) RewindEngine(ctx context.Context, timestamp
 func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error) {
 	return false, nil
 }
+func (m *statefulMockChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) {
+	return false, nil
+}
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }

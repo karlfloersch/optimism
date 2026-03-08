@@ -2,6 +2,8 @@ package chain_container
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -289,6 +291,61 @@ func TestDenyList_GetDeniedHashes(t *testing.T) {
 			tt.check(t, dl)
 		})
 	}
+}
+
+func TestDenyList_PruneAfterTimestamp(t *testing.T) {
+	t.Parallel()
+
+	dl, err := OpenDenyList(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dl.Close() })
+
+	type denyResult struct {
+		Timestamp uint64 `json:"timestamp"`
+	}
+	mustResult := func(ts uint64) json.RawMessage {
+		raw, err := json.Marshal(denyResult{Timestamp: ts})
+		require.NoError(t, err)
+		return raw
+	}
+
+	require.NoError(t, dl.AddEntry(100, DenyEntry{
+		PayloadHash: common.HexToHash("0xaaaa"),
+		Result:      mustResult(1000),
+	}))
+	require.NoError(t, dl.AddEntry(101, DenyEntry{
+		PayloadHash: common.HexToHash("0xbbbb"),
+		Result:      mustResult(1002),
+	}))
+	require.NoError(t, dl.AddEntry(102, DenyEntry{
+		PayloadHash: common.HexToHash("0xcccc"),
+		Result:      json.RawMessage(`{"legacy":true}`),
+	}))
+
+	removed, err := dl.PruneAfterTimestamp(1000, func(entry DenyEntry) (uint64, error) {
+		var result denyResult
+		if err := json.Unmarshal(entry.Result, &result); err != nil {
+			return 0, err
+		}
+		if result.Timestamp == 0 {
+			return 0, errors.New("missing timestamp")
+		}
+		return result.Timestamp, nil
+	})
+	require.NoError(t, err)
+	require.True(t, removed)
+
+	found, err := dl.Contains(100, common.HexToHash("0xaaaa"))
+	require.NoError(t, err)
+	require.True(t, found)
+
+	found, err = dl.Contains(101, common.HexToHash("0xbbbb"))
+	require.NoError(t, err)
+	require.False(t, found)
+
+	found, err = dl.Contains(102, common.HexToHash("0xcccc"))
+	require.NoError(t, err)
+	require.False(t, found)
 }
 
 // mockEngineForInvalidation implements engine_controller.EngineController for invalidation tests

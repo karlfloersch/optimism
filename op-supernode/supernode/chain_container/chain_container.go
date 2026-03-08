@@ -55,6 +55,9 @@ type ChainContainer interface {
 	// currently uses that block at the specified height.
 	// Returns true if a rewind was triggered, false otherwise.
 	InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, resultMetadata []byte) (bool, error)
+	// PruneDenyListAfter removes deny entries created after the given interop timestamp.
+	// Returns true if any entries were removed.
+	PruneDenyListAfter(timestamp uint64) (bool, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.
