@@ -58,6 +58,10 @@ type ChainContainer interface {
 	// PruneDenyListAfter removes deny entries created after the given interop timestamp.
 	// Returns true if any entries were removed.
 	PruneDenyListAfter(timestamp uint64) (bool, error)
+	// PruneDenyListInconsistentWith removes deny entries for the same interop
+	// timestamp whose stored frontier snapshot differs from the supplied snapshot.
+	// Returns true if any entries were removed.
+	PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.

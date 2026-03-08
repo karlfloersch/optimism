@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum/go-ethereum/common"
 	bolt "go.etcd.io/bbolt"
 )
@@ -41,6 +43,13 @@ type denyResultTimestamp struct {
 
 type wrappedDenyResultTimestamp struct {
 	Result denyResultTimestamp `json:"result"`
+}
+
+type denyResultSnapshot struct {
+	Timestamp   uint64                      `json:"timestamp"`
+	L1Inclusion eth.BlockID                 `json:"l1Inclusion"`
+	L1Heads     map[eth.ChainID]eth.BlockID `json:"l1Heads"`
+	L2Heads     map[eth.ChainID]eth.BlockID `json:"l2Heads"`
 }
 
 // OpenDenyList opens or creates a DenyList at the given data directory.
@@ -213,6 +222,68 @@ func (d *DenyList) PruneAfterTimestamp(timestamp uint64, decode denyEntryTimesta
 	return removed, err
 }
 
+// PruneInconsistentWithSnapshot removes deny entries for the same timestamp whose
+// stored frontier snapshot differs from the supplied snapshot. Entries that
+// cannot be decoded are removed conservatively to avoid stale deny state.
+func (d *DenyList) PruneInconsistentWithSnapshot(snapshotMetadata []byte) (bool, error) {
+	target, err := decodeDenySnapshot(snapshotMetadata)
+	if err != nil {
+		return false, err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var removed bool
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, raw := c.First(); k != nil; k, raw = c.Next() {
+			entries, err := decodeEntries(raw)
+			if err != nil {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				removed = true
+				continue
+			}
+
+			kept := entries[:0]
+			for _, entry := range entries {
+				snapshot, err := decodeDenySnapshot(entry.Result)
+				if err != nil {
+					removed = true
+					continue
+				}
+				if snapshot.Timestamp == target.Timestamp && !denySnapshotsEqual(snapshot, target) {
+					removed = true
+					continue
+				}
+				kept = append(kept, entry)
+			}
+
+			if len(kept) == 0 {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				continue
+			}
+			if len(kept) == len(entries) {
+				continue
+			}
+			encoded, err := json.Marshal(kept)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // Close closes the database.
 func (d *DenyList) Close() error {
 	return d.db.Close()
@@ -292,6 +363,13 @@ func (c *simpleChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error
 	return c.denyList.PruneAfterTimestamp(timestamp, denyEntryDecisionTimestamp)
 }
 
+func (c *simpleChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
+	if c.denyList == nil {
+		return false, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneInconsistentWithSnapshot(snapshotMetadata)
+}
+
 func denyEntryDecisionTimestamp(entry DenyEntry) (uint64, error) {
 	if len(entry.Result) == 0 {
 		return 0, errors.New("deny entry missing result metadata")
@@ -324,4 +402,22 @@ func decodeEntries(raw []byte) ([]DenyEntry, error) {
 		entries = append(entries, DenyEntry{PayloadHash: common.BytesToHash(raw[i : i+common.HashLength])})
 	}
 	return entries, nil
+}
+
+func decodeDenySnapshot(raw []byte) (denyResultSnapshot, error) {
+	if len(raw) == 0 {
+		return denyResultSnapshot{}, errors.New("deny entry missing snapshot metadata")
+	}
+	var snapshot denyResultSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return denyResultSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func denySnapshotsEqual(a, b denyResultSnapshot) bool {
+	return a.Timestamp == b.Timestamp &&
+		a.L1Inclusion == b.L1Inclusion &&
+		reflect.DeepEqual(a.L1Heads, b.L1Heads) &&
+		reflect.DeepEqual(a.L2Heads, b.L2Heads)
 }

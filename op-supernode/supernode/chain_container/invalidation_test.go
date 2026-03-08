@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -587,6 +588,63 @@ func TestIsDenied(t *testing.T) {
 			require.Equal(t, tt.expectFound, found)
 		})
 	}
+}
+
+func TestDenyList_PruneInconsistentWithSnapshot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dl, err := OpenDenyList(dir)
+	require.NoError(t, err)
+	defer dl.Close()
+
+	makeSnapshot := func(ts uint64, l2Num uint64, l1Num uint64) []byte {
+		raw, err := json.Marshal(denyResultSnapshot{
+			Timestamp:   ts,
+			L1Inclusion: eth.BlockID{Number: l1Num, Hash: common.BigToHash(new(big.Int).SetUint64(l1Num))},
+			L1Heads: map[eth.ChainID]eth.BlockID{
+				eth.ChainIDFromUInt64(10): {Number: l1Num, Hash: common.BigToHash(new(big.Int).SetUint64(l1Num))},
+			},
+			L2Heads: map[eth.ChainID]eth.BlockID{
+				eth.ChainIDFromUInt64(10): {Number: l2Num, Hash: common.BigToHash(new(big.Int).SetUint64(l2Num))},
+			},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	stale := makeSnapshot(1001, 5001, 101)
+	current := makeSnapshot(1001, 6001, 101)
+	otherTS := makeSnapshot(1002, 7002, 102)
+
+	require.NoError(t, dl.AddEntry(5001, DenyEntry{
+		PayloadHash: common.HexToHash("0xaaaa"),
+		Result:      stale,
+	}))
+	require.NoError(t, dl.AddEntry(6001, DenyEntry{
+		PayloadHash: common.HexToHash("0xbbbb"),
+		Result:      current,
+	}))
+	require.NoError(t, dl.AddEntry(7002, DenyEntry{
+		PayloadHash: common.HexToHash("0xcccc"),
+		Result:      otherTS,
+	}))
+
+	removed, err := dl.PruneInconsistentWithSnapshot(current)
+	require.NoError(t, err)
+	require.True(t, removed)
+
+	found, err := dl.Contains(5001, common.HexToHash("0xaaaa"))
+	require.NoError(t, err)
+	require.False(t, found, "stale frontier deny entry should be removed")
+
+	found, err = dl.Contains(6001, common.HexToHash("0xbbbb"))
+	require.NoError(t, err)
+	require.True(t, found, "matching frontier deny entry should remain")
+
+	found, err = dl.Contains(7002, common.HexToHash("0xcccc"))
+	require.NoError(t, err)
+	require.True(t, found, "entries for other timestamps should remain")
 }
 
 func testLogger() gethlog.Logger {

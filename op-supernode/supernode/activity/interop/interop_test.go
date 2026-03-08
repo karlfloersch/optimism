@@ -1176,6 +1176,38 @@ func TestRepairAcceptedState_IgnoresRepairResetSentinel(t *testing.T) {
 	h.interop.mu.RUnlock()
 }
 
+func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}
+			m.pruneDenyListInconsistentRet = true
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   1000,
+		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 100, Hash: common.HexToHash("0x100")},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+		},
+	}))
+	h.interop.mu.Lock()
+	h.interop.setValidatedBoundary(1000, true)
+	h.interop.mu.Unlock()
+
+	result, outcome, err := h.interop.progressInterop()
+	require.NoError(t, err)
+	require.True(t, result.IsEmpty())
+	require.Equal(t, RoundWait, outcome)
+
+	require.Len(t, h.Mock(10).pruneDenyListInconsistentCalls, 1)
+	require.Empty(t, h.Mock(10).rewindCalls)
+}
+
 // =============================================================================
 // TestInterop_FullCycle
 // =============================================================================
@@ -1319,11 +1351,14 @@ type mockChainContainer struct {
 	invalidateBlockErr   error
 
 	// Repair rewind / denylist pruning tracking
-	pruneDenyListCalls []uint64
-	pruneDenyListRet   bool
-	pruneDenyListErr   error
-	rewindCalls        []rewindEngineCall
-	rewindErr          error
+	pruneDenyListCalls             []uint64
+	pruneDenyListRet               bool
+	pruneDenyListErr               error
+	pruneDenyListInconsistentCalls [][]byte
+	pruneDenyListInconsistentRet   bool
+	pruneDenyListInconsistentErr   error
+	rewindCalls                    []rewindEngineCall
+	rewindErr                      error
 
 	// OptimisticAt fields
 	optimisticL2    eth.BlockID
@@ -1448,6 +1483,12 @@ func (m *mockChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) 
 	defer m.mu.Unlock()
 	m.pruneDenyListCalls = append(m.pruneDenyListCalls, timestamp)
 	return m.pruneDenyListRet, m.pruneDenyListErr
+}
+func (m *mockChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruneDenyListInconsistentCalls = append(m.pruneDenyListInconsistentCalls, append([]byte(nil), snapshotMetadata...))
+	return m.pruneDenyListInconsistentRet, m.pruneDenyListInconsistentErr
 }
 func (m *mockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil

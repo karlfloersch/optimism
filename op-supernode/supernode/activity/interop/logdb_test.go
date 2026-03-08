@@ -688,6 +688,9 @@ func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height
 func (m *statefulMockChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) {
 	return false, nil
 }
+func (m *statefulMockChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
+	return false, nil
+}
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }

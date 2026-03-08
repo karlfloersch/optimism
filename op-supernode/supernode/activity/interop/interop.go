@@ -411,6 +411,13 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 	if err != nil {
 		return Result{}, RoundWait, err
 	}
+	reconciled, err := i.reconcileFrontierDenylist(frontier)
+	if err != nil {
+		return Result{}, RoundWait, err
+	}
+	if reconciled {
+		return Result{}, RoundWait, nil
+	}
 	consistent, err := i.checker.FrontierConsistent(i.ctx, accepted, frontier)
 	if err != nil {
 		return Result{}, RoundWait, err
@@ -465,6 +472,25 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 		return result, RoundInvalidated, nil
 	}
 	return result, RoundCommitted, nil
+}
+
+func (i *Interop) reconcileFrontierDenylist(frontier VerifiedResult) (bool, error) {
+	frontierMetadata, err := json.Marshal(frontier)
+	if err != nil {
+		return false, err
+	}
+
+	var prunedAny bool
+	for _, chain := range i.chains {
+		removed, err := chain.PruneDenyListInconsistentWith(frontierMetadata)
+		if err != nil {
+			return false, err
+		}
+		if removed {
+			prunedAny = true
+		}
+	}
+	return prunedAny, nil
 }
 
 func (i *Interop) handleResult(result Result) error {

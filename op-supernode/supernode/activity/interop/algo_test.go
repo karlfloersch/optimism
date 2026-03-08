@@ -909,6 +909,9 @@ func (m *algoMockChain) InvalidateBlock(ctx context.Context, height uint64, payl
 func (m *algoMockChain) PruneDenyListAfter(timestamp uint64) (bool, error) {
 	return false, nil
 }
+func (m *algoMockChain) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
+	return false, nil
+}
 func (m *algoMockChain) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }
