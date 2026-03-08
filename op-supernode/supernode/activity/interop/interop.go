@@ -231,11 +231,6 @@ func (i *Interop) progressAndRecord() (bool, error) {
 		return false, nil
 	}
 
-	if _, err := i.collectCurrentL1(); err != nil {
-		i.log.Error("failed to collect current L1", "err", err)
-		return false, err
-	}
-
 	// Perform the interop evaluation
 	result, outcome, err := i.progressInterop()
 	if err != nil {
@@ -321,25 +316,6 @@ func (i *Interop) applyReset(reset pendingReset) error {
 	}
 	i.skipRepair = AcceptedBoundary{Timestamp: reset.timestamp, Valid: true}
 	return nil
-}
-
-// collectCurrentL1 collects the current L1 head of all chains,
-// which is the minimum L1 head of all the derivation pipelines in Chain Containers
-func (i *Interop) collectCurrentL1() (eth.BlockID, error) {
-	var currentL1 eth.BlockID
-	first := true
-	for _, chain := range i.chains {
-		status, err := chain.SyncStatus(i.ctx)
-		if err != nil {
-			return eth.BlockID{}, fmt.Errorf("chain %s not ready: %w", chain.ID(), err)
-		}
-		block := status.CurrentL1
-		if first || block.Number < currentL1.Number {
-			currentL1 = block.ID()
-			first = false
-		}
-	}
-	return currentL1, nil
 }
 
 func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
