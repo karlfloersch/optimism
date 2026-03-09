@@ -74,6 +74,32 @@ This is intentionally more conservative than the previous design because it
 gives the system a much simpler state transition graph and makes reasoning
 about invariants easier for review and audit.
 
+## Activation Timestamp
+
+The plan should make activation behavior explicit, because it is the one place
+where there is no previously accepted snapshot.
+
+Rules:
+
+- the controller is configured with a fixed `activationTimestamp`
+- before activation, the engine must not accept or deny any frontier
+- if `Accepted == nil`, the only legal frontier timestamp is
+  `activationTimestamp`
+- the first successful commit creates `Accepted.Timestamp == activationTimestamp`
+- if the engine rewinds from `activationTimestamp`, the result is `Accepted ==
+  nil`
+- if `Accepted == nil`, deny decisions at or after `activationTimestamp` must be
+  pruned as part of returning to the pre-activation state
+
+This gives the state machine a clean initial state:
+
+- pre-activation: `Accepted == nil`, `LastValidatedTS == nil`
+- post-activation: accepted snapshots progress one timestamp at a time from
+  `activationTimestamp`
+
+It also makes the `activationTimestamp == 0` edge case explicit instead of
+leaving it to ad hoc repair behavior.
+
 ### 1. Snapshot Source
 
 An interface that hides all live chain queries.
@@ -116,7 +142,7 @@ This layer owns the interop invariants.
 
 ```go
 type StepInput struct {
-    Observation RoundObservation
+    Observation  RoundObservation
     Verification VerificationResult
 }
 
@@ -223,6 +249,16 @@ type InteropState struct {
 }
 ```
 
+`AcceptedSnapshot` and `FrontierSnapshot` are structurally identical on purpose.
+This is a semantic distinction, not a storage optimization:
+
+- `AcceptedSnapshot` means "persisted state we currently trust"
+- `FrontierSnapshot` means "candidate state we are evaluating"
+
+If the duplication becomes noisy in implementation, we can collapse them to a
+shared `Snapshot` type later, but the plan keeps both names because they make
+the transition rules easier to read and audit.
+
 The key refactor is:
 
 - `VerifiedDB` and the denylist stop being separate first-class truth stores
@@ -253,9 +289,27 @@ The verifier should return plain data too, for example:
 ```go
 type VerificationResult struct {
     Timestamp    uint64
+    Status       VerificationStatus
     InvalidHeads map[eth.ChainID]eth.BlockID
 }
+
+type VerificationStatus uint8
+
+const (
+    VerificationValid VerificationStatus = iota
+    VerificationInvalid
+    VerificationNotReady
+    VerificationConflict
+)
 ```
+
+This is intentionally richer than a simple "invalid heads or not" result.
+The controller/engine should be able to distinguish:
+
+- fully valid frontier
+- invalid frontier with explicit invalid heads
+- not-ready / incomplete evidence
+- hard conflict or corrupted evidence/cache state
 
 ## Invariants To Make First-Class
 
@@ -269,6 +323,7 @@ These are the invariants the new engine should own directly.
 - `L1Inclusion == max(L1Heads)`
 - accepted timestamp movement per step is in `{-1, 0, +1}`
 - if `Accepted != nil`, then `LastValidatedTS != nil` and `*LastValidatedTS == Accepted.Timestamp`
+- if `Accepted == nil`, the next legal frontier timestamp is `activationTimestamp`
 
 ### Frontier / Retry Invariants
 
@@ -276,11 +331,15 @@ These are the invariants the new engine should own directly.
 - a frontier snapshot must be self-consistent before it can be committed
 - if the previously accepted snapshot no longer matches observations, the engine must rewind before making progress
 - if only the frontier changed, the engine must not silently reuse stale deny decisions for that frontier
+- observations must be self-describing even when partial:
+  - accepted snapshot may be absent when `Accepted == nil`
+  - frontier snapshot may be absent or marked unavailable when the next timestamp is not yet ready
 
 ### Deny Invariants
 
 - deny decisions are scoped to a specific frontier timestamp
 - deny decisions are only valid relative to the frontier snapshot that produced them
+- deny decisions should compare by exact snapshot equality, not loose timestamp/height matching
 - if accepted state rewinds past a deny decision timestamp, that deny decision must be pruned
 - if the current frontier at the same timestamp differs from the denied frontier, that deny decision must be pruned
 
@@ -290,6 +349,7 @@ These are the invariants the new engine should own directly.
 - the controller must not claim progress until the reset effect completes synchronously
 - state mutation and effect planning must happen before side effects execute
 - effects must be safe to retry after crash or controller restart
+- the engine must not emit duplicate rewind/reset effects if an equivalent pending effect already exists
 
 ## Effects
 
@@ -338,6 +398,15 @@ the immediately previous timestamp.
 Each effect should also have a stable identity so the controller can safely
 retry after crash or restart.
 
+The `ID` should be deterministic from the logical action, for example:
+
+- effect type
+- target timestamp
+- target chain
+- target head hash
+
+That makes deduplication and retry semantics much easier to reason about.
+
 ## Evidence Cache
 
 What is currently thought of as `logsDB` should become an `EvidenceCache`.
@@ -375,6 +444,13 @@ not from trusting the cache blindly.
 
 This means the verifier should consume `FrontierEvidence`, not read from the
 cache directly.
+
+The controller should treat `VerificationConflict` as a hard evidence/cache
+problem:
+
+- clear or trim the affected cache
+- do not advance state
+- retry with freshly resolved evidence
 
 ## Storage Plan
 
@@ -576,6 +652,11 @@ This is the main reason to treat the design as a state machine plus store, not a
 Similarly, the verifier should not be allowed to implicitly pull more state
 from cache/storage during a verification step. It should receive the frontier
 evidence bundle as an explicit input.
+
+Similarly, `ObserveRound(...)` should return one coherent observation object
+that fully describes what is and is not available for this step, rather than
+forcing the engine/controller to infer readiness from missing side-channel
+calls.
 
 ## Proposed First Slice
 
