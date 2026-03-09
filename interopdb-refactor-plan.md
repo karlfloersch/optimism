@@ -51,14 +51,47 @@ This is the right tradeoff because the testing problem is currently in the orche
 
 Split the current interop package into 3 layers.
 
+## Progression Rule
+
+For simplicity and auditability, the state machine should obey a strict
+single-step progression rule:
+
+- stay at the same timestamp
+- advance by exactly one timestamp
+- rewind by exactly one timestamp
+
+It should never jump forward or backward by more than one timestamp in a
+single engine step.
+
+That means:
+
+- no "scan back to the newest valid prefix, then jump there" behavior inside
+  the engine
+- rewinds happen one timestamp at a time
+- repeated rewinds are represented as repeated engine steps
+
+This is intentionally more conservative than the previous design because it
+gives the system a much simpler state transition graph and makes reasoning
+about invariants easier for review and audit.
+
 ### 1. Snapshot Source
 
-An interface that hides all live chain queries:
+An interface that hides all live chain queries.
+
+Important constraint:
+
+- the engine should not ask for accepted and frontier snapshots through separate
+  unrelated live calls if those observations are intended to describe the same
+  round
+- the source should provide one coherent observation bundle for the engine step
+
+That avoids reintroducing the same TOCTOU class of bug through the new design.
+
+So instead of a very chatty source, I recommend one round-oriented API:
 
 ```go
 type SnapshotSource interface {
-    AcceptedSnapshot(ctx context.Context, ts uint64) (AcceptedSnapshot, error)
-    FrontierSnapshot(ctx context.Context, ts uint64) (FrontierSnapshot, error)
+    ObserveRound(ctx context.Context, acceptedTS *uint64, frontierTS uint64) (RoundObservation, error)
 }
 ```
 
@@ -70,23 +103,25 @@ The concrete implementation may call:
 
 Tests can provide synthetic snapshots directly.
 
+`RoundObservation` should contain both:
+
+- the accepted timestamp observation being revalidated
+- the frontier observation being considered for the next step
+
+so the engine sees one coherent view of the world per iteration.
+
 ### 2. Pure State Engine
 
 This layer owns the interop invariants.
 
 ```go
-type EngineState struct {
-    Accepted      *AcceptedSnapshot
-    DenyEntries   []DeniedDecision
-}
-
 type StepInput struct {
-    AcceptedObservation *AcceptedSnapshot
-    FrontierObservation *FrontierSnapshot
+    Observation RoundObservation
+    Verification VerificationResult
 }
 
 type StepResult struct {
-    NewState EngineState
+    NewState InteropState
     Effects  []Effect
     Outcome  Outcome
 }
@@ -104,6 +139,17 @@ It should only:
 - compare snapshots
 - decide whether to wait, commit, rewind, or prune
 - emit explicit effects
+
+It also should not perform verification itself. Verification should already
+have been reduced to a plain `VerificationResult` input before `Step(...)`
+runs.
+
+One more important rule:
+
+- the engine should be deterministic and idempotent for the same `(state,
+  observation)` pair
+
+That makes retries and crash recovery much easier to reason about.
 
 ### 3. Atomic Store + Effect Runner
 
@@ -125,6 +171,24 @@ That gives us a single place where:
 - validated/read boundary
 
 are all updated together.
+
+### 4. Evidence Resolution
+
+Verification should not walk a database graph directly.
+
+Instead, the controller should resolve a plain **frontier evidence bundle** for
+the exact frontier snapshot being checked, and pass that bundle into
+verification.
+
+That means the logical flow is:
+
+1. collect the frontier snapshot
+2. resolve all evidence needed for that exact frontier
+3. verify the snapshot against that evidence bundle
+4. hand the resulting valid/invalid decision to the engine
+
+This is the main way to keep verification unit-testable while still allowing a
+cache under the hood.
 
 ## Data Model
 
@@ -155,6 +219,7 @@ type InteropState struct {
     Accepted         *AcceptedSnapshot
     DeniedByTS       map[uint64][]DeniedDecision
     LastValidatedTS  *uint64
+    PendingEffects   []PendingEffect
 }
 ```
 
@@ -164,6 +229,33 @@ The key refactor is:
 - they become one atomic persisted interop state
 
 We can still physically back that state with bbolt, but logically it is one store.
+
+The important non-state data structure is:
+
+```go
+type FrontierEvidence struct {
+    Timestamp uint64
+    Blocks    map[eth.ChainID]BlockEvidence
+}
+
+type BlockEvidence struct {
+    Block              eth.BlockID
+    ExecutingMessages  []ExecutingMessage
+    InitiatingEvidence map[MessageKey]InitiatingMessageEvidence
+}
+```
+
+This evidence is not authoritative persisted state. It is an input object for
+verification.
+
+The verifier should return plain data too, for example:
+
+```go
+type VerificationResult struct {
+    Timestamp    uint64
+    InvalidHeads map[eth.ChainID]eth.BlockID
+}
+```
 
 ## Invariants To Make First-Class
 
@@ -175,6 +267,8 @@ These are the invariants the new engine should own directly.
 - accepted timestamps are sequential
 - accepted snapshots are immutable once superseded, except through explicit rewind
 - `L1Inclusion == max(L1Heads)`
+- accepted timestamp movement per step is in `{-1, 0, +1}`
+- if `Accepted != nil`, then `LastValidatedTS != nil` and `*LastValidatedTS == Accepted.Timestamp`
 
 ### Frontier / Retry Invariants
 
@@ -195,6 +289,7 @@ These are the invariants the new engine should own directly.
 - every rewind/reset target must be explicit in the emitted effects
 - the controller must not claim progress until the reset effect completes synchronously
 - state mutation and effect planning must happen before side effects execute
+- effects must be safe to retry after crash or controller restart
 
 ## Effects
 
@@ -206,7 +301,7 @@ type Effect interface {
 }
 
 type RewindAcceptedState struct {
-    KeepTimestamp uint64
+    ToTimestamp uint64
 }
 
 type ResetChainToAccepted struct {
@@ -222,6 +317,11 @@ type PruneDeniedDecisions struct {
 type PruneFrontierDeniedDecisions struct {
     Timestamp uint64
 }
+
+type PendingEffect struct {
+    ID     string
+    Effect Effect
+}
 ```
 
 The controller can then map those effects to:
@@ -231,6 +331,50 @@ The controller can then map those effects to:
 - store updates
 
 without hiding the decision logic in side-effecting code.
+
+Under the single-step progression rule, `RewindAcceptedState` may only target
+the immediately previous timestamp.
+
+Each effect should also have a stable identity so the controller can safely
+retry after crash or restart.
+
+## Evidence Cache
+
+What is currently thought of as `logsDB` should become an `EvidenceCache`.
+
+It should be treated as:
+
+- a rebuildable cache
+- keyed by exact block identity
+- not part of the authoritative interop state
+
+Suggested interface:
+
+```go
+type EvidenceCache interface {
+    Get(chainID eth.ChainID, block eth.BlockID) (BlockEvidence, bool, error)
+    Put(chainID eth.ChainID, block eth.BlockID, ev BlockEvidence) error
+    ClearChain(chainID eth.ChainID) error
+    ClearAfter(chainID eth.ChainID, blockNum uint64) error
+}
+```
+
+Important rule:
+
+- cache hits must be verified against the requested exact `eth.BlockID`
+- any mismatch is a hard cache conflict
+- on conflict, the controller should clear or trim the affected cache and retry
+
+So correctness comes from:
+
+- trusted frontier snapshot input
+- exact block identity matching
+- explicit evidence bundle construction
+
+not from trusting the cache blindly.
+
+This means the verifier should consume `FrontierEvidence`, not read from the
+cache directly.
 
 ## Storage Plan
 
@@ -329,9 +473,9 @@ func Step(state InteropState, input StepInput) (StepResult, error)
 The engine should handle:
 
 - accepted snapshot still valid -> continue
-- accepted snapshot stale -> emit rewind/prune/reset effects
+- accepted snapshot stale -> emit a one-timestamp rewind/prune/reset step
 - frontier inconsistent -> wait
-- frontier valid + invalid heads -> add denied decision
+- frontier valid + invalid heads -> add denied decision from `VerificationResult`
 - frontier valid + no invalid heads -> advance accepted snapshot
 
 Deliverable:
@@ -346,18 +490,21 @@ Implement one store transaction boundary:
 
 - load state
 - persist new state
-- mark applied/pruned deny decisions
+- record pending effects and their completion
 
 Deliverable:
 
 - no more independent `VerifiedDB` + denylist mutation logic at the controller level
 - one store API with atomic update semantics
+- explicit crash-recovery semantics for pending effects
 
 ### Phase 4: Controller Shell
 
 Rebuild the outer interop loop to:
 
 - collect observations from `SnapshotSource`
+- resolve evidence for the frontier snapshot
+- run verification to produce `VerificationResult`
 - call `Step`
 - persist `NewState`
 - execute effects synchronously
@@ -400,7 +547,7 @@ The pure engine should have table-driven tests for:
 
 - commit valid frontier
 - reject inconsistent frontier
-- rewind stale accepted snapshot
+- rewind stale accepted snapshot by exactly one timestamp
 - prune deny decisions after rewind
 - prune deny decisions when frontier timestamp is retried with a different frontier
 - reset effect emission for chains affected by pruned deny decisions
@@ -410,7 +557,7 @@ And fuzz tests for:
 
 - monotonic timestamp progression
 - repeated frontier changes at the same timestamp
-- rewind then re-advance
+- repeated one-step rewinds then re-advance
 - deny prune idempotence
 
 ## Recommended Design Constraint
@@ -422,17 +569,24 @@ That means:
 - all state mutation for a step should be represented in one `NewState`
 - all side effects should be emitted explicitly
 - if side effects fail, the next controller iteration should re-enter from a durable, well-defined state
+- if side effects were persisted as pending but not completed, the controller should retry them idempotently before asking the engine to step again
 
 This is the main reason to treat the design as a state machine plus store, not as a handful of loosely related DB helpers.
+
+Similarly, the verifier should not be allowed to implicitly pull more state
+from cache/storage during a verification step. It should receive the frontier
+evidence bundle as an explicit input.
 
 ## Proposed First Slice
 
 The first implementation slice should be:
 
-1. define `InteropState`, `AcceptedSnapshot`, `FrontierSnapshot`, `DeniedDecision`
-2. implement pure `Step`
-3. write a large table-test suite around `Step`
-4. only then adapt the current interop loop to feed `Step`
+1. define `InteropState`, `AcceptedSnapshot`, `FrontierSnapshot`, `DeniedDecision`, `RoundObservation`
+2. define `FrontierEvidence` and the `EvidenceCache` interface
+3. define effect types and pending-effect persistence model
+4. implement pure `Step`
+5. write a large table-test suite around `Step`
+6. only then adapt the current interop loop to feed `Step`
 
 That gives us the maximum testing value before we touch devstack or acceptance orchestration again.
 
@@ -445,10 +599,12 @@ That gives us the maximum testing value before we touch devstack or acceptance o
   - I would keep enough history to rewind by timestamp deterministically.
 
 - Should reset effects be applied before or after persisting new state?
-  - I would persist the intended new state first, then execute reset effects, and make the next iteration able to reconcile partial external progress.
+  - I would persist the intended new state first, along with pending effects, then execute reset effects, and make the next iteration able to retry or reconcile partial external progress.
 
 - Do we want the engine to own logsDB rewind planning too, or leave logsDB as a controller concern?
-  - I would have the engine emit the rewind boundary and let the controller map that to logsDB operations.
+  - I would keep the evidence cache as a controller concern. The engine should
+    emit rewind boundaries, and the controller should map those to cache
+    trimming/clearing.
 
 ## Recommendation
 
