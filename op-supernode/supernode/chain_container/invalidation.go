@@ -222,6 +222,55 @@ func (d *DenyList) PruneAfterTimestamp(timestamp uint64) (map[uint64][]common.Ha
 	return removed, nil
 }
 
+// PruneAtTimestamp removes deny records with decision timestamp equal to the given timestamp.
+// Returns the removed payload hashes grouped by block height.
+func (d *DenyList) PruneAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	removed := make(map[uint64][]common.Hash)
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			height := binary.BigEndian.Uint64(k)
+			records, err := decodeDenyRecords(v)
+			if err != nil {
+				return err
+			}
+			kept := make([]DenyRecord, 0, len(records))
+			for _, record := range records {
+				if record.DecisionTimestamp == timestamp {
+					removed[height] = append(removed[height], record.PayloadHash)
+					continue
+				}
+				kept = append(kept, record)
+			}
+			if len(kept) == len(records) {
+				continue
+			}
+			if len(kept) == 0 {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				continue
+			}
+			encoded, err := encodeDenyRecords(kept)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
 // Clear removes all deny records and returns the removed payload hashes grouped by height.
 func (d *DenyList) Clear() (map[uint64][]common.Hash, error) {
 	d.mu.Lock()
@@ -351,4 +400,25 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	)
 
 	return true, nil
+}
+
+func (c *simpleChainContainer) PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneAfterTimestamp(timestamp)
+}
+
+func (c *simpleChainContainer) PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneAtTimestamp(timestamp)
+}
+
+func (c *simpleChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.Clear()
 }

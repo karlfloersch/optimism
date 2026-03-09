@@ -935,6 +935,15 @@ func (m *algoMockChain) InvalidateBlock(ctx context.Context, height uint64, payl
 func (m *algoMockChain) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }
+func (m *algoMockChain) PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *algoMockChain) PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *algoMockChain) ClearDenied() (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
 func (m *algoMockChain) SetResetCallback(cb cc.ResetCallback) {}
 
 var _ cc.ChainContainer = (*algoMockChain)(nil)

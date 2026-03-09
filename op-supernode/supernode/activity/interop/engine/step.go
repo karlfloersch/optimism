@@ -51,15 +51,17 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 	}
 
 	frontier := input.Observation.Frontier.Value
-	newState.DeniedByTS[frontier.Timestamp] = pruneStaleDeniedFrontiers(newState.DeniedByTS[frontier.Timestamp], frontier)
+	existingDenied := newState.DeniedByTS[frontier.Timestamp]
+	newState.DeniedByTS[frontier.Timestamp] = pruneStaleDeniedFrontiers(existingDenied, frontier)
+	prunedFrontierDenied := len(existingDenied) > 0 && len(newState.DeniedByTS[frontier.Timestamp]) != len(existingDenied)
 	if len(newState.DeniedByTS[frontier.Timestamp]) == 0 {
 		delete(newState.DeniedByTS, frontier.Timestamp)
 	}
 	switch input.Verification.Status {
 	case VerificationNotReady:
-		return StepResult{NewState: newState, Outcome: OutcomeWait}, nil
+		return StepResult{NewState: newState, Effects: pruneFrontierEffects(frontier.Timestamp, prunedFrontierDenied), Outcome: OutcomeWait}, nil
 	case VerificationConflict:
-		return StepResult{NewState: newState, Outcome: OutcomeConflict}, nil
+		return StepResult{NewState: newState, Effects: pruneFrontierEffects(frontier.Timestamp, prunedFrontierDenied), Outcome: OutcomeConflict}, nil
 	case VerificationInvalid:
 		newState.DeniedByTS[frontier.Timestamp] = []DeniedDecision{{
 			Timestamp:      frontier.Timestamp,
@@ -74,6 +76,7 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 				Block:     block,
 			})
 		}
+		effects = append(pruneFrontierEffects(frontier.Timestamp, prunedFrontierDenied), effects...)
 		return StepResult{NewState: newState, Effects: effects, Outcome: OutcomeNoOp}, nil
 	case VerificationValid:
 		accepted := SnapshotFromFrontier(frontier)
@@ -85,7 +88,7 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 		ts := accepted.Timestamp
 		newState.LastValidatedTS = &ts
 		delete(newState.DeniedByTS, frontier.Timestamp)
-		return StepResult{NewState: newState, Outcome: OutcomeAdvance}, nil
+		return StepResult{NewState: newState, Effects: pruneFrontierEffects(frontier.Timestamp, prunedFrontierDenied), Outcome: OutcomeAdvance}, nil
 	default:
 		return StepResult{}, fmt.Errorf("unsupported verification status %d", input.Verification.Status)
 	}
@@ -155,4 +158,11 @@ func affectedChainsForDiscardedSuffix(deniedByTS map[uint64][]DeniedDecision, ke
 		}
 	}
 	return affected
+}
+
+func pruneFrontierEffects(timestamp uint64, pruned bool) []Effect {
+	if !pruned {
+		return nil
+	}
+	return []Effect{PruneFrontierDeniedDecisions{Timestamp: timestamp}}
 }

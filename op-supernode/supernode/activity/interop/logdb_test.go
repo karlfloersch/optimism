@@ -684,6 +684,15 @@ func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }
+func (m *statefulMockChainContainer) PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *statefulMockChainContainer) PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *statefulMockChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
 func (m *statefulMockChainContainer) SetResetCallback(cb cc.ResetCallback) {}
 
 var _ cc.ChainContainer = (*statefulMockChainContainer)(nil)

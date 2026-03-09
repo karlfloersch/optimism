@@ -60,6 +60,12 @@ type ChainContainer interface {
 	InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
+	// PruneDeniedAfterTimestamp removes deny entries with decision timestamp greater than the given timestamp.
+	PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error)
+	// PruneDeniedAtTimestamp removes deny entries created at the given decision timestamp.
+	PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error)
+	// ClearDenied removes all deny entries.
+	ClearDenied() (map[uint64][]common.Hash, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.
 	// The supernode uses this to notify activities about chain resets.
 	SetResetCallback(cb ResetCallback)

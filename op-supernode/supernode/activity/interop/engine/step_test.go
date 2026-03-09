@@ -172,6 +172,79 @@ func TestStepWaitsWhenFrontierNotReady(t *testing.T) {
 	require.Equal(t, OutcomeWait, result.Outcome)
 }
 
+func TestStepPrunesStaleFrontierDeniedDecisionsBeforeWaiting(t *testing.T) {
+	t.Parallel()
+
+	engine, err := New(Config{ActivationTimestamp: 100})
+	require.NoError(t, err)
+
+	chainA := eth.ChainIDFromUInt64(10)
+	accepted := &AcceptedSnapshot{
+		Timestamp:   100,
+		L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x11"), Number: 5},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainA: {Hash: common.HexToHash("0x11"), Number: 5},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainA: {Hash: common.HexToHash("0x22"), Number: 100},
+		},
+	}
+	currentFrontier := FrontierSnapshot{
+		Timestamp:   101,
+		L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x33"), Number: 6},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainA: {Hash: common.HexToHash("0x33"), Number: 6},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainA: {Hash: common.HexToHash("0x44"), Number: 101},
+		},
+	}
+	staleFrontier := currentFrontier
+	staleFrontier.L1Inclusion = eth.BlockID{Hash: common.HexToHash("0x55"), Number: 7}
+	staleFrontier.L1Heads = map[eth.ChainID]eth.BlockID{
+		chainA: {Hash: common.HexToHash("0x55"), Number: 7},
+	}
+	validatedTS := uint64(100)
+
+	result, err := engine.Step(InteropState{
+		Accepted:        accepted,
+		AcceptedHistory: map[uint64]AcceptedSnapshot{100: *accepted},
+		LastValidatedTS: &validatedTS,
+		DeniedByTS: map[uint64][]DeniedDecision{
+			101: {{
+				Timestamp:      101,
+				DeniedFrontier: staleFrontier,
+				InvalidHeads: map[eth.ChainID]eth.BlockID{
+					chainA: {Hash: common.HexToHash("0x44"), Number: 101},
+				},
+			}},
+		},
+	}, StepInput{
+		Observation: RoundObservation{
+			AcceptedTS: 100,
+			Accepted: SnapshotAvailability[AcceptedSnapshot]{
+				Present: true,
+				Reason:  AvailabilityPresent,
+				Value:   *accepted,
+			},
+			FrontierTS: 101,
+			Frontier: SnapshotAvailability[FrontierSnapshot]{
+				Present: true,
+				Reason:  AvailabilityPresent,
+				Value:   currentFrontier,
+			},
+		},
+		Verification: VerificationResult{
+			Timestamp: 101,
+			Status:    VerificationNotReady,
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, OutcomeWait, result.Outcome)
+	require.NotContains(t, result.NewState.DeniedByTS, uint64(101))
+	require.Equal(t, []Effect{PruneFrontierDeniedDecisions{Timestamp: 101}}, result.Effects)
+}
+
 func TestStepRejectsAcceptedDriftUntilHistoryExists(t *testing.T) {
 	t.Parallel()
 
