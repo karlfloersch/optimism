@@ -512,26 +512,34 @@ func (i *Interop) VerifiedAtTimestamp(ts uint64) (bool, error) {
 	if ts < i.activationTimestamp {
 		return true, nil
 	}
-	return i.verifiedDB.Has(ts)
+	state, err := i.loadStateForRead()
+	if err != nil {
+		return false, err
+	}
+	if state.LastValidatedTS == nil || *state.LastValidatedTS < ts {
+		return false, nil
+	}
+	_, ok := state.AcceptedHistory[ts]
+	return ok, nil
 }
 
 // LatestVerifiedL3Block returns the latest L2 block which has been verified,
 // along with the timestamp at which it was verified.
 func (i *Interop) LatestVerifiedL2Block(chainID eth.ChainID) (eth.BlockID, uint64) {
 	emptyBlock := eth.BlockID{}
-	ts, ok := i.verifiedDB.LastTimestamp()
+	state, err := i.loadStateForRead()
+	if err != nil || state.LastValidatedTS == nil {
+		return emptyBlock, 0
+	}
+	snapshot, ok := state.AcceptedHistory[*state.LastValidatedTS]
 	if !ok {
 		return emptyBlock, 0
 	}
-	res, err := i.verifiedDB.Get(ts)
-	if err != nil {
-		return emptyBlock, 0
-	}
-	head, ok := res.L2Heads[chainID]
+	head, ok := snapshot.L2Heads[chainID]
 	if !ok {
 		return emptyBlock, 0
 	}
-	return head, ts
+	return head, snapshot.Timestamp
 }
 
 // VerifiedBlockAtL1 returns the verified L2 block and timestamp
@@ -544,34 +552,42 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 		return eth.BlockID{}, 0
 	}
 
-	// Get the last verified timestamp
-	lastTs, ok := i.verifiedDB.LastTimestamp()
-	if !ok {
+	state, err := i.loadStateForRead()
+	if err != nil || state.LastValidatedTS == nil {
 		return eth.BlockID{}, 0
 	}
 
 	// Search backwards from the last timestamp to find the latest result
 	// where the L1 inclusion block is at or below the supplied L1 block number
-	for ts := lastTs; ts > 0; ts-- {
-		result, err := i.verifiedDB.Get(ts)
-		if err != nil {
-			// Timestamp might not exist (due to gaps or rewinds), continue searching
+	for ts := *state.LastValidatedTS + 1; ts > 0; ts-- {
+		snapshot, ok := state.AcceptedHistory[ts-1]
+		if !ok {
 			continue
 		}
 
 		// Check if this result's L1 inclusion is at or below the supplied L1 block number
-		if result.L1Inclusion.Number <= l1Block.Number {
+		if snapshot.L1Inclusion.Number <= l1Block.Number {
 			// Found a finalized result, return the L2 head for this chain
-			head, ok := result.L2Heads[chainID]
+			head, ok := snapshot.L2Heads[chainID]
 			if !ok {
 				return eth.BlockID{}, 0
 			}
-			return head, ts
+			return head, snapshot.Timestamp
 		}
 	}
 
 	// No verified block found
 	return eth.BlockID{}, 0
+}
+
+func (i *Interop) loadStateForRead() (interopengine.InteropState, error) {
+	if i.legacyState != nil {
+		return i.legacyState.Load()
+	}
+	if i.stateStore != nil {
+		return i.stateStore.Load()
+	}
+	return interopengine.InteropState{}, nil
 }
 
 // Reset is called when a chain container resets due to an invalidated block.

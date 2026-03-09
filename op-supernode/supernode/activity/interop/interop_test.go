@@ -1604,6 +1604,7 @@ func TestReset_QueuesWhileStarted(t *testing.T) {
 func TestVerifiedBlockAtL1(t *testing.T) {
 	t.Run("zero l1Block returns empty immediately", func(t *testing.T) {
 		h := newInteropTestHarness(t).
+			WithActivation(100).
 			WithChain(10, nil).
 			Build()
 
@@ -1625,6 +1626,7 @@ func TestVerifiedBlockAtL1(t *testing.T) {
 
 	t.Run("non-zero l1Block finds matching entry", func(t *testing.T) {
 		h := newInteropTestHarness(t).
+			WithActivation(100).
 			WithChain(10, nil).
 			Build()
 
