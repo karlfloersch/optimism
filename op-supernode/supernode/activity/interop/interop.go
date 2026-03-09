@@ -11,6 +11,9 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supernode/flags"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity"
+	interopcontroller "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/controller"
+	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
+	interopstore "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/store"
 	cc "github.com/ethereum-optimism/optimism/op-supernode/supernode/chain_container"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/log"
@@ -65,6 +68,11 @@ type Interop struct {
 	// When non-zero, progressInterop will return early without processing
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
+
+	stateStore     *interopstore.Store
+	legacyState    *legacyStateStore
+	controller     *interopcontroller.Controller
+	engine         *interopengine.Engine
 }
 
 type queuedReset struct {
@@ -106,18 +114,51 @@ func New(
 		logsDBs[chainID] = logsDB
 	}
 
+	stateStore, err := interopstore.Open(dataDir)
+	if err != nil {
+		for _, db := range logsDBs {
+			_ = db.Close()
+		}
+		_ = verifiedDB.Close()
+		log.Error("failed to open interop state store", "err", err)
+		return nil
+	}
+
+	engine, err := interopengine.New(interopengine.Config{ActivationTimestamp: activationTimestamp})
+	if err != nil {
+		for _, db := range logsDBs {
+			_ = db.Close()
+		}
+		_ = stateStore.Close()
+		_ = verifiedDB.Close()
+		log.Error("failed to initialize interop engine", "err", err)
+		return nil
+	}
+
 	i := &Interop{
 		log:                 log,
 		chains:              chains,
 		verifiedDB:          verifiedDB,
 		logsDBs:             logsDBs,
+		stateStore:          stateStore,
 		dataDir:             dataDir,
 		activationTimestamp: activationTimestamp,
+		engine:              engine,
 	}
 	// default to using the verifyInteropMessages function
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
+	i.legacyState = newLegacyStateStore(activationTimestamp, verifiedDB, stateStore)
+	i.controller = interopcontroller.New(
+		activationTimestamp,
+		engine,
+		i.legacyState,
+		&legacyObservationSource{interop: i},
+		&legacyEvidenceResolver{},
+		&legacyVerifier{interop: i},
+		&legacyEffectRunner{interop: i},
+	)
 	return i
 }
 
@@ -168,7 +209,12 @@ func (i *Interop) Stop(ctx context.Context) error {
 		}
 	}
 	if i.verifiedDB != nil {
-		return i.verifiedDB.Close()
+		if err := i.verifiedDB.Close(); err != nil {
+			return err
+		}
+	}
+	if i.stateStore != nil {
+		return i.stateStore.Close()
 	}
 	return nil
 }
@@ -202,6 +248,29 @@ func (i *Interop) progressAndRecord() (bool, error) {
 	if err != nil {
 		i.log.Error("failed to collect current L1", "err", err)
 		return false, err
+	}
+
+	if i.controller != nil {
+		step, err := i.controller.Step(i.ctx)
+		if err != nil {
+			i.log.Error("failed to progress interop controller", "err", err)
+			return false, err
+		}
+		i.mu.Lock()
+		switch step.Outcome {
+		case interopengine.OutcomeAdvance:
+			if step.NewState.Accepted != nil {
+				i.currentL1 = step.NewState.Accepted.L1Inclusion
+			}
+		case interopengine.OutcomeWait:
+			i.currentL1 = localCurrentL1
+		case interopengine.OutcomeRewind:
+			i.currentL1 = eth.BlockID{}
+		case interopengine.OutcomeNoOp, interopengine.OutcomeConflict:
+			// Preserve the previous currentL1 on invalidation/conflict paths.
+		}
+		i.mu.Unlock()
+		return step.Outcome == interopengine.OutcomeAdvance, nil
 	}
 
 	// Perform the interop evaluation
@@ -303,7 +372,7 @@ func (i *Interop) progressInterop() (Result, error) {
 
 	// 2: load the logs up through the next timestamp
 	// the previous timestamp is assumed to already be downloaded and verified
-	if err := i.loadLogs(ts); err != nil {
+	if err := i.loadLogsForBlocks(ts, blocksAtTimestamp); err != nil {
 		// If the logsDB is empty (likely after a reset), treat it like chains not ready
 		// The chains will rebuild blocks and we'll retry on the next tick
 		if errors.Is(err, ErrPreviousTimestampNotSealed) {
@@ -579,27 +648,8 @@ func (i *Interop) resetLogsDB(chainID eth.ChainID, db LogsDB, invalidatedBlock e
 		"targetBlock", targetBlockID.Number,
 	)
 
-	// Check the first block in the logsDB to decide whether to clear or rewind
-	firstBlock, err := db.FirstSealedBlock()
-	if err != nil {
-		// If logsDB is empty or has an error, clear it
-		i.log.Info("logsDB appears empty or errored, clearing", "chainID", chainID, "err", err)
-		if clearErr := db.Clear(&noopInvalidator{}); clearErr != nil {
-			i.log.Error("failed to clear logsDB", "chainID", chainID, "err", clearErr)
-		}
-		return
-	}
-
-	if firstBlock.Number > targetBlockID.Number {
-		i.log.Info("logsDB is to be cleared", "chainID", chainID, "firstBlock", firstBlock.Number, "targetBlock", targetBlockID.Number)
-		if err := db.Clear(&noopInvalidator{}); err != nil {
-			i.log.Error("failed to clear logsDB", "chainID", chainID, "err", err)
-		}
-	} else {
-		i.log.Info("logsDB is to be rewound", "chainID", chainID, "targetBlock", targetBlockID.Number, "firstBlock", firstBlock.Number)
-		if err := db.Rewind(&noopInvalidator{}, targetBlockID); err != nil {
-			i.log.Error("failed to rewind logsDB", "chainID", chainID, "err", err)
-		}
+	if err := i.rewindLogsDBToHead(chainID, db, targetBlockID); err != nil {
+		i.log.Error("failed to rewind logsDB to target head", "chainID", chainID, "targetBlock", targetBlockID, "err", err)
 	}
 }
 

@@ -36,6 +36,7 @@ type interopTestHarness struct {
 	activationTime uint64
 	dataDir        string
 	skipBuild      bool // for tests that need custom construction
+	useController  bool
 }
 
 // newInteropTestHarness creates a new test harness with sensible defaults.
@@ -47,7 +48,13 @@ func newInteropTestHarness(t *testing.T) *interopTestHarness {
 		mocks:          make(map[eth.ChainID]*mockChainContainer),
 		activationTime: 1000,
 		dataDir:        t.TempDir(),
+		useController:  false,
 	}
+}
+
+func (h *interopTestHarness) WithController() *interopTestHarness {
+	h.useController = true
+	return h
 }
 
 // WithActivation sets the interop activation timestamp.
@@ -91,6 +98,9 @@ func (h *interopTestHarness) Build() *interopTestHarness {
 	}
 	h.interop = New(testLogger(), h.activationTime, chains, h.dataDir)
 	if h.interop != nil {
+		if !h.useController {
+			h.interop.controller = nil
+		}
 		h.interop.ctx = context.Background()
 		h.t.Cleanup(func() { _ = h.interop.Stop(context.Background()) })
 	}
