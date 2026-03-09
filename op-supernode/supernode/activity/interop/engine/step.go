@@ -69,8 +69,9 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 		effects := make([]Effect, 0, len(input.Verification.InvalidHeads))
 		for chainID, block := range input.Verification.InvalidHeads {
 			effects = append(effects, InvalidateChainHead{
-				ChainID: chainID,
-				Block:   block,
+				ChainID:   chainID,
+				Timestamp: frontier.Timestamp,
+				Block:     block,
 			})
 		}
 		return StepResult{NewState: newState, Effects: effects, Outcome: OutcomeNoOp}, nil

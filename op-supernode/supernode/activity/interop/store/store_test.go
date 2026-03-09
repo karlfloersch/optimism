@@ -100,12 +100,14 @@ func TestStoreRoundTripsInteropState(t *testing.T) {
 			},
 			{
 				ID: interopengine.EffectID(interopengine.InvalidateChainHead{
-					ChainID: chainA,
-					Block:   eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
+					ChainID:   chainA,
+					Timestamp: 102,
+					Block:     eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
 				}),
 				Effect: interopengine.InvalidateChainHead{
-					ChainID: chainA,
-					Block:   eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
+					ChainID:   chainA,
+					Timestamp: 102,
+					Block:     eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
 				},
 			},
 		},

@@ -132,12 +132,13 @@ func (e ClearDeniedDecisions) effectID() string {
 }
 
 type InvalidateChainHead struct {
-	ChainID eth.ChainID
-	Block   eth.BlockID
+	ChainID   eth.ChainID
+	Timestamp uint64
+	Block     eth.BlockID
 }
 
 func (e InvalidateChainHead) effectID() string {
-	return fmt.Sprintf("invalidate-chain-head:%s:%d:%s", e.ChainID.String(), e.Block.Number, e.Block.Hash.Hex())
+	return fmt.Sprintf("invalidate-chain-head:%s:%d:%d:%s", e.ChainID.String(), e.Timestamp, e.Block.Number, e.Block.Hash.Hex())
 }
 
 type PendingEffect struct {

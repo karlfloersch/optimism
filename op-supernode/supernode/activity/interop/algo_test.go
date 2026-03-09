@@ -929,7 +929,7 @@ func (m *algoMockChain) RewindEngine(ctx context.Context, timestamp uint64, inva
 	return nil
 }
 func (m *algoMockChain) BlockTime() uint64 { return 1 }
-func (m *algoMockChain) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (m *algoMockChain) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
 	return false, nil
 }
 func (m *algoMockChain) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {

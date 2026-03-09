@@ -120,8 +120,9 @@ func TestStepStoresDeniedDecisionForInvalidFrontier(t *testing.T) {
 	require.Equal(t, frontier, result.NewState.DeniedByTS[101][0].DeniedFrontier)
 	require.Len(t, result.Effects, 1)
 	require.Equal(t, InvalidateChainHead{
-		ChainID: chainB,
-		Block:   eth.BlockID{Hash: common.HexToHash("0x55"), Number: 201},
+		ChainID:   chainB,
+		Timestamp: 101,
+		Block:     eth.BlockID{Hash: common.HexToHash("0x55"), Number: 201},
 	}, result.Effects[0])
 }
 

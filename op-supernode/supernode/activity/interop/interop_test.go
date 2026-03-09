@@ -901,12 +901,13 @@ func TestInvalidateBlock(t *testing.T) {
 			run: func(t *testing.T, h *interopTestHarness) {
 				mock := h.Mock(10)
 				blockID := eth.BlockID{Number: 500, Hash: common.HexToHash("0xBAD")}
-				err := h.interop.invalidateBlock(mock.id, blockID)
+				err := h.interop.invalidateBlock(mock.id, blockID, 100)
 				require.NoError(t, err)
 
 				require.Len(t, mock.invalidateBlockCalls, 1)
 				require.Equal(t, uint64(500), mock.invalidateBlockCalls[0].height)
 				require.Equal(t, common.HexToHash("0xBAD"), mock.invalidateBlockCalls[0].payloadHash)
+				require.Equal(t, uint64(100), mock.invalidateBlockCalls[0].timestamp)
 			},
 		},
 		{
@@ -918,7 +919,7 @@ func TestInvalidateBlock(t *testing.T) {
 				mock := h.Mock(10)
 				unknownChain := eth.ChainIDFromUInt64(999)
 				blockID := eth.BlockID{Number: 500, Hash: common.HexToHash("0xBAD")}
-				err := h.interop.invalidateBlock(unknownChain, blockID)
+				err := h.interop.invalidateBlock(unknownChain, blockID, 100)
 
 				require.Error(t, err)
 				require.Contains(t, err.Error(), "not found")
@@ -935,7 +936,7 @@ func TestInvalidateBlock(t *testing.T) {
 			run: func(t *testing.T, h *interopTestHarness) {
 				mock := h.Mock(10)
 				blockID := eth.BlockID{Number: 500, Hash: common.HexToHash("0xBAD")}
-				err := h.interop.invalidateBlock(mock.id, blockID)
+				err := h.interop.invalidateBlock(mock.id, blockID, 100)
 
 				require.Error(t, err)
 				require.Contains(t, err.Error(), "engine failure")
@@ -1245,6 +1246,7 @@ type mockChainContainer struct {
 type invalidateBlockCall struct {
 	height      uint64
 	payloadHash common.Hash
+	timestamp   uint64
 }
 
 func newMockChainContainer(id uint64) *mockChainContainer {
@@ -1327,10 +1329,10 @@ func (m *mockChainContainer) RewindEngine(ctx context.Context, timestamp uint64,
 	return nil
 }
 func (m *mockChainContainer) BlockTime() uint64 { return 1 }
-func (m *mockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (m *mockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.invalidateBlockCalls = append(m.invalidateBlockCalls, invalidateBlockCall{height: height, payloadHash: payloadHash})
+	m.invalidateBlockCalls = append(m.invalidateBlockCalls, invalidateBlockCall{height: height, payloadHash: payloadHash, timestamp: decisionTimestamp})
 	return m.invalidateBlockRet, m.invalidateBlockErr
 }
 func (m *mockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {

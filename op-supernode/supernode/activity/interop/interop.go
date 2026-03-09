@@ -337,7 +337,7 @@ func (i *Interop) handleResult(result Result) error {
 	if !result.IsValid() {
 		i.log.Error("interop validation failed", "results", result)
 		for chainID, invalidHead := range result.InvalidHeads {
-			if err := i.invalidateBlock(chainID, invalidHead); err != nil {
+			if err := i.invalidateBlock(chainID, invalidHead, result.Timestamp); err != nil {
 				i.log.Error("failed to invalidate block", "chainID", chainID, "blockID", invalidHead, "err", err)
 				return err
 			}
@@ -357,12 +357,12 @@ func (i *Interop) handleResult(result Result) error {
 
 // invalidateBlock notifies the chain container to add the block to the denylist
 // and potentially rewind if the chain is currently using that block.
-func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID) error {
+func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, decisionTimestamp uint64) error {
 	chain, ok := i.chains[chainID]
 	if !ok {
 		return fmt.Errorf("chain %s not found", chainID)
 	}
-	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash)
+	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash, decisionTimestamp)
 	return err
 }
 

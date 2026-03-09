@@ -245,8 +245,9 @@ func TestControllerRunsInvalidationEffectsForInvalidFrontier(t *testing.T) {
 	require.Len(t, runner.batches, 1)
 	require.Len(t, runner.batches[0], 1)
 	require.Equal(t, interopengine.InvalidateChainHead{
-		ChainID: chainA,
-		Block:   eth.BlockID{Hash: common.HexToHash("0x22"), Number: 100},
+		ChainID:   chainA,
+		Timestamp: 100,
+		Block:     eth.BlockID{Hash: common.HexToHash("0x22"), Number: 100},
 	}, runner.batches[0][0].Effect)
 	require.Len(t, store.commits, 2)
 	require.Len(t, store.commits[0].PendingEffects, 1)
