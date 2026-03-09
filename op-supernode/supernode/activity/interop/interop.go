@@ -546,6 +546,11 @@ func (i *Interop) applyPendingResetsLocked() {
 }
 
 func (i *Interop) applyResetLocked(reset queuedReset) {
+	if reset.invalidatedBlock == (eth.BlockRef{}) {
+		i.log.Info("ignoring controller-originated reset callback", "chainID", reset.chainID, "timestamp", reset.timestamp)
+		return
+	}
+
 	db, dbOk := i.logsDBs[reset.chainID]
 	if !dbOk {
 		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)
