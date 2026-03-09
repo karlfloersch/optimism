@@ -21,6 +21,8 @@ type encodedPendingEffect struct {
 	ResetChain    *interopengine.ResetChainToAccepted         `json:"resetChain,omitempty"`
 	PruneDenied   *interopengine.PruneDeniedDecisions         `json:"pruneDenied,omitempty"`
 	PruneFrontier *interopengine.PruneFrontierDeniedDecisions `json:"pruneFrontier,omitempty"`
+	ClearDenied   *interopengine.ClearDeniedDecisions         `json:"clearDenied,omitempty"`
+	Invalidate    *interopengine.InvalidateChainHead          `json:"invalidate,omitempty"`
 }
 
 func encodeState(state interopengine.InteropState) (encodedState, error) {
@@ -60,6 +62,14 @@ func encodePendingEffect(pending interopengine.PendingEffect) (encodedPendingEff
 		out.Type = "prune-frontier"
 		e := effect
 		out.PruneFrontier = &e
+	case interopengine.ClearDeniedDecisions:
+		out.Type = "clear-denied"
+		e := effect
+		out.ClearDenied = &e
+	case interopengine.InvalidateChainHead:
+		out.Type = "invalidate-chain-head"
+		e := effect
+		out.Invalidate = &e
 	default:
 		return encodedPendingEffect{}, fmt.Errorf("unsupported pending effect type %T", pending.Effect)
 	}
@@ -112,6 +122,16 @@ func (e encodedPendingEffect) decode() (interopengine.PendingEffect, error) {
 			return interopengine.PendingEffect{}, fmt.Errorf("pending effect %s missing prune-frontier payload", e.ID)
 		}
 		return interopengine.PendingEffect{ID: e.ID, Effect: *e.PruneFrontier}, nil
+	case "clear-denied":
+		if e.ClearDenied == nil {
+			return interopengine.PendingEffect{}, fmt.Errorf("pending effect %s missing clear-denied payload", e.ID)
+		}
+		return interopengine.PendingEffect{ID: e.ID, Effect: *e.ClearDenied}, nil
+	case "invalidate-chain-head":
+		if e.Invalidate == nil {
+			return interopengine.PendingEffect{}, fmt.Errorf("pending effect %s missing invalidate payload", e.ID)
+		}
+		return interopengine.PendingEffect{ID: e.ID, Effect: *e.Invalidate}, nil
 	default:
 		return interopengine.PendingEffect{}, fmt.Errorf("unsupported pending effect type %q", e.Type)
 	}

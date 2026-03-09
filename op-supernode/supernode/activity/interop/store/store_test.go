@@ -94,6 +94,20 @@ func TestStoreRoundTripsInteropState(t *testing.T) {
 					L2Head:    eth.BlockID{Hash: common.HexToHash("0x22"), Number: 101},
 				},
 			},
+			{
+				ID:     interopengine.EffectID(interopengine.ClearDeniedDecisions{}),
+				Effect: interopengine.ClearDeniedDecisions{},
+			},
+			{
+				ID: interopengine.EffectID(interopengine.InvalidateChainHead{
+					ChainID: chainA,
+					Block:   eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
+				}),
+				Effect: interopengine.InvalidateChainHead{
+					ChainID: chainA,
+					Block:   eth.BlockID{Hash: common.HexToHash("0x44"), Number: 102},
+				},
+			},
 		},
 	}
 

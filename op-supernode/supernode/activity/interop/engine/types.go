@@ -125,6 +125,21 @@ func (e PruneFrontierDeniedDecisions) effectID() string {
 	return fmt.Sprintf("prune-frontier-denied:%d", e.Timestamp)
 }
 
+type ClearDeniedDecisions struct{}
+
+func (e ClearDeniedDecisions) effectID() string {
+	return "clear-denied"
+}
+
+type InvalidateChainHead struct {
+	ChainID eth.ChainID
+	Block   eth.BlockID
+}
+
+func (e InvalidateChainHead) effectID() string {
+	return fmt.Sprintf("invalidate-chain-head:%s:%d:%s", e.ChainID.String(), e.Block.Number, e.Block.Hash.Hex())
+}
+
 type PendingEffect struct {
 	ID     string
 	Effect Effect

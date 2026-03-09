@@ -118,6 +118,11 @@ func TestStepStoresDeniedDecisionForInvalidFrontier(t *testing.T) {
 	require.Equal(t, OutcomeNoOp, result.Outcome)
 	require.Len(t, result.NewState.DeniedByTS[101], 1)
 	require.Equal(t, frontier, result.NewState.DeniedByTS[101][0].DeniedFrontier)
+	require.Len(t, result.Effects, 1)
+	require.Equal(t, InvalidateChainHead{
+		ChainID: chainB,
+		Block:   eth.BlockID{Hash: common.HexToHash("0x55"), Number: 201},
+	}, result.Effects[0])
 }
 
 func TestStepWaitsWhenFrontierNotReady(t *testing.T) {
@@ -304,6 +309,13 @@ func TestStepRewindsOneTimestampAndPrunesFutureDenies(t *testing.T) {
 	require.NotContains(t, result.NewState.DeniedByTS, uint64(101))
 	require.NotContains(t, result.NewState.DeniedByTS, uint64(102))
 	require.NotContains(t, result.NewState.AcceptedHistory, uint64(101))
+	require.Len(t, result.Effects, 2)
+	require.Equal(t, PruneDeniedDecisions{AfterTimestamp: 100}, result.Effects[0])
+	require.Equal(t, ResetChainToAccepted{
+		ChainID:   chainA,
+		Timestamp: 100,
+		L2Head:    eth.BlockID{Hash: common.HexToHash("0x22"), Number: 100},
+	}, result.Effects[1])
 }
 
 func TestStepRewindsFromActivationToPreActivation(t *testing.T) {
@@ -369,4 +381,11 @@ func TestStepRewindsFromActivationToPreActivation(t *testing.T) {
 	require.Nil(t, result.NewState.LastValidatedTS)
 	require.Empty(t, result.NewState.AcceptedHistory)
 	require.Empty(t, result.NewState.DeniedByTS)
+	require.Len(t, result.Effects, 2)
+	require.Equal(t, ClearDeniedDecisions{}, result.Effects[0])
+	require.Equal(t, ResetChainToAccepted{
+		ChainID:   chainA,
+		Timestamp: 99,
+		L2Head:    eth.BlockID{},
+	}, result.Effects[1])
 }

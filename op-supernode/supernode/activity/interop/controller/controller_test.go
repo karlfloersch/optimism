@@ -192,3 +192,63 @@ func TestControllerSkipsResolverAndVerifierWhenFrontierNotReady(t *testing.T) {
 	require.Equal(t, 0, resolver.calls)
 	require.Equal(t, 0, verifier.calls)
 }
+
+func TestControllerRunsInvalidationEffectsForInvalidFrontier(t *testing.T) {
+	t.Parallel()
+
+	engine, err := interopengine.New(interopengine.Config{ActivationTimestamp: 100})
+	require.NoError(t, err)
+
+	chainA := eth.ChainIDFromUInt64(10)
+	source := &stubSource{
+		observation: interopengine.RoundObservation{
+			AcceptedTS: 0,
+			Accepted: interopengine.SnapshotAvailability[interopengine.AcceptedSnapshot]{
+				Present: false,
+				Reason:  interopengine.AvailabilityPreActivation,
+			},
+			FrontierTS: 100,
+			Frontier: interopengine.SnapshotAvailability[interopengine.FrontierSnapshot]{
+				Present: true,
+				Reason:  interopengine.AvailabilityPresent,
+				Value: interopengine.FrontierSnapshot{
+					Timestamp:   100,
+					L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x11"), Number: 5},
+					L1Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x11"), Number: 5},
+					},
+					L2Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x22"), Number: 100},
+					},
+				},
+			},
+		},
+	}
+	resolver := &stubResolver{evidence: FrontierEvidence{Timestamp: 100}}
+	verifier := &stubVerifier{
+		result: interopengine.VerificationResult{
+			Timestamp: 100,
+			Status:    interopengine.VerificationInvalid,
+			InvalidHeads: map[eth.ChainID]eth.BlockID{
+				chainA: {Hash: common.HexToHash("0x22"), Number: 100},
+			},
+		},
+	}
+	store := &stubStore{state: interopengine.InteropState{}}
+	runner := &stubRunner{}
+	controller := New(100, engine, store, source, resolver, verifier, runner)
+
+	result, err := controller.Step(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, interopengine.OutcomeNoOp, result.Outcome)
+	require.Equal(t, 1, runner.calls)
+	require.Len(t, runner.batches, 1)
+	require.Len(t, runner.batches[0], 1)
+	require.Equal(t, interopengine.InvalidateChainHead{
+		ChainID: chainA,
+		Block:   eth.BlockID{Hash: common.HexToHash("0x22"), Number: 100},
+	}, runner.batches[0][0].Effect)
+	require.Len(t, store.commits, 2)
+	require.Len(t, store.commits[0].PendingEffects, 1)
+	require.Empty(t, store.commits[1].PendingEffects)
+}

@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"maps"
+
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 )
 
 type Engine struct {
@@ -64,7 +66,14 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 			DeniedFrontier: cloneFrontierSnapshot(frontier),
 			InvalidHeads:   maps.Clone(input.Verification.InvalidHeads),
 		}}
-		return StepResult{NewState: newState, Outcome: OutcomeNoOp}, nil
+		effects := make([]Effect, 0, len(input.Verification.InvalidHeads))
+		for chainID, block := range input.Verification.InvalidHeads {
+			effects = append(effects, InvalidateChainHead{
+				ChainID: chainID,
+				Block:   block,
+			})
+		}
+		return StepResult{NewState: newState, Effects: effects, Outcome: OutcomeNoOp}, nil
 	case VerificationValid:
 		accepted := SnapshotFromFrontier(frontier)
 		newState.Accepted = &accepted
@@ -88,10 +97,23 @@ func (e *Engine) rewindOneStep(state InteropState) (StepResult, error) {
 	currentTS := state.Accepted.Timestamp
 	delete(state.AcceptedHistory, currentTS)
 	if currentTS == e.cfg.ActivationTimestamp {
+		prunedChains := affectedChainsForDiscardedSuffix(state.DeniedByTS, nil)
 		state.Accepted = nil
 		state.LastValidatedTS = nil
 		state.DeniedByTS = map[uint64][]DeniedDecision{}
-		return StepResult{NewState: state, Outcome: OutcomeRewind}, nil
+		effects := []Effect{ClearDeniedDecisions{}}
+		resetTS := uint64(0)
+		if e.cfg.ActivationTimestamp > 0 {
+			resetTS = e.cfg.ActivationTimestamp - 1
+		}
+		for chainID := range prunedChains {
+			effects = append(effects, ResetChainToAccepted{
+				ChainID:   chainID,
+				Timestamp: resetTS,
+				L2Head:    eth.BlockID{},
+			})
+		}
+		return StepResult{NewState: state, Effects: effects, Outcome: OutcomeRewind}, nil
 	}
 
 	prevTS := currentTS - 1
@@ -99,9 +121,37 @@ func (e *Engine) rewindOneStep(state InteropState) (StepResult, error) {
 	if !ok {
 		return StepResult{}, ErrRewindRequiresHistory
 	}
+	prunedChains := affectedChainsForDiscardedSuffix(state.DeniedByTS, &prevTS)
 	state.Accepted = &prev
 	rewoundTS := prevTS
 	state.LastValidatedTS = &rewoundTS
 	state.DeniedByTS = pruneDeniedAfter(state.DeniedByTS, &rewoundTS)
-	return StepResult{NewState: state, Outcome: OutcomeRewind}, nil
+	effects := []Effect{PruneDeniedDecisions{AfterTimestamp: rewoundTS}}
+	for chainID := range prunedChains {
+		head, ok := prev.L2Heads[chainID]
+		if !ok {
+			continue
+		}
+		effects = append(effects, ResetChainToAccepted{
+			ChainID:   chainID,
+			Timestamp: rewoundTS,
+			L2Head:    head,
+		})
+	}
+	return StepResult{NewState: state, Effects: effects, Outcome: OutcomeRewind}, nil
+}
+
+func affectedChainsForDiscardedSuffix(deniedByTS map[uint64][]DeniedDecision, keepTS *uint64) map[eth.ChainID]struct{} {
+	affected := make(map[eth.ChainID]struct{})
+	for ts, decisions := range deniedByTS {
+		if keepTS != nil && ts <= *keepTS {
+			continue
+		}
+		for _, decision := range decisions {
+			for chainID := range decision.InvalidHeads {
+				affected[chainID] = struct{}{}
+			}
+		}
+	}
+	return affected
 }
