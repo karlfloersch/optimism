@@ -1,6 +1,8 @@
 package dsl
 
 import (
+	"errors"
+	"strings"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
@@ -68,4 +70,14 @@ func (s *TestSequencer) SequenceBlockWithTxs(t devtest.T, chainID eth.ChainID, p
 	// Publish is optional - it broadcasts via P2P which may not be enabled in tests.
 	// The block is already committed and canonical at this point.
 	_ = ca.Publish(ctx) // ignore publish errors
+
+	// Reset the sequencer state-machine after the manual open/seal/sign/commit
+	// flow above. Without this, a later New(...) on the same chain can fail with
+	// "block already sealed" because the sequencer still has a completed block in
+	// memory. Start() force-resets state before returning ErrNotImplemented.
+	err := ca.Start(ctx, common.Hash{})
+	require.True(t,
+		err == nil || errors.Is(err, seqtypes.ErrNotImplemented) || strings.Contains(err.Error(), seqtypes.ErrNotImplemented.Message),
+		"reset sequencer state: %v", err,
+	)
 }

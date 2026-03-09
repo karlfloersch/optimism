@@ -1,7 +1,9 @@
 package strongconsistency
 
 import (
+	"errors"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +13,24 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
+	"github.com/ethereum-optimism/optimism/op-service/apis"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/txplan"
+	"github.com/ethereum-optimism/optimism/op-test-sequencer/sequencer/seqtypes"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
+
+func nextAndResetTestSequencer(t devtest.T, ca apis.TestSequencerControlAPI) {
+	err := ca.Next(t.Ctx())
+	require.True(t, err == nil || strings.Contains(err.Error(), "P2P not enabled"), "advance test sequencer: %v", err)
+
+	err = ca.Start(t.Ctx(), common.Hash{})
+	require.True(t,
+		err == nil || errors.Is(err, seqtypes.ErrNotImplemented) || strings.Contains(err.Error(), seqtypes.ErrNotImplemented.Message),
+		"reset test sequencer state: %v", err,
+	)
+}
 
 // TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers proves the new
 // strong-consistency flow against the shared-supernode devstack:
@@ -355,6 +371,141 @@ func TestSupernodeStrongConsistency_SameTimestampMissingInitPauseAfterReset(gt *
 	require.NoError(t, err)
 	require.Equal(t, replacement.Hash, current.Hash, "replacement block should still be installed while the retry timestamp is paused")
 	t.Logf("confirmed replacement remains installed while paused: blockNumber=%d hash=%s", execBlockNumber, current.Hash)
+}
+
+func TestSupernodeStrongConsistency_ExploreStaleReplacementAfterDependentFrontierChange(gt *testing.T) {
+	t := devtest.SerialT(gt)
+	sys := presets.NewTwoL2SupernodeInterop(t, 0).ForSameTimestampTesting(t)
+	rng := rand.New(rand.NewSource(33333))
+	ctx := t.Ctx()
+
+	pairA := sys.PrepareInitA(rng, 0)
+	blockAOriginal, blockB := sys.IncludeAtNextTimestamp(
+		nil,
+		[]*txplan.PlannedTx{pairA.SubmitExecTo(sys.Bob)},
+	)
+
+	blockTS := blockB.Time
+	retryTS := blockTS - 1
+	execBlockNumber := blockB.Number
+	execBlockHash := blockB.Hash
+
+	t.Logf("constructed stale-deny candidate: blockTS=%d retryTS=%d Aorig=%s Bexec=%s",
+		blockTS, retryTS, blockAOriginal.Hash, execBlockHash)
+
+	l1CL := sys.L1Network.Escape().L1CLNode(match.FirstL1CL)
+	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Stop)
+	t.Cleanup(func() {
+		sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
+	})
+
+	sys.Supernode.PauseInteropAfterNextReset(retryTS)
+	sys.Supernode.ResumeInterop()
+
+	var replacement eth.BlockRef
+	require.Eventually(t, func() bool {
+		sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), common.Hash{})
+		current, err := sys.L2ELB.Escape().EthClient().BlockRefByNumber(ctx, execBlockNumber)
+		if err != nil {
+			return false
+		}
+		if current.Hash == execBlockHash {
+			return false
+		}
+		replacement = current
+		return true
+	}, 60*time.Second, time.Second, "B should install a replacement block under F1")
+
+	require.Never(t, func() bool {
+		resp := sys.Supernode.SuperRootAtTimestamp(retryTS)
+		return resp.Data != nil
+	}, 10*time.Second, time.Second, "retry timestamp should remain unvalidated while interop is paused after reset")
+
+	before := sys.Supernode.InteropDebugState()
+	require.NotNil(t, before.Frontier)
+	require.Equal(t, retryTS, before.NextTS)
+	require.Equal(t, retryTS, before.Frontier.Timestamp)
+	frontierA, ok := before.Frontier.L1Heads[sys.L2A.ChainID()]
+	require.True(t, ok, "chain A frontier L1 head must be present")
+	t.Logf("frontier before dependent-chain change: nextTS=%d frontierL2Heads=%v frontierL1Heads=%v replacement=%s",
+		before.NextTS, before.Frontier.L2Heads, before.Frontier.L1Heads, replacement.Hash)
+
+	// Replace A's original no-init block with an alternative block at the same
+	// height that does include the precomputed init.
+	initSigned, err := pairA.SubmitInit().Signed.Eval(ctx)
+	require.NoError(t, err)
+	initRaw, err := initSigned.MarshalBinary()
+	require.NoError(t, err)
+
+	ia := sys.TestSequencer.Escape().ControlAPI(sys.L2A.ChainID())
+	require.NoError(t, ia.New(ctx, seqtypes.BuildOpts{Parent: blockAOriginal.ParentHash}))
+	require.NoError(t, ia.IncludeTx(ctx, initRaw))
+	nextAndResetTestSequencer(t, ia)
+	reorgedA := sys.L2ELA.BlockRefByNumber(blockAOriginal.Number)
+	require.NotEqual(t, blockAOriginal.Hash, reorgedA.Hash, "chain A should have a conflicting block at the same height")
+	t.Logf("reorged A to alternative block with init: original=%s replacement=%s parent=%s",
+		blockAOriginal.Hash, reorgedA.Hash, blockAOriginal.ParentHash)
+
+	// Extend the alternative branch so the batcher/L1 derivation path has a
+	// stable chain to work with.
+	require.NoError(t, ia.New(ctx, seqtypes.BuildOpts{Parent: reorgedA.Hash}))
+	nextAndResetTestSequencer(t, ia)
+	t.Log("built alternative A branch; batcher A continues running to submit it via frozen L1 mempool")
+
+	// Reorg L1 from the frontier dependency parent so the old A batch disappears
+	// and the alternative A branch can become canonical through normal batch
+	// submission. This avoids debug_setHead while still using the real L1/batcher
+	// path.
+	divergence := sys.L1EL.BlockRefByNumber(frontierA.Number)
+	require.Greater(t, divergence.Number, uint64(0), "frontier dependency must be non-genesis for the dependent-chain reorg")
+	sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), divergence.ParentHash)
+	for range 3 {
+		sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), common.Hash{})
+	}
+	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
+	sys.L1EL.ReorgTriggered(divergence, 10)
+	t.Logf("triggered dependent-chain L1 reorg from frontier dependency: divergence=%s frontierA=%s", divergence, frontierA)
+
+	sys.Supernode.ResumeInterop()
+
+	var after *stack.InteropDebugState
+	require.Eventually(t, func() bool {
+		state := sys.Supernode.InteropDebugState()
+		if state.Accepted != nil && state.Accepted.Timestamp == retryTS {
+			changed := state.Accepted.L1Heads[sys.L2A.ChainID()] != before.Frontier.L1Heads[sys.L2A.ChainID()] ||
+				state.Accepted.L2Heads[sys.L2A.ChainID()] != before.Frontier.L2Heads[sys.L2A.ChainID()]
+			if changed {
+				after = state
+				return true
+			}
+		}
+		if state.Frontier != nil && state.NextTS == retryTS && state.Frontier.Timestamp == retryTS {
+			changed := state.Frontier.L1Heads[sys.L2A.ChainID()] != before.Frontier.L1Heads[sys.L2A.ChainID()] ||
+				state.Frontier.L2Heads[sys.L2A.ChainID()] != before.Frontier.L2Heads[sys.L2A.ChainID()]
+			if changed {
+				after = state
+				return true
+			}
+		}
+		return false
+	}, 2*time.Minute, time.Second, "resumed interop should eventually observe a different dependent-chain world than F1")
+
+	if after.Accepted != nil && after.Accepted.Timestamp == retryTS {
+		t.Logf("accepted world after dependent-chain change: acceptedTS=%d l2Heads=%v l1Heads=%v",
+			after.Accepted.Timestamp, after.Accepted.L2Heads, after.Accepted.L1Heads)
+	} else {
+		require.NotNil(t, after.Frontier)
+		t.Logf("frontier after dependent-chain change: nextTS=%d frontierL2Heads=%v frontierL1Heads=%v",
+			after.NextTS, after.Frontier.L2Heads, after.Frontier.L1Heads)
+	}
+
+	current, err := sys.L2ELB.Escape().EthClient().BlockRefByNumber(ctx, execBlockNumber)
+	require.NoError(t, err)
+	t.Logf("replacement after dependent frontier change: currentB=%s replacement=%s", current.Hash, replacement.Hash)
+
+	// Exploratory assertion for now: if the stale-deny gap is real, B will still
+	// be on the replacement even though A's dependent frontier world changed.
+	require.Equal(t, replacement.Hash, current.Hash, "B still remains on the replacement after the dependent frontier changed")
 }
 
 // TestSupernodeStrongConsistency_CrossChainStaleDenyScaffold is the concrete
