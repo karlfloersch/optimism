@@ -102,6 +102,14 @@ func (s *Supernode) ResumeInterop() {
 	s.testControl.ResumeInteropActivity()
 }
 
+// PauseInteropAfterNextReset arms a one-shot pause that triggers after the next
+// reset which causes interop to retry the given timestamp.
+// This function is for integration test control only.
+func (s *Supernode) PauseInteropAfterNextReset(ts uint64) {
+	s.require.NotNil(s.testControl, "PauseInteropAfterNextReset requires test control; use NewSupernodeWithTestControl")
+	s.testControl.PauseInteropAfterNextResetActivity(ts)
+}
+
 // InteropDebugState returns a test-only view of the accepted snapshot and the
 // current frontier snapshot for the interop activity.
 func (s *Supernode) InteropDebugState() *stack.InteropDebugState {

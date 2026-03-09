@@ -67,6 +67,11 @@ type InteropTestControl interface {
 	// This function is for integration test control only.
 	ResumeInteropActivity()
 
+	// PauseInteropAfterNextResetActivity arms a one-shot pause that triggers
+	// after the next reset which causes interop to retry the given timestamp.
+	// This function is for integration test control only.
+	PauseInteropAfterNextResetActivity(ts uint64)
+
 	// InteropDebugState returns a test-only snapshot of the current accepted and
 	// next frontier interop state, if available.
 	InteropDebugState() (*InteropDebugState, error)

@@ -140,6 +140,16 @@ func (n *SuperNode) ResumeInteropActivity() {
 	}
 }
 
+// PauseInteropAfterNextResetActivity arms a one-shot pause that triggers after
+// the next reset which causes interop to retry the given timestamp.
+func (n *SuperNode) PauseInteropAfterNextResetActivity(ts uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sn != nil {
+		n.sn.PauseInteropAfterNextResetActivity(ts)
+	}
+}
+
 func (n *SuperNode) InteropDebugState() (*stack.InteropDebugState, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

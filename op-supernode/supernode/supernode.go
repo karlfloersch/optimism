@@ -288,6 +288,19 @@ func (s *Supernode) ResumeInteropActivity() {
 	s.log.Warn("ResumeInterop called but no interop activity found")
 }
 
+// PauseInteropAfterNextResetActivity arms a one-shot pause that triggers after
+// the next reset which causes interop to retry the given timestamp.
+// This function is for integration test control only.
+func (s *Supernode) PauseInteropAfterNextResetActivity(ts uint64) {
+	for _, a := range s.activities {
+		if ia, ok := a.(*interop.Interop); ok {
+			ia.PauseAfterNextResetAt(ts)
+			return
+		}
+	}
+	s.log.Warn("PauseInteropAfterNextReset called but no interop activity found")
+}
+
 func (s *Supernode) InteropDebugState() (*interop.DebugState, error) {
 	for _, a := range s.activities {
 		if ia, ok := a.(*interop.Interop); ok {

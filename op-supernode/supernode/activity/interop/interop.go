@@ -69,6 +69,10 @@ type Interop struct {
 	// When non-zero, progressInterop will return early without processing
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
+	// pauseAfterResetAtTimestamp is used for integration test control only.
+	// When non-zero, the next reset that rewinds to timestamp-1 will arm a
+	// normal pause at that timestamp before interop retries it.
+	pauseAfterResetAtTimestamp atomic.Uint64
 }
 
 type AcceptedBoundary struct {
@@ -223,6 +227,14 @@ func (i *Interop) Resume() {
 	i.log.Info("interop pause cleared")
 }
 
+// PauseAfterNextResetAt arms a one-shot pause that triggers after the next
+// reset which causes interop to retry the given timestamp.
+// This function is for integration test control only.
+func (i *Interop) PauseAfterNextResetAt(ts uint64) {
+	i.pauseAfterResetAtTimestamp.Store(ts)
+	i.log.Info("interop pause-after-reset set", "pauseAfterResetAtTimestamp", ts)
+}
+
 // progressAndRecord attempts to progress interop and record the result.
 // Returns (madeProgress, error) where madeProgress indicates if we advanced the verified timestamp.
 func (i *Interop) progressAndRecord() (bool, error) {
@@ -311,6 +323,12 @@ func (i *Interop) applyReset(reset pendingReset) error {
 
 	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
 	i.resetVerifiedDB(reset.timestamp)
+
+	if retryTS := i.pauseAfterResetAtTimestamp.Load(); retryTS != 0 && reset.timestamp+1 == retryTS {
+		i.pauseAtTimestamp.Store(retryTS)
+		i.pauseAfterResetAtTimestamp.Store(0)
+		i.log.Info("armed interop pause after reset", "retryTimestamp", retryTS, "chainID", reset.chainID)
+	}
 
 	i.mu.Lock()
 	defer i.mu.Unlock()

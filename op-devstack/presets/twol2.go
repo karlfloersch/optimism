@@ -279,12 +279,13 @@ func (s *SameTimestampTestSetup) PrepareInitB(rng *rand.Rand, logIdx uint32) *ds
 	return s.Bob.PrepareSameTimestampInit(rng, s.EventLoggerB, s.ExpectedBlockNumB, logIdx, s.NextTimestamp)
 }
 
-// IncludeAndValidate builds blocks with deterministic timestamps using the TestSequencer,
-// then validates interop and checks for expected reorgs.
+// IncludeAtNextTimestamp builds blocks with deterministic timestamps using the
+// TestSequencer and returns the resulting block refs without resuming interop.
 //
-// Unlike the regular sequencer which uses wall-clock time, the TestSequencer builds blocks
-// at exactly parent.Time + blockTime, ensuring the blocks are at NextTimestamp.
-func (s *SameTimestampTestSetup) IncludeAndValidate(txsA, txsB []*txplan.PlannedTx, expectReplacedA, expectReplacedB bool) {
+// Unlike the regular sequencer which uses wall-clock time, the TestSequencer
+// builds blocks at exactly parent.Time + blockTime, ensuring the blocks are at
+// NextTimestamp.
+func (s *SameTimestampTestSetup) IncludeAtNextTimestamp(txsA, txsB []*txplan.PlannedTx) (eth.L2BlockRef, eth.L2BlockRef) {
 	ctx := s.t.Ctx()
 
 	require.NotNil(s.t, s.TestSequencer, "TestSequencer is required for deterministic timestamp tests")
@@ -334,6 +335,12 @@ func (s *SameTimestampTestSetup) IncludeAndValidate(txsA, txsB []*txplan.Planned
 		receipt := s.L2ELB.WaitForReceipt(txHash)
 		blockB = s.L2ELB.BlockRefByHash(receipt.BlockHash)
 	}
+	if len(txHashesA) == 0 {
+		blockA = s.L2ELA.BlockRefByNumber(s.ExpectedBlockNumA)
+	}
+	if len(txHashesB) == 0 {
+		blockB = s.L2ELB.BlockRefByNumber(s.ExpectedBlockNumB)
+	}
 
 	// Verify same-timestamp property: both blocks at expected timestamp
 	require.Equal(s.t, s.NextTimestamp, blockA.Time,
@@ -341,6 +348,14 @@ func (s *SameTimestampTestSetup) IncludeAndValidate(txsA, txsB []*txplan.Planned
 	require.Equal(s.t, s.NextTimestamp, blockB.Time,
 		"Chain B block must be at the precomputed NextTimestamp (exec references init at this timestamp)")
 	require.Equal(s.t, blockA.Time, blockB.Time, "blocks must be at same timestamp")
+
+	return blockA, blockB
+}
+
+// IncludeAndValidate builds blocks with deterministic timestamps using the TestSequencer,
+// then validates interop and checks for expected reorgs.
+func (s *SameTimestampTestSetup) IncludeAndValidate(txsA, txsB []*txplan.PlannedTx, expectReplacedA, expectReplacedB bool) {
+	blockA, blockB := s.IncludeAtNextTimestamp(txsA, txsB)
 
 	// Resume interop and wait for validation
 	s.Supernode.ResumeInterop()
