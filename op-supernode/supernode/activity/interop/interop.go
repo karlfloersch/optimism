@@ -69,10 +69,9 @@ type Interop struct {
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
 
-	stateStore     *interopstore.Store
-	stateBridge    *stateStoreBridge
-	controller     *interopcontroller.Controller
-	engine         *interopengine.Engine
+	stateStore *interopstore.Store
+	controller *interopcontroller.Controller
+	engine     *interopengine.Engine
 }
 
 type queuedReset struct {
@@ -149,11 +148,19 @@ func New(
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
-	i.stateBridge = newStateStoreBridge(activationTimestamp, verifiedDB, stateStore)
+	if err := importVerifiedDBIfNeeded(activationTimestamp, verifiedDB, stateStore); err != nil {
+		for _, db := range logsDBs {
+			_ = db.Close()
+		}
+		_ = stateStore.Close()
+		_ = verifiedDB.Close()
+		log.Error("failed to import legacy interop state", "err", err)
+		return nil
+	}
 	i.controller = interopcontroller.New(
 		activationTimestamp,
 		engine,
-		i.stateBridge,
+		stateStore,
 		&runtimeObservationSource{interop: i},
 		&runtimeEvidenceResolver{interop: i},
 		&runtimeVerifier{interop: i},
@@ -542,9 +549,6 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 }
 
 func (i *Interop) loadStateForRead() (interopengine.InteropState, error) {
-	if i.stateBridge != nil {
-		return i.stateBridge.Load()
-	}
 	if i.stateStore != nil {
 		return i.stateStore.Load()
 	}
@@ -604,7 +608,7 @@ func (i *Interop) applyResetLocked(reset queuedReset) {
 	}
 
 	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
-	i.resetVerifiedDB(reset.timestamp)
+	i.resetStateStore(reset.timestamp)
 
 	// Reset the currentL1 to force re-evaluation
 	i.currentL1 = eth.BlockID{}
@@ -630,24 +634,56 @@ func (i *Interop) resetLogsDB(chainID eth.ChainID, db LogsDB, invalidatedBlock e
 	}
 }
 
-// resetVerifiedDB removes any verified results after the given timestamp.
-func (i *Interop) resetVerifiedDB(timestamp uint64) {
-	if i.verifiedDB == nil {
+// resetStateStore removes accepted interop state after the given timestamp.
+func (i *Interop) resetStateStore(timestamp uint64) {
+	if i.stateStore == nil {
 		return
 	}
-
-	deleted, err := i.verifiedDB.RewindAfter(timestamp)
+	state, err := i.stateStore.Load()
 	if err != nil {
-		i.log.Error("failed to rewind verifiedDB",
+		i.log.Error("failed to load interop state for reset",
 			"timestamp", timestamp,
 			"err", err,
 		)
+		return
 	}
-	if deleted {
-		// This is unexpected - we shouldn't have verified results at timestamps
-		// that are being reset. Log an error for visibility.
-		i.log.Error("UNEXPECTED: verified results were deleted on reset",
+
+	if state.Accepted == nil || state.Accepted.Timestamp <= timestamp {
+		return
+	}
+
+	var nextAccepted *interopengine.AcceptedSnapshot
+	var nextValidated *uint64
+	for ts := range state.AcceptedHistory {
+		if ts > timestamp {
+			delete(state.AcceptedHistory, ts)
+		}
+	}
+	for ts, snapshot := range state.AcceptedHistory {
+		if ts <= timestamp && (nextValidated == nil || ts > *nextValidated) {
+			snapshotCopy := snapshot
+			nextAccepted = &snapshotCopy
+			validatedTS := ts
+			nextValidated = &validatedTS
+		}
+	}
+	if nextAccepted == nil {
+		state.Accepted = nil
+		state.LastValidatedTS = nil
+		state.DeniedByTS = map[uint64][]interopengine.DeniedDecision{}
+	} else {
+		state.Accepted = nextAccepted
+		state.LastValidatedTS = nextValidated
+		for ts := range state.DeniedByTS {
+			if ts > timestamp {
+				delete(state.DeniedByTS, ts)
+			}
+		}
+	}
+	if err := i.stateStore.Commit(state); err != nil {
+		i.log.Error("failed to commit interop state reset",
 			"timestamp", timestamp,
+			"err", err,
 		)
 	}
 }

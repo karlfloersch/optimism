@@ -14,30 +14,21 @@ type stateStoreBridge struct {
 	store               *interopstore.Store
 }
 
-func newStateStoreBridge(activationTimestamp uint64, verifiedDB *VerifiedDB, store *interopstore.Store) *stateStoreBridge {
-	return &stateStoreBridge{
+func importVerifiedDBIfNeeded(activationTimestamp uint64, verifiedDB *VerifiedDB, store *interopstore.Store) error {
+	s := stateStoreBridge{
 		activationTimestamp: activationTimestamp,
 		verifiedDB:          verifiedDB,
 		store:               store,
 	}
-}
-
-func (s *stateStoreBridge) Load() (interopengine.InteropState, error) {
 	state, err := s.store.Load()
 	if err != nil {
-		return interopengine.InteropState{}, err
-	}
-	if !stateStoreEmpty(state) {
-		return state, nil
-	}
-	return s.importVerifiedDB()
-}
-
-func (s *stateStoreBridge) Commit(state interopengine.InteropState) error {
-	if err := s.store.Commit(state); err != nil {
 		return err
 	}
-	return s.mirrorVerifiedDB(state)
+	if !stateStoreEmpty(state) {
+		return nil
+	}
+	_, err = s.importVerifiedDB()
+	return err
 }
 
 func stateStoreEmpty(state interopengine.InteropState) bool {
@@ -75,32 +66,6 @@ func (s *stateStoreBridge) importVerifiedDB() (interopengine.InteropState, error
 	return state, nil
 }
 
-func (s *stateStoreBridge) mirrorVerifiedDB(state interopengine.InteropState) error {
-	if state.Accepted == nil {
-		if s.activationTimestamp == 0 {
-			_, err := s.verifiedDB.Rewind(0)
-			return err
-		}
-		_, err := s.verifiedDB.Rewind(s.activationTimestamp)
-		return err
-	}
-
-	_, err := s.verifiedDB.Rewind(s.activationTimestamp)
-	if err != nil {
-		return err
-	}
-	for ts := s.activationTimestamp; ts <= state.Accepted.Timestamp; ts++ {
-		snapshot, ok := state.AcceptedHistory[ts]
-		if !ok {
-			return fmt.Errorf("accepted history missing timestamp %d during verifiedDB mirror", ts)
-		}
-		if err := s.verifiedDB.Commit(verifiedResultFromAcceptedSnapshot(snapshot)); err != nil {
-			return fmt.Errorf("mirror verified result at timestamp %d: %w", ts, err)
-		}
-	}
-	return nil
-}
-
 func acceptedSnapshotFromVerifiedResult(result VerifiedResult) interopengine.AcceptedSnapshot {
 	// Legacy verified results do not persist per-chain L1 heads. When importing
 	// legacy state, seed each chain with the committed L1 inclusion so the new
@@ -116,13 +81,5 @@ func acceptedSnapshotFromVerifiedResult(result VerifiedResult) interopengine.Acc
 		L1Inclusion: result.L1Inclusion,
 		L1Heads:     l1Heads,
 		L2Heads:     result.L2Heads,
-	}
-}
-
-func verifiedResultFromAcceptedSnapshot(snapshot interopengine.AcceptedSnapshot) VerifiedResult {
-	return VerifiedResult{
-		Timestamp:   snapshot.Timestamp,
-		L1Inclusion: snapshot.L1Inclusion,
-		L2Heads:     snapshot.L2Heads,
 	}
 }

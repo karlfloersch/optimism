@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity"
+	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
 	cc "github.com/ethereum-optimism/optimism/op-supernode/supernode/chain_container"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
 	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
@@ -109,6 +110,24 @@ func (h *interopTestHarness) Chains() map[eth.ChainID]cc.ChainContainer {
 // Mock returns the mock for a given chain ID.
 func (h *interopTestHarness) Mock(id uint64) *mockChainContainer {
 	return h.mocks[eth.ChainIDFromUInt64(id)]
+}
+
+func (h *interopTestHarness) seedAcceptedHistory(results ...VerifiedResult) {
+	h.t.Helper()
+	state, err := h.interop.stateStore.Load()
+	require.NoError(h.t, err)
+	if state.AcceptedHistory == nil {
+		state.AcceptedHistory = make(map[uint64]interopengine.AcceptedSnapshot, len(results))
+	}
+	for _, result := range results {
+		snapshot := acceptedSnapshotFromVerifiedResult(result)
+		state.AcceptedHistory[result.Timestamp] = snapshot
+		snapshotCopy := snapshot
+		state.Accepted = &snapshotCopy
+		ts := result.Timestamp
+		state.LastValidatedTS = &ts
+	}
+	require.NoError(h.t, h.interop.stateStore.Commit(state))
 }
 
 // =============================================================================
@@ -761,15 +780,11 @@ func TestVerifiedAtTimestamp(t *testing.T) {
 				}).Build()
 			},
 			run: func(t *testing.T, h *interopTestHarness) {
-				h.interop.verifyFn = func(ts uint64, blocks map[eth.ChainID]eth.BlockID) (Result, error) {
-					return Result{Timestamp: ts, L1Inclusion: eth.BlockID{Number: 100}, L2Heads: blocks}, nil
-				}
-
-				result, err := h.interop.progressInterop()
-				require.NoError(t, err)
-
-				err = h.interop.handleResult(result)
-				require.NoError(t, err)
+				h.seedAcceptedHistory(VerifiedResult{
+					Timestamp:   1000,
+					L1Inclusion: eth.BlockID{Number: 100},
+					L2Heads:     map[eth.ChainID]eth.BlockID{h.Mock(10).id: {Number: 100}},
+				})
 
 				verified, err := h.interop.VerifiedAtTimestamp(1000)
 				require.NoError(t, err)
@@ -1490,32 +1505,27 @@ func TestReset(t *testing.T) {
 			run: func(t *testing.T, h *interopTestHarness, mockLogsDB *mockLogsDBForInterop) {
 				mock := h.Mock(10)
 				// Add some verified results
+				results := make([]VerifiedResult, 0, 5)
 				for ts := uint64(98); ts <= 102; ts++ {
-					err := h.interop.verifiedDB.Commit(VerifiedResult{
+					results = append(results, VerifiedResult{
 						Timestamp:   ts,
 						L1Inclusion: eth.BlockID{Number: ts},
 						L2Heads:     map[eth.ChainID]eth.BlockID{mock.id: {Number: ts}},
 					})
-					require.NoError(t, err)
 				}
+				h.seedAcceptedHistory(results...)
 
 				// Reset at timestamp 100 (timestamp 100 is first NOT removed, so 101, 102 are removed)
 				invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.Hash{}}
 				h.interop.Reset(mock.id, 100, invalidatedBlock)
 
-				// Verify results at 98, 99, 100 still exist (100 is first NOT removed)
-				has, _ := h.interop.verifiedDB.Has(98)
-				require.True(t, has)
-				has, _ = h.interop.verifiedDB.Has(99)
-				require.True(t, has)
-				has, _ = h.interop.verifiedDB.Has(100)
-				require.True(t, has)
-
-				// Verify results at 101, 102 are gone (after reset timestamp)
-				has, _ = h.interop.verifiedDB.Has(101)
-				require.False(t, has)
-				has, _ = h.interop.verifiedDB.Has(102)
-				require.False(t, has)
+				state, err := h.interop.stateStore.Load()
+				require.NoError(t, err)
+				require.Contains(t, state.AcceptedHistory, uint64(98))
+				require.Contains(t, state.AcceptedHistory, uint64(99))
+				require.Contains(t, state.AcceptedHistory, uint64(100))
+				require.NotContains(t, state.AcceptedHistory, uint64(101))
+				require.NotContains(t, state.AcceptedHistory, uint64(102))
 			},
 		},
 		{
@@ -1574,31 +1584,34 @@ func TestReset_QueuesWhileStarted(t *testing.T) {
 	h.interop.started = true
 	h.interop.currentL1 = eth.BlockID{Number: 500, Hash: common.HexToHash("0xL1")}
 
+	results := make([]VerifiedResult, 0, 5)
 	for ts := uint64(98); ts <= 102; ts++ {
-		err := h.interop.verifiedDB.Commit(VerifiedResult{
+		results = append(results, VerifiedResult{
 			Timestamp:   ts,
 			L1Inclusion: eth.BlockID{Number: ts},
 			L2Heads:     map[eth.ChainID]eth.BlockID{mock.id: {Number: ts}},
 		})
-		require.NoError(t, err)
 	}
+	h.seedAcceptedHistory(results...)
 
 	invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xPARENT")}
 	h.interop.Reset(mock.id, 100, invalidatedBlock)
 
 	require.Len(t, h.interop.pendingResets, 1)
 	require.Empty(t, mockLogsDB.rewindCalls)
-	has, err := h.interop.verifiedDB.Has(102)
+	state, err := h.interop.stateStore.Load()
 	require.NoError(t, err)
-	require.True(t, has)
+	_, ok := state.AcceptedHistory[102]
+	require.True(t, ok)
 	require.Equal(t, uint64(500), h.interop.currentL1.Number)
 
 	require.NoError(t, h.interop.applyPendingResets())
 	require.Empty(t, h.interop.pendingResets)
 	require.Len(t, mockLogsDB.rewindCalls, 1)
-	has, err = h.interop.verifiedDB.Has(102)
+	state, err = h.interop.stateStore.Load()
 	require.NoError(t, err)
-	require.False(t, has)
+	_, ok = state.AcceptedHistory[102]
+	require.False(t, ok)
 	require.Equal(t, eth.BlockID{}, h.interop.currentL1)
 }
 
@@ -1613,15 +1626,16 @@ func TestVerifiedBlockAtL1(t *testing.T) {
 			WithChain(10, nil).
 			Build()
 
-		// Commit some verified results so the DB is non-empty
+		// Seed accepted history so the state store is non-empty
+		results := make([]VerifiedResult, 0, 11)
 		for ts := uint64(100); ts <= 110; ts++ {
-			err := h.interop.verifiedDB.Commit(VerifiedResult{
+			results = append(results, VerifiedResult{
 				Timestamp:   ts,
 				L1Inclusion: eth.BlockID{Number: ts + 1000},
 				L2Heads:     map[eth.ChainID]eth.BlockID{h.Mock(10).id: {Number: ts}},
 			})
-			require.NoError(t, err)
 		}
+		h.seedAcceptedHistory(results...)
 
 		// Call with zero L1BlockRef — should return empty without scanning the DB
 		blockID, ts := h.interop.VerifiedBlockAtL1(h.Mock(10).id, eth.L1BlockRef{})
@@ -1638,18 +1652,19 @@ func TestVerifiedBlockAtL1(t *testing.T) {
 		chainID := h.Mock(10).id
 		expectedL2 := eth.BlockID{Hash: common.Hash{0xaa}, Number: 105}
 
+		results := make([]VerifiedResult, 0, 11)
 		for ts := uint64(100); ts <= 110; ts++ {
 			l2Head := eth.BlockID{Hash: common.Hash{byte(ts)}, Number: ts}
 			if ts == 105 {
 				l2Head = expectedL2
 			}
-			err := h.interop.verifiedDB.Commit(VerifiedResult{
+			results = append(results, VerifiedResult{
 				Timestamp:   ts,
 				L1Inclusion: eth.BlockID{Number: ts * 10}, // L1 inclusion grows with timestamp
 				L2Heads:     map[eth.ChainID]eth.BlockID{chainID: l2Head},
 			})
-			require.NoError(t, err)
 		}
+		h.seedAcceptedHistory(results...)
 
 		// Query for L1 block 1059 — should match timestamp 105 (L1Inclusion.Number=1050 <= 1059)
 		// but not timestamp 106 (L1Inclusion.Number=1060 > 1059)
