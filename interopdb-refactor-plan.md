@@ -136,6 +136,38 @@ Tests can provide synthetic snapshots directly.
 
 so the engine sees one coherent view of the world per iteration.
 
+A concrete first-pass shape should be something like:
+
+```go
+type RoundObservation struct {
+    AcceptedTS uint64
+    Accepted   SnapshotAvailability[AcceptedSnapshot]
+    FrontierTS uint64
+    Frontier   SnapshotAvailability[FrontierSnapshot]
+}
+
+type SnapshotAvailability[T any] struct {
+    Present bool
+    Reason  AvailabilityReason
+    Value   T
+}
+
+type AvailabilityReason uint8
+
+const (
+    AvailabilityPresent AvailabilityReason = iota
+    AvailabilityPreActivation
+    AvailabilityNotReady
+    AvailabilityConflict
+)
+```
+
+This makes the observation self-describing:
+
+- missing accepted snapshot because we are pre-activation
+- missing frontier because the next timestamp is not ready yet
+- missing snapshot because the source detected a conflict
+
 ### 2. Pure State Engine
 
 This layer owns the interop invariants.
@@ -176,6 +208,23 @@ One more important rule:
   observation)` pair
 
 That makes retries and crash recovery much easier to reason about.
+
+`Outcome` should also be explicit, for example:
+
+```go
+type Outcome uint8
+
+const (
+    OutcomeNoOp Outcome = iota
+    OutcomeWait
+    OutcomeAdvance
+    OutcomeRewind
+    OutcomeConflict
+)
+```
+
+That gives the controller a stable semantic contract instead of inferring
+behavior from incidental effect combinations.
 
 ### 3. Atomic Store + Effect Runner
 
@@ -237,7 +286,7 @@ type FrontierSnapshot struct {
 
 type DeniedDecision struct {
     Timestamp    uint64
-    Frontier     FrontierSnapshot
+    DeniedFrontier FrontierSnapshot
     InvalidHeads map[eth.ChainID]eth.BlockID
 }
 
@@ -311,6 +360,11 @@ The controller/engine should be able to distinguish:
 - not-ready / incomplete evidence
 - hard conflict or corrupted evidence/cache state
 
+Invariant:
+
+- if `Status == VerificationInvalid`, then `InvalidHeads` must be non-empty
+- if `Status != VerificationInvalid`, then `InvalidHeads` should be empty
+
 ## Invariants To Make First-Class
 
 These are the invariants the new engine should own directly.
@@ -338,8 +392,10 @@ These are the invariants the new engine should own directly.
 ### Deny Invariants
 
 - deny decisions are scoped to a specific frontier timestamp
-- deny decisions are only valid relative to the frontier snapshot that produced them
+- deny decisions are only valid relative to the exact frontier snapshot that produced them
 - deny decisions should compare by exact snapshot equality, not loose timestamp/height matching
+- `DeniedByTS[t]` may contain multiple decisions over time, but only decisions whose
+  `DeniedFrontier` exactly matches the current frontier at `t` may remain live
 - if accepted state rewinds past a deny decision timestamp, that deny decision must be pruned
 - if the current frontier at the same timestamp differs from the denied frontier, that deny decision must be pruned
 
@@ -350,6 +406,7 @@ These are the invariants the new engine should own directly.
 - state mutation and effect planning must happen before side effects execute
 - effects must be safe to retry after crash or controller restart
 - the engine must not emit duplicate rewind/reset effects if an equivalent pending effect already exists
+- before stepping the engine, the controller must drain or reconcile any retry-safe pending effects
 
 ## Effects
 
@@ -406,6 +463,12 @@ The `ID` should be deterministic from the logical action, for example:
 - target head hash
 
 That makes deduplication and retry semantics much easier to reason about.
+
+For deny pruning, the engine should prefer replacement semantics over unbounded
+append growth:
+
+- when frontier `t` changes, stale denied decisions for `t` should be removed
+- at most the currently matching denied frontier(s) for `t` should remain live
 
 ## Evidence Cache
 
@@ -616,6 +679,24 @@ The acceptance tests should only prove:
 - the system converges end to end
 
 They should not be the primary place where invariants are validated.
+
+## Verify During Implementation
+
+When implementing the plan, explicitly verify these assumptions instead of
+quietly inheriting them from the current code:
+
+- `ObserveRound(...)` can actually provide one coherent round view from the
+  current chain-container APIs
+- `LatestVerifiedL2Block` and `VerifiedBlockAtL1` can be served cleanly from the
+  new accepted-state model without bespoke fallback logic
+- the controller can drain pending rewind/reset effects synchronously without
+  deadlocking the current reset callback path
+- `VerificationNotReady` and `VerificationConflict` map cleanly to distinct
+  controller behavior
+- the evidence cache can be keyed by exact `eth.BlockID` without relying on the
+  current logsDB layout
+- the one-step rewind rule remains operationally acceptable under repeated
+  reorgs
 
 ## What To Unit Test Aggressively
 
