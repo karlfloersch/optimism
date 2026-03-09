@@ -11,6 +11,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	interopcontroller "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/controller"
+	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/processors"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
@@ -103,6 +105,17 @@ func (i *Interop) loadLogs(ts uint64) error {
 }
 
 func (i *Interop) loadLogsForBlocks(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) error {
+	evidence, err := resolveLegacyFrontierEvidence(i.ctx, i, interopengine.FrontierSnapshot{
+		Timestamp: ts,
+		L2Heads:   blocksAtTimestamp,
+	})
+	if err != nil {
+		return err
+	}
+	return i.loadLogsFromEvidence(ts, blocksAtTimestamp, evidence.Blocks)
+}
+
+func (i *Interop) loadLogsFromEvidence(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID, evidence map[eth.ChainID]interopcontroller.BlockEvidence) error {
 	for chainID, chain := range i.chains {
 		db := i.logsDBs[chainID]
 
@@ -117,12 +130,19 @@ func (i *Interop) loadLogsForBlocks(ts uint64, blocksAtTimestamp map[eth.ChainID
 		if !ok {
 			return fmt.Errorf("chain %s: missing frontier block at timestamp %d", chainID, ts)
 		}
-
-		// Fetch receipts for the block
-		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, blockID)
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to fetch receipts for block %d: %w", chainID, blockID.Number, err)
+		blockEvidence, ok := evidence[chainID]
+		if !ok {
+			return fmt.Errorf("chain %s: missing frontier evidence at timestamp %d", chainID, ts)
 		}
+		if blockEvidence.BlockInfo.Hash() != blockID.Hash || blockEvidence.BlockInfo.NumberU64() != blockID.Number {
+			return fmt.Errorf("chain %s: frontier evidence block %s does not match requested block %s",
+				chainID,
+				eth.BlockID{Hash: blockEvidence.BlockInfo.Hash(), Number: blockEvidence.BlockInfo.NumberU64()},
+				blockID)
+		}
+
+		blockInfo := blockEvidence.BlockInfo
+		receipts := blockEvidence.Receipts
 
 		// if the database has blocks, check if we can skip or need to verify continuity
 		if hasBlocks {

@@ -62,19 +62,21 @@ func acceptedTimestampValue(ts *uint64) uint64 {
 	return *ts
 }
 
-type legacyEvidenceResolver struct{}
+type legacyEvidenceResolver struct {
+	interop *Interop
+}
 
-func (r *legacyEvidenceResolver) ResolveFrontier(_ context.Context, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
-	return interopcontroller.FrontierEvidence{Timestamp: frontier.Timestamp}, nil
+func (r *legacyEvidenceResolver) ResolveFrontier(ctx context.Context, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
+	return resolveLegacyFrontierEvidence(ctx, r.interop, frontier)
 }
 
 type legacyVerifier struct {
 	interop *Interop
 }
 
-func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.RoundObservation, _ interopcontroller.FrontierEvidence) (interopengine.VerificationResult, error) {
+func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.RoundObservation, evidence interopcontroller.FrontierEvidence) (interopengine.VerificationResult, error) {
 	frontier := observation.Frontier.Value
-	if err := v.interop.loadLogsForBlocks(frontier.Timestamp, frontier.L2Heads); err != nil {
+	if err := v.interop.loadLogsFromEvidence(frontier.Timestamp, frontier.L2Heads, evidence.Blocks); err != nil {
 		if err == ErrPreviousTimestampNotSealed {
 			return interopengine.VerificationResult{
 				Timestamp: frontier.Timestamp,
@@ -118,6 +120,28 @@ func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.Rou
 	}
 	verification.Status = interopengine.VerificationValid
 	return verification, nil
+}
+
+func resolveLegacyFrontierEvidence(ctx context.Context, i *Interop, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
+	evidence := interopcontroller.FrontierEvidence{
+		Timestamp: frontier.Timestamp,
+		Blocks:    make(map[eth.ChainID]interopcontroller.BlockEvidence, len(frontier.L2Heads)),
+	}
+	for chainID, blockID := range frontier.L2Heads {
+		chain, ok := i.chains[chainID]
+		if !ok {
+			return interopcontroller.FrontierEvidence{}, fmt.Errorf("missing chain %s for frontier evidence", chainID)
+		}
+		blockInfo, receipts, err := chain.FetchReceipts(ctx, blockID)
+		if err != nil {
+			return interopcontroller.FrontierEvidence{}, fmt.Errorf("fetch receipts for chain %s block %s: %w", chainID, blockID, err)
+		}
+		evidence.Blocks[chainID] = interopcontroller.BlockEvidence{
+			BlockInfo: blockInfo,
+			Receipts:  receipts,
+		}
+	}
+	return evidence, nil
 }
 
 func legacyResultMatchesFrontier(result Result, frontier interopengine.FrontierSnapshot) bool {

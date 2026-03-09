@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
+	gethTypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 type ObservationSource interface {
@@ -13,6 +15,12 @@ type ObservationSource interface {
 
 type FrontierEvidence struct {
 	Timestamp uint64
+	Blocks    map[eth.ChainID]BlockEvidence
+}
+
+type BlockEvidence struct {
+	BlockInfo eth.BlockInfo
+	Receipts  gethTypes.Receipts
 }
 
 type EvidenceResolver interface {

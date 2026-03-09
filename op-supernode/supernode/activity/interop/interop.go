@@ -155,7 +155,7 @@ func New(
 		engine,
 		i.legacyState,
 		&legacyObservationSource{interop: i},
-		&legacyEvidenceResolver{},
+		&legacyEvidenceResolver{interop: i},
 		&legacyVerifier{interop: i},
 		&legacyEffectRunner{interop: i},
 	)
