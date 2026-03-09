@@ -105,7 +105,7 @@ func (i *Interop) loadLogs(ts uint64) error {
 }
 
 func (i *Interop) loadLogsForBlocks(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) error {
-	evidence, err := resolveLegacyFrontierEvidence(i.ctx, i, interopengine.FrontierSnapshot{
+	evidence, err := resolveRuntimeFrontierEvidence(i.ctx, i, interopengine.FrontierSnapshot{
 		Timestamp: ts,
 		L2Heads:   blocksAtTimestamp,
 	})

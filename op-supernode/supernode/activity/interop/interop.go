@@ -70,7 +70,7 @@ type Interop struct {
 	pauseAtTimestamp atomic.Uint64
 
 	stateStore     *interopstore.Store
-	legacyState    *legacyStateStore
+	stateBridge    *stateStoreBridge
 	controller     *interopcontroller.Controller
 	engine         *interopengine.Engine
 }
@@ -149,15 +149,15 @@ func New(
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
-	i.legacyState = newLegacyStateStore(activationTimestamp, verifiedDB, stateStore)
+	i.stateBridge = newStateStoreBridge(activationTimestamp, verifiedDB, stateStore)
 	i.controller = interopcontroller.New(
 		activationTimestamp,
 		engine,
-		i.legacyState,
-		&legacyObservationSource{interop: i},
-		&legacyEvidenceResolver{interop: i},
-		&legacyVerifier{interop: i},
-		&legacyEffectRunner{interop: i},
+		i.stateBridge,
+		&runtimeObservationSource{interop: i},
+		&runtimeEvidenceResolver{interop: i},
+		&runtimeVerifier{interop: i},
+		&runtimeEffectRunner{interop: i},
 	)
 	return i
 }
@@ -250,65 +250,26 @@ func (i *Interop) progressAndRecord() (bool, error) {
 		return false, err
 	}
 
-	if i.controller != nil {
-		step, err := i.controller.Step(i.ctx)
-		if err != nil {
-			i.log.Error("failed to progress interop controller", "err", err)
-			return false, err
-		}
-		i.mu.Lock()
-		switch step.Outcome {
-		case interopengine.OutcomeAdvance:
-			if step.NewState.Accepted != nil {
-				i.currentL1 = step.NewState.Accepted.L1Inclusion
-			}
-		case interopengine.OutcomeWait:
-			i.currentL1 = localCurrentL1
-		case interopengine.OutcomeRewind:
-			i.currentL1 = eth.BlockID{}
-		case interopengine.OutcomeNoOp, interopengine.OutcomeConflict:
-			// Preserve the previous currentL1 on invalidation/conflict paths.
-		}
-		i.mu.Unlock()
-		return step.Outcome == interopengine.OutcomeAdvance, nil
-	}
-
-	// Perform the interop evaluation
-	result, err := i.progressInterop()
+	step, err := i.controller.Step(i.ctx)
 	if err != nil {
-		i.log.Error("failed to progress interop", "err", err)
+		i.log.Error("failed to progress interop controller", "err", err)
 		return false, err
 	}
-
-	// Handle the result by committing verified results or invalidating blocks
-	err = i.handleResult(result)
-	if err != nil {
-		i.log.Error("failed to handle result", "err", err)
-		return false, err
-	}
-	// if the result is invalid, exit without updating the current L1s
-	if !result.IsEmpty() && !result.IsValid() {
-		i.log.Warn("result is invalid, skipping current L1 update", "results", result)
-		return false, nil
-	}
-
-	// Once interop is complete and recorded, update the current L1s
-	// the current L1s being considered by the Activity right now depend on what progress was made:
-	// - if interop failed to run, the current L1s are not updated
-	// - if interop ran but did not advance the verified timestamp, the CurrentL1 values collected are used directly
-	// - if interop ran and advanced the verified timestamp, the L1Inclusion is the L1 inclusion at the verified timestamp
-	// this is because the individual chains may advance their CurrentL1, and if progress is being made, we might not be done using the collected L1s.
-	verifiedAdvanced := !result.IsEmpty()
 	i.mu.Lock()
-	if verifiedAdvanced {
-		// the new CurrentL1 is the L1 inclusion at the verified timestamp
-		i.currentL1 = result.L1Inclusion
-	} else {
-		// the new CurrentL1 is the lowest CurrentL1 from the collected chains
+	switch step.Outcome {
+	case interopengine.OutcomeAdvance:
+		if step.NewState.Accepted != nil {
+			i.currentL1 = step.NewState.Accepted.L1Inclusion
+		}
+	case interopengine.OutcomeWait:
 		i.currentL1 = localCurrentL1
+	case interopengine.OutcomeRewind:
+		i.currentL1 = eth.BlockID{}
+	case interopengine.OutcomeNoOp, interopengine.OutcomeConflict:
+		// Preserve the previous currentL1 on invalidation/conflict paths.
 	}
 	i.mu.Unlock()
-	return verifiedAdvanced, nil
+	return step.Outcome == interopengine.OutcomeAdvance, nil
 }
 
 // collectCurrentL1 collects the current L1 head of all chains,
@@ -581,8 +542,8 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 }
 
 func (i *Interop) loadStateForRead() (interopengine.InteropState, error) {
-	if i.legacyState != nil {
-		return i.legacyState.Load()
+	if i.stateBridge != nil {
+		return i.stateBridge.Load()
 	}
 	if i.stateStore != nil {
 		return i.stateStore.Load()

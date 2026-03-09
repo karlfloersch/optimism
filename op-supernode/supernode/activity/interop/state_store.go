@@ -8,21 +8,21 @@ import (
 	interopstore "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/store"
 )
 
-type legacyStateStore struct {
+type stateStoreBridge struct {
 	activationTimestamp uint64
 	verifiedDB          *VerifiedDB
 	store               *interopstore.Store
 }
 
-func newLegacyStateStore(activationTimestamp uint64, verifiedDB *VerifiedDB, store *interopstore.Store) *legacyStateStore {
-	return &legacyStateStore{
+func newStateStoreBridge(activationTimestamp uint64, verifiedDB *VerifiedDB, store *interopstore.Store) *stateStoreBridge {
+	return &stateStoreBridge{
 		activationTimestamp: activationTimestamp,
 		verifiedDB:          verifiedDB,
 		store:               store,
 	}
 }
 
-func (s *legacyStateStore) Load() (interopengine.InteropState, error) {
+func (s *stateStoreBridge) Load() (interopengine.InteropState, error) {
 	state, err := s.store.Load()
 	if err != nil {
 		return interopengine.InteropState{}, err
@@ -33,7 +33,7 @@ func (s *legacyStateStore) Load() (interopengine.InteropState, error) {
 	return s.importVerifiedDB()
 }
 
-func (s *legacyStateStore) Commit(state interopengine.InteropState) error {
+func (s *stateStoreBridge) Commit(state interopengine.InteropState) error {
 	if err := s.store.Commit(state); err != nil {
 		return err
 	}
@@ -48,7 +48,7 @@ func stateStoreEmpty(state interopengine.InteropState) bool {
 		len(state.PendingEffects) == 0
 }
 
-func (s *legacyStateStore) importVerifiedDB() (interopengine.InteropState, error) {
+func (s *stateStoreBridge) importVerifiedDB() (interopengine.InteropState, error) {
 	lastTS, initialized := s.verifiedDB.LastTimestamp()
 	if !initialized {
 		return interopengine.InteropState{}, nil
@@ -75,7 +75,7 @@ func (s *legacyStateStore) importVerifiedDB() (interopengine.InteropState, error
 	return state, nil
 }
 
-func (s *legacyStateStore) mirrorVerifiedDB(state interopengine.InteropState) error {
+func (s *stateStoreBridge) mirrorVerifiedDB(state interopengine.InteropState) error {
 	if state.Accepted == nil {
 		if s.activationTimestamp == 0 {
 			_, err := s.verifiedDB.Rewind(0)

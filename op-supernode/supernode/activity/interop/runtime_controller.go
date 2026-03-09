@@ -10,11 +10,11 @@ import (
 	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
 )
 
-type legacyObservationSource struct {
+type runtimeObservationSource struct {
 	interop *Interop
 }
 
-func (s *legacyObservationSource) ObserveRound(_ context.Context, acceptedTS *uint64, frontierTS uint64) (interopengine.RoundObservation, error) {
+func (s *runtimeObservationSource) ObserveRound(_ context.Context, acceptedTS *uint64, frontierTS uint64) (interopengine.RoundObservation, error) {
 	if pauseTS := s.interop.pauseAtTimestamp.Load(); pauseTS != 0 && frontierTS >= pauseTS {
 		return interopengine.RoundObservation{
 			AcceptedTS: acceptedTimestampValue(acceptedTS),
@@ -62,19 +62,19 @@ func acceptedTimestampValue(ts *uint64) uint64 {
 	return *ts
 }
 
-type legacyEvidenceResolver struct {
+type runtimeEvidenceResolver struct {
 	interop *Interop
 }
 
-func (r *legacyEvidenceResolver) ResolveFrontier(ctx context.Context, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
-	return resolveLegacyFrontierEvidence(ctx, r.interop, frontier)
+func (r *runtimeEvidenceResolver) ResolveFrontier(ctx context.Context, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
+	return resolveRuntimeFrontierEvidence(ctx, r.interop, frontier)
 }
 
-type legacyVerifier struct {
+type runtimeVerifier struct {
 	interop *Interop
 }
 
-func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.RoundObservation, evidence interopcontroller.FrontierEvidence) (interopengine.VerificationResult, error) {
+func (v *runtimeVerifier) Verify(_ context.Context, observation interopengine.RoundObservation, evidence interopcontroller.FrontierEvidence) (interopengine.VerificationResult, error) {
 	frontier := observation.Frontier.Value
 	if err := v.interop.loadLogsFromEvidence(frontier.Timestamp, frontier.L2Heads, evidence.Blocks); err != nil {
 		if err == ErrPreviousTimestampNotSealed {
@@ -103,7 +103,7 @@ func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.Rou
 		}
 	}
 
-	if !legacyResultMatchesFrontier(result, frontier) {
+	if !runtimeResultMatchesFrontier(result, frontier) {
 		return interopengine.VerificationResult{
 			Timestamp: frontier.Timestamp,
 			Status:    interopengine.VerificationConflict,
@@ -122,7 +122,7 @@ func (v *legacyVerifier) Verify(_ context.Context, observation interopengine.Rou
 	return verification, nil
 }
 
-func resolveLegacyFrontierEvidence(ctx context.Context, i *Interop, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
+func resolveRuntimeFrontierEvidence(ctx context.Context, i *Interop, frontier interopengine.FrontierSnapshot) (interopcontroller.FrontierEvidence, error) {
 	evidence := interopcontroller.FrontierEvidence{
 		Timestamp: frontier.Timestamp,
 		Blocks:    make(map[eth.ChainID]interopcontroller.BlockEvidence, len(frontier.L2Heads)),
@@ -144,7 +144,7 @@ func resolveLegacyFrontierEvidence(ctx context.Context, i *Interop, frontier int
 	return evidence, nil
 }
 
-func legacyResultMatchesFrontier(result Result, frontier interopengine.FrontierSnapshot) bool {
+func runtimeResultMatchesFrontier(result Result, frontier interopengine.FrontierSnapshot) bool {
 	if result.Timestamp != frontier.Timestamp {
 		return false
 	}
@@ -154,11 +154,11 @@ func legacyResultMatchesFrontier(result Result, frontier interopengine.FrontierS
 	return maps.Equal(result.L2Heads, frontier.L2Heads)
 }
 
-type legacyEffectRunner struct {
+type runtimeEffectRunner struct {
 	interop *Interop
 }
 
-func (r *legacyEffectRunner) Run(ctx context.Context, pending []interopengine.PendingEffect) error {
+func (r *runtimeEffectRunner) Run(ctx context.Context, pending []interopengine.PendingEffect) error {
 	for _, item := range pending {
 		switch effect := item.Effect.(type) {
 		case interopengine.InvalidateChainHead:

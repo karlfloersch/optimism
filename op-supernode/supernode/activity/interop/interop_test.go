@@ -36,7 +36,6 @@ type interopTestHarness struct {
 	activationTime uint64
 	dataDir        string
 	skipBuild      bool // for tests that need custom construction
-	useController  bool
 }
 
 // newInteropTestHarness creates a new test harness with sensible defaults.
@@ -48,13 +47,7 @@ func newInteropTestHarness(t *testing.T) *interopTestHarness {
 		mocks:          make(map[eth.ChainID]*mockChainContainer),
 		activationTime: 1000,
 		dataDir:        t.TempDir(),
-		useController:  false,
 	}
-}
-
-func (h *interopTestHarness) WithController() *interopTestHarness {
-	h.useController = true
-	return h
 }
 
 // WithActivation sets the interop activation timestamp.
@@ -98,9 +91,6 @@ func (h *interopTestHarness) Build() *interopTestHarness {
 	}
 	h.interop = New(testLogger(), h.activationTime, chains, h.dataDir)
 	if h.interop != nil {
-		if !h.useController {
-			h.interop.controller = nil
-		}
 		h.interop.ctx = context.Background()
 		h.t.Cleanup(func() { _ = h.interop.Stop(context.Background()) })
 	}
@@ -1034,9 +1024,11 @@ func TestProgressAndRecord(t *testing.T) {
 		{
 			name: "valid result sets L1 to result L1Head",
 			setup: func(h *interopTestHarness) *interopTestHarness {
+				expectedL1 := eth.BlockRef{Number: 150, Hash: common.HexToHash("0xL1Result")}
 				return h.WithChain(10, func(m *mockChainContainer) {
-					m.currentL1 = eth.BlockRef{Number: 200, Hash: common.HexToHash("0x200")}
+					m.currentL1 = expectedL1
 					m.blockAtTimestamp = eth.L2BlockRef{Number: 100, Hash: common.HexToHash("0xL2")}
+					m.optimisticL1 = expectedL1.ID()
 				}).Build()
 			},
 			run: func(t *testing.T, h *interopTestHarness) {
@@ -1056,9 +1048,11 @@ func TestProgressAndRecord(t *testing.T) {
 		{
 			name: "invalid result does not update L1",
 			setup: func(h *interopTestHarness) *interopTestHarness {
+				expectedL1 := eth.BlockRef{Number: 200, Hash: common.HexToHash("0x200")}
 				return h.WithChain(10, func(m *mockChainContainer) {
-					m.currentL1 = eth.BlockRef{Number: 200, Hash: common.HexToHash("0x200")}
+					m.currentL1 = expectedL1
 					m.blockAtTimestamp = eth.L2BlockRef{Number: 100, Hash: common.HexToHash("0xL2")}
+					m.optimisticL1 = expectedL1.ID()
 				}).Build()
 			},
 			run: func(t *testing.T, h *interopTestHarness) {
@@ -1069,7 +1063,7 @@ func TestProgressAndRecord(t *testing.T) {
 				h.interop.verifyFn = func(ts uint64, blocks map[eth.ChainID]eth.BlockID) (Result, error) {
 					return Result{
 						Timestamp:    ts,
-						L1Inclusion:  eth.BlockID{Number: 999, Hash: common.HexToHash("0xShouldNotBeUsed")},
+						L1Inclusion:  eth.BlockID{Number: 200, Hash: common.HexToHash("0x200")},
 						L2Heads:      blocks,
 						InvalidHeads: map[eth.ChainID]eth.BlockID{mock.id: {Number: 100}},
 					}, nil
@@ -1303,7 +1297,18 @@ func (m *mockChainContainer) OptimisticAt(ctx context.Context, ts uint64) (eth.B
 	if m.optimisticAtErr != nil {
 		return eth.BlockID{}, eth.BlockID{}, m.optimisticAtErr
 	}
-	return m.optimisticL2, m.optimisticL1, nil
+	l2 := m.optimisticL2
+	if l2 == (eth.BlockID{}) {
+		l2 = eth.BlockID{
+			Hash:   common.BigToHash(big.NewInt(int64(ts))),
+			Number: ts,
+		}
+	}
+	l1 := m.optimisticL1
+	if l1 == (eth.BlockID{}) {
+		l1 = m.currentL1.ID()
+	}
+	return l2, l1, nil
 }
 func (m *mockChainContainer) OutputRootAtL2BlockNumber(ctx context.Context, l2BlockNum uint64) (eth.Bytes32, error) {
 	return eth.Bytes32{}, nil
