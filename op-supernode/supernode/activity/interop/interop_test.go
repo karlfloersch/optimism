@@ -1238,6 +1238,48 @@ func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
 	require.Empty(t, h.Mock(10).rewindCalls)
 }
 
+// TestProgressInterop_PrunesStaleFrontierDeniesAndRewindsAffectedChains encodes
+// the stronger eventual-consistency behavior we want from frontier drift:
+// when a deny decision for the current uncommitted frontier timestamp becomes
+// stale, interop should not just prune the deny metadata, it should also rewind
+// the affected chain back to the accepted prefix so the replacement block built
+// under the stale deny cannot remain installed indefinitely.
+//
+// This test currently fails: progressInterop() prunes stale frontier deny
+// entries and returns RoundWait, but it does not request a chain rewind.
+func TestProgressInterop_PrunesStaleFrontierDeniesAndRewindsAffectedChains(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}
+			m.pruneDenyListInconsistentRet = true
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   1000,
+		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 100, Hash: common.HexToHash("0x100")},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+		},
+	}))
+	h.interop.mu.Lock()
+	h.interop.setValidatedBoundary(1000, true)
+	h.interop.mu.Unlock()
+
+	result, outcome, err := h.interop.progressInterop()
+	require.NoError(t, err)
+	require.True(t, result.IsEmpty())
+	require.Equal(t, RoundWait, outcome)
+
+	require.Len(t, h.Mock(10).pruneDenyListInconsistentCalls, 1)
+	require.Len(t, h.Mock(10).rewindCalls, 1, "stale frontier deny pruning should rewind the affected chain to the kept prefix")
+	require.Equal(t, uint64(1000), h.Mock(10).rewindCalls[0].timestamp)
+}
+
 func TestCollectSnapshot_RejectsMixedL2AndL1Views(t *testing.T) {
 	h := newInteropTestHarness(t).
 		WithChain(10, func(m *mockChainContainer) {

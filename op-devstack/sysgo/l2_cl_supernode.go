@@ -17,7 +17,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
 	"github.com/ethereum-optimism/optimism/op-node/config"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/driver"
-	"github.com/ethereum-optimism/optimism/op-node/rollup/interop"
+	opnodeInterop "github.com/ethereum-optimism/optimism/op-node/rollup/interop"
 	nodeSync "github.com/ethereum-optimism/optimism/op-node/rollup/sync"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	snconfig "github.com/ethereum-optimism/optimism/op-supernode/config"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode"
+	superInterop "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
 )
 
@@ -137,6 +138,53 @@ func (n *SuperNode) ResumeInteropActivity() {
 	if n.sn != nil {
 		n.sn.ResumeInteropActivity()
 	}
+}
+
+func (n *SuperNode) InteropDebugState() (*stack.InteropDebugState, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sn == nil {
+		return nil, fmt.Errorf("supernode not started")
+	}
+	state, err := n.sn.InteropDebugState()
+	if err != nil {
+		return nil, err
+	}
+	return convertInteropDebugState(state), nil
+}
+
+func convertInteropDebugState(in *superInterop.DebugState) *stack.InteropDebugState {
+	if in == nil {
+		return nil
+	}
+	return &stack.InteropDebugState{
+		Accepted: convertInteropDebugSnapshot(in.Accepted),
+		Frontier: convertInteropDebugSnapshot(in.Frontier),
+		NextTS:   in.NextTS,
+	}
+}
+
+func convertInteropDebugSnapshot(in *superInterop.DebugSnapshot) *stack.InteropDebugSnapshot {
+	if in == nil {
+		return nil
+	}
+	return &stack.InteropDebugSnapshot{
+		Timestamp:   in.Timestamp,
+		L1Inclusion: in.L1Inclusion,
+		L1Heads:     cloneBlockIDMap(in.L1Heads),
+		L2Heads:     cloneBlockIDMap(in.L2Heads),
+	}
+}
+
+func cloneBlockIDMap(in map[eth.ChainID]eth.BlockID) map[eth.ChainID]eth.BlockID {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[eth.ChainID]eth.BlockID, len(in))
+	for chainID, block := range in {
+		out[chainID] = block
+	}
+	return out
 }
 
 // WithSupernode constructs a Supernode-based L2 CL node
@@ -309,7 +357,7 @@ func withSharedSupernodeCLsImpl(orch *Orchestrator, supernodeID stack.SupernodeI
 
 	// Build per-chain op-node configs
 	makeNodeCfg := func(l2Net *L2Network, l2ChainID eth.ChainID, l2EL L2ELNode, isSequencer bool) *config.Config {
-		interopCfg := &interop.Config{}
+		interopCfg := &opnodeInterop.Config{}
 		l2EngineAddr := l2EL.EngineRPC()
 		var depSet depset.DependencySet
 		if cluster, ok := orch.ClusterForL2(l2ChainID); ok {

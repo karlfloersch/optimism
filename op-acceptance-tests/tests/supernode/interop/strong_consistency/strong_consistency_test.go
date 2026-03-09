@@ -1,6 +1,7 @@
 package strongconsistency
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/presets"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack"
 	"github.com/ethereum-optimism/optimism/op-devstack/stack/match"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
@@ -93,4 +95,204 @@ func TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers(gt *testing.T) {
 		resp := sys.Supernode.SuperRootAtTimestamp(pausedTS)
 		return resp.Data != nil
 	}, 2*time.Minute, time.Second, "frontier timestamp should validate once interop resumes")
+}
+
+// TestSupernodeStrongConsistency_ExploresStaleFrontierDenyReplacement is an
+// exploratory scaffold for the remaining stale-frontier-deny question.
+//
+// Target scenario, in English:
+//
+//  1. Pause interop so we have a stable accepted prefix at timestamp T and an
+//     unverified frontier at T+1.
+//  2. On chain A, create the initiating message that chain B depends on.
+//  3. On chain B, create an executing message that is invalid under the current
+//     cross-chain world F1.
+//  4. Resume interop and let B process the invalid execution:
+//     - interop deny-lists B's block at T+1
+//     - B rewinds
+//     - B builds a replacement block R at the same height
+//  5. Pause interop again before T+1 is revalidated.
+//  6. Reorg or otherwise perturb the *dependent* chain A so that the initiating
+//     side of the dependency changes from F1 to F2, while the accepted prefix
+//     at T remains valid.
+//  7. Under F2, B's executing message should now be valid.
+//  8. The strong-consistency property we want is:
+//     - the stale deny decision from F1 is removed
+//     - any replacement block R on B that was built because of that stale deny
+//       is eventually unwound
+//     - B can rebuild T+1 from the new frontier world F2
+//
+// The current version of this test is still exploratory: it gives us the
+// observability needed to understand the frontier world, but it does not yet
+// fully isolate the cross-chain F1 -> F2 dependency transition described above.
+func TestSupernodeStrongConsistency_ExploresStaleFrontierDenyReplacement(gt *testing.T) {
+	t := devtest.SerialT(gt)
+	sys := presets.NewTwoL2SupernodeInterop(t, 0)
+
+	ctx := t.Ctx()
+
+	pausedTS := sys.Supernode.EnsureInteropPaused(sys.L2ACL, sys.L2BCL, 10)
+	require.Greater(t, pausedTS, uint64(0))
+	acceptedTS := pausedTS - 1
+	acceptedResp := sys.Supernode.SuperRootAtTimestamp(acceptedTS)
+	require.NotNil(t, acceptedResp.Data, "accepted prefix must exist before the scenario starts")
+
+	alice := sys.FunderA.NewFundedEOA(eth.OneEther)
+	bob := sys.FunderB.NewFundedEOA(eth.OneEther)
+	eventLoggerA := alice.DeployEventLogger()
+
+	sys.L2B.CatchUpTo(sys.L2A)
+	sys.L2A.CatchUpTo(sys.L2B)
+
+	rng := rand.New(rand.NewSource(12345))
+	initMsg := alice.SendRandomInitMessage(rng, eventLoggerA, 2, 10)
+	sys.L2B.WaitForBlock()
+	execMsg := bob.SendInvalidExecMessage(initMsg)
+
+	invalidBlockNumber := execMsg.Receipt.BlockNumber.Uint64()
+	invalidBlockHash := execMsg.BlockHash()
+	targetTS := sys.L2B.TimestampForBlockNum(invalidBlockNumber)
+	require.GreaterOrEqual(t, targetTS, pausedTS, "the denied frontier timestamp should still be beyond the accepted prefix")
+
+	require.Eventually(t, func() bool {
+		return sys.L2BCL.SyncStatus().LocalSafeL2.Number >= invalidBlockNumber
+	}, 60*time.Second, time.Second, "invalid block should become locally safe")
+
+	sys.Supernode.ResumeInterop()
+
+	var replacement eth.BlockRef
+	require.Eventually(t, func() bool {
+		current, err := sys.L2ELB.Escape().EthClient().BlockRefByNumber(ctx, invalidBlockNumber)
+		if err != nil {
+			return false
+		}
+		if current.Hash == invalidBlockHash {
+			return false
+		}
+		replacement = current
+		return true
+	}, 60*time.Second, time.Second, "replacement block should appear after invalidation")
+
+	// Re-pause the same timestamp so we can perturb its frontier world before it
+	// gets revalidated.
+	sys.Supernode.PauseInterop(targetTS)
+	require.Eventually(t, func() bool {
+		resp := sys.Supernode.SuperRootAtTimestamp(targetTS)
+		return resp.Data == nil
+	}, 30*time.Second, time.Second, "target timestamp should remain unvalidated while paused")
+
+	var frontierBefore *stack.InteropDebugSnapshot
+	require.Eventually(t, func() bool {
+		state := sys.Supernode.InteropDebugState()
+		if state.Frontier == nil || state.Frontier.Timestamp != targetTS {
+			return false
+		}
+		frontierBefore = state.Frontier
+		_, ok := frontierBefore.L2Heads[sys.L2B.ChainID()]
+		return ok
+	}, 30*time.Second, time.Second, "frontier timestamp should expose debug snapshot outputs")
+
+	frontierB, ok := frontierBefore.L1Heads[sys.L2B.ChainID()]
+	require.True(t, ok, "chain B frontier L1 head must be present")
+	frontierBL2, ok := frontierBefore.L2Heads[sys.L2B.ChainID()]
+	require.True(t, ok, "chain B frontier L2 head must be present")
+	t.Logf("frontier before reorg: ts=%d replacementHeight=%d replacementHash=%s frontierBlock=%s requiredL1=%s acceptedRequiredL1=%s",
+		targetTS,
+		invalidBlockNumber,
+		replacement.Hash,
+		frontierBL2.Hash,
+		frontierB,
+		acceptedResp.Data.VerifiedRequiredL1,
+	)
+
+	// We want to perturb the frontier world without invalidating the accepted
+	// prefix, so choose a divergence point at the frontier dependency and require
+	// it to be strictly newer than the accepted dependency.
+	require.Greater(t, frontierB.Number, acceptedResp.Data.VerifiedRequiredL1.Number, "frontier dependency must be ahead of the accepted dependency for this scenario")
+	divergence := sys.L1EL.BlockRefByNumber(frontierB.Number)
+
+	l1CL := sys.L1Network.Escape().L1CLNode(match.FirstL1CL)
+	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Stop)
+	t.Cleanup(func() {
+		sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
+	})
+
+	require.NoError(t, sys.L1EL.EthClient().RPC().CallContext(
+		ctx,
+		nil,
+		"debug_setHead",
+		hexutil.Uint64(divergence.Number-1),
+	))
+	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
+	sys.L1EL.ReorgTriggered(divergence, 10)
+
+	var frontierAfter *stack.InteropDebugSnapshot
+	require.Eventually(t, func() bool {
+		state := sys.Supernode.InteropDebugState()
+		if state.Frontier == nil || state.Frontier.Timestamp != targetTS {
+			return false
+		}
+		frontierAfter = state.Frontier
+		newL1, ok := frontierAfter.L1Heads[sys.L2B.ChainID()]
+		if !ok {
+			return false
+		}
+		newL2, ok := frontierAfter.L2Heads[sys.L2B.ChainID()]
+		if !ok {
+			return false
+		}
+		return newL1 != frontierB || newL2 != frontierBL2
+	}, 2*time.Minute, time.Second, "frontier world for the same timestamp should change after the L1 reorg")
+
+	frontierAfterL1 := frontierAfter.L1Heads[sys.L2B.ChainID()]
+	frontierAfterL2 := frontierAfter.L2Heads[sys.L2B.ChainID()]
+
+	t.Logf("frontier after reorg: ts=%d replacementHeight=%d replacementHash=%s frontierBlock=%s requiredL1=%s",
+		targetTS,
+		invalidBlockNumber,
+		replacement.Hash,
+		frontierAfterL2.Hash,
+		frontierAfterL1,
+	)
+
+	// This is the behavior we ultimately want to tighten: once the frontier
+	// world has changed, the chain should not remain on the replacement block
+	// created under the stale frontier deny decision.
+	require.Eventually(t, func() bool {
+		current, err := sys.L2ELB.Escape().EthClient().BlockRefByNumber(ctx, invalidBlockNumber)
+		if err != nil {
+			return false
+		}
+		return current.Hash != replacement.Hash
+	}, 2*time.Minute, time.Second, "replacement block should be rewound out once its frontier deny world becomes stale")
+}
+
+// TestSupernodeStrongConsistency_CrossChainStaleDenyScaffold is the next-step
+// acceptance scaffold for the real stale frontier deny case.
+//
+// The important difference from the exploratory test above is that the world
+// change must happen on the *dependent* chain A, not on the chain B block that
+// was deny-listed and replaced.
+//
+// Planned shape:
+//
+//  1. Use the same-timestamp harness to create a deterministic init on A and an
+//     exec on B for the same timestamp T+1.
+//  2. Arrange F1 so that B's exec is invalid because A's initiating side is not
+//     present / not justified in the current frontier world.
+//  3. Let interop deny B and force a replacement block R at the same height.
+//  4. Change A's world to F2 while keeping the accepted prefix at T valid.
+//  5. Under F2, B's exec should now be valid.
+//  6. Assert that B eventually leaves R and rebuilds T+1 from F2.
+//
+// This test is intentionally skipped for now because the missing piece is the
+// exact control over how to produce F1 -> F2 on chain A while T stays accepted.
+// The exploratory debug-hook test above is the tool we are using to nail that
+// transition down before turning this into a real assertion.
+func TestSupernodeStrongConsistency_CrossChainStaleDenyScaffold(gt *testing.T) {
+	t := devtest.SerialT(gt)
+	t.Skip("scaffold for cross-chain stale deny scenario")
+
+	sys := presets.NewTwoL2SupernodeInterop(t, 0).ForSameTimestampTesting(t)
+	_ = sys
 }

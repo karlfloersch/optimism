@@ -102,6 +102,15 @@ func (s *Supernode) ResumeInterop() {
 	s.testControl.ResumeInteropActivity()
 }
 
+// InteropDebugState returns a test-only view of the accepted snapshot and the
+// current frontier snapshot for the interop activity.
+func (s *Supernode) InteropDebugState() *stack.InteropDebugState {
+	s.require.NotNil(s.testControl, "InteropDebugState requires test control; use NewSupernodeWithTestControl")
+	state, err := s.testControl.InteropDebugState()
+	s.require.NoError(err, "failed to query interop debug state")
+	return state
+}
+
 // EnsureInteropPaused pauses the interop activity and verifies it has stopped.
 // It takes the local safe timestamps from two CL nodes, uses the maximum, then:
 // 1. Pauses interop at localSafeTimestamp + pauseOffset

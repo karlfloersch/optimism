@@ -288,6 +288,15 @@ func (s *Supernode) ResumeInteropActivity() {
 	s.log.Warn("ResumeInterop called but no interop activity found")
 }
 
+func (s *Supernode) InteropDebugState() (*interop.DebugState, error) {
+	for _, a := range s.activities {
+		if ia, ok := a.(*interop.Interop); ok {
+			return ia.DebugState()
+		}
+	}
+	return nil, fmt.Errorf("no interop activity found")
+}
+
 func (s *Supernode) Stopped() bool { return s.stopped }
 
 // RPCAddr returns the bound RPC address (host:port) if the server is listening.

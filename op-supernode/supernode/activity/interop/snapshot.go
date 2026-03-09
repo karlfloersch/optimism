@@ -75,6 +75,56 @@ func cloneBlockMap(in map[eth.ChainID]eth.BlockID) map[eth.ChainID]eth.BlockID {
 	return out
 }
 
+type DebugSnapshot struct {
+	Timestamp   uint64
+	L1Inclusion eth.BlockID
+	L1Heads     map[eth.ChainID]eth.BlockID
+	L2Heads     map[eth.ChainID]eth.BlockID
+}
+
+type DebugState struct {
+	Accepted *DebugSnapshot
+	Frontier *DebugSnapshot
+	NextTS   uint64
+}
+
+func toDebugSnapshot(in VerifiedResult) *DebugSnapshot {
+	return &DebugSnapshot{
+		Timestamp:   in.Timestamp,
+		L1Inclusion: in.L1Inclusion,
+		L1Heads:     cloneBlockMap(in.L1Heads),
+		L2Heads:     cloneBlockMap(in.L2Heads),
+	}
+}
+
+func (i *Interop) DebugState() (*DebugState, error) {
+	var accepted *DebugSnapshot
+	if result, ok := i.latestValidatedResult(); ok {
+		accepted = toDebugSnapshot(result)
+	}
+
+	nextTS := i.activationTimestamp
+	if lastTimestamp, initialized := i.verifiedDB.LastTimestamp(); initialized {
+		nextTS = lastTimestamp + 1
+	}
+
+	frontier, err := i.collectSnapshotAtTimestamp(nextTS)
+	if err != nil {
+		if errorsIsNotFound(err) {
+			return &DebugState{
+				Accepted: accepted,
+				NextTS:   nextTS,
+			}, nil
+		}
+		return nil, err
+	}
+	return &DebugState{
+		Accepted: accepted,
+		Frontier: toDebugSnapshot(frontier),
+		NextTS:   nextTS,
+	}, nil
+}
+
 func errorsIsNotFound(err error) bool {
 	return errors.Is(err, ethereum.NotFound)
 }

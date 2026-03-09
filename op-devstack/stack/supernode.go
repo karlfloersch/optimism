@@ -42,6 +42,19 @@ type Supernode interface {
 	QueryAPI() apis.SupernodeQueryAPI
 }
 
+type InteropDebugSnapshot struct {
+	Timestamp   uint64                      `json:"timestamp"`
+	L1Inclusion eth.BlockID                 `json:"l1_inclusion"`
+	L1Heads     map[eth.ChainID]eth.BlockID `json:"l1_heads"`
+	L2Heads     map[eth.ChainID]eth.BlockID `json:"l2_heads"`
+}
+
+type InteropDebugState struct {
+	Accepted *InteropDebugSnapshot `json:"accepted,omitempty"`
+	Frontier *InteropDebugSnapshot `json:"frontier,omitempty"`
+	NextTS   uint64                `json:"next_ts"`
+}
+
 // InteropTestControl provides integration test control methods for the interop activity.
 // This interface is for integration test control only.
 type InteropTestControl interface {
@@ -53,4 +66,8 @@ type InteropTestControl interface {
 	// ResumeInteropActivity clears any pause on the interop activity, allowing normal processing.
 	// This function is for integration test control only.
 	ResumeInteropActivity()
+
+	// InteropDebugState returns a test-only snapshot of the current accepted and
+	// next frontier interop state, if available.
+	InteropDebugState() (*InteropDebugState, error)
 }
