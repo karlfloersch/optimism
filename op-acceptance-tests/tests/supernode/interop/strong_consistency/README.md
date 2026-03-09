@@ -36,6 +36,9 @@ That rewind updates:
 - `verifiedDB`
 - per-chain `logsDB`
 - the validated boundary used by read-side queries
+- denylist state for discarded timestamps
+
+On startup, interop also scrubs persisted state back to the accepted prefix before entering the main loop. This prevents a crash from leaving `logsDB` or stale deny decisions ahead of `verifiedDB`.
 
 ### 2. Frozen Frontier Gate
 
@@ -54,7 +57,7 @@ If the frontier is inconsistent, interop returns `wait` and retries later. It do
 Interop invalidation still uses the denylist to block bad payloads, but stale deny decisions are cleaned up in two places:
 
 - on accepted-state repair, deny entries after the kept timestamp are pruned, and chains affected by those pruned entries are rewound
-- when retrying the same frontier timestamp, deny entries whose stored frontier snapshot no longer matches the current frontier are pruned before re-evaluation
+- when retrying the same frontier timestamp, deny entries whose stored frontier L1 world no longer matches the current frontier are pruned before re-evaluation
 
 This prevents stale deny decisions from surviving a reorged world.
 
