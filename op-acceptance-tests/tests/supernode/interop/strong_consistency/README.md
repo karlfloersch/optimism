@@ -54,12 +54,18 @@ If the frontier is inconsistent, interop returns `wait` and retries later. It do
 
 ### 3. Denylist Cleanup On Repair Or Frontier Drift
 
-Interop invalidation still uses the denylist to block bad payloads, but stale deny decisions are cleaned up in two places:
+Interop invalidation still uses the denylist to block bad payloads, but the denylist itself is now kept simple:
 
-- on accepted-state repair, deny entries after the kept timestamp are pruned, and chains affected by those pruned entries are rewound
+- `IsDenied()` is just a raw denylist lookup on `(height, payloadHash)`
+- we do not try to live-revalidate deny entries on every lookup
+- instead, stale deny decisions are removed when interop proves they belong to a world that is no longer valid
+
+That cleanup happens in two places:
+
+- on accepted-state repair, deny entries after the kept timestamp are pruned, and chains affected by those pruned entries are rewound to the kept prefix
 - when retrying the same frontier timestamp, deny entries whose stored frontier L1 world no longer matches the current frontier are pruned before re-evaluation
 
-This prevents stale deny decisions from surviving a reorged world.
+This keeps stale deny decisions from surviving a reorged world without putting extra live consistency checks on the op-node payload path.
 
 ## Serialization
 
