@@ -21,6 +21,59 @@ func (i *Interop) latestValidatedResult() (VerifiedResult, bool) {
 	return result, true
 }
 
+func (i *Interop) scrubStateOnStart() error {
+	lastTimestamp, initialized := i.verifiedDB.LastTimestamp()
+
+	var keep *VerifiedResult
+	if initialized {
+		result, err := i.verifiedDB.Get(lastTimestamp)
+		if err != nil {
+			return err
+		}
+		keep = &result
+	}
+
+	repairTS := i.repairResetTimestamp(keep)
+	affectedChains := make([]eth.ChainID, 0, len(i.chains))
+	for chainID, chain := range i.chains {
+		if keep == nil {
+			removed, err := chain.ClearDenyList()
+			if err != nil {
+				return err
+			}
+			if removed {
+				affectedChains = append(affectedChains, chainID)
+			}
+			continue
+		}
+		removed, err := chain.PruneDenyListAfter(repairTS)
+		if err != nil {
+			return err
+		}
+		if removed {
+			affectedChains = append(affectedChains, chainID)
+		}
+	}
+
+	i.mu.Lock()
+	if err := i.rewindAcceptedStateLocked(keep); err != nil {
+		i.mu.Unlock()
+		return err
+	}
+	i.mu.Unlock()
+
+	for _, chainID := range affectedChains {
+		chain, ok := i.chains[chainID]
+		if !ok {
+			continue
+		}
+		if err := chain.RewindEngine(i.ctx, repairTS, eth.BlockRef{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (i *Interop) repairAcceptedState(lastTimestamp uint64) (bool, error) {
 	keep, err := i.findKeptAcceptedResult(lastTimestamp)
 	if err != nil {
@@ -39,7 +92,8 @@ func (i *Interop) repairAcceptedState(lastTimestamp uint64) (bool, error) {
 	affectedChains := make([]eth.ChainID, 0, len(i.chains))
 	for chainID, chain := range i.chains {
 		if keep == nil {
-			if err := chain.ClearDenyList(); err != nil {
+			_, err := chain.ClearDenyList()
+			if err != nil {
 				return false, err
 			}
 			affectedChains = append(affectedChains, chainID)

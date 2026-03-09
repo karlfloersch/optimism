@@ -222,22 +222,32 @@ func (d *DenyList) PruneAfterTimestamp(timestamp uint64, decode denyEntryTimesta
 	return removed, err
 }
 
-func (d *DenyList) Clear() error {
+func (d *DenyList) Clear() (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.db.Update(func(tx *bolt.Tx) error {
+	var hadEntries bool
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		if b != nil {
+			if k, _ := b.Cursor().First(); k != nil {
+				hadEntries = true
+			}
+		}
 		if err := tx.DeleteBucket(denyListBucketName); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 			return err
 		}
 		_, err := tx.CreateBucketIfNotExists(denyListBucketName)
 		return err
 	})
+	return hadEntries, err
 }
 
 // PruneInconsistentWithSnapshot removes deny entries for the same timestamp whose
-// stored frontier snapshot differs from the supplied snapshot. Entries that
-// cannot be decoded are removed conservatively to avoid stale deny state.
+// stored frontier L1 world differs from the supplied snapshot. The exact L2 head
+// may legitimately change when a replacement block is installed at the same
+// timestamp, so this only compares the frontier's L1 view. Entries that cannot
+// be decoded are removed conservatively to avoid stale deny state.
 func (d *DenyList) PruneInconsistentWithSnapshot(snapshotMetadata []byte) (bool, error) {
 	target, err := decodeDenySnapshot(snapshotMetadata)
 	if err != nil {
@@ -268,7 +278,7 @@ func (d *DenyList) PruneInconsistentWithSnapshot(snapshotMetadata []byte) (bool,
 					removed = true
 					continue
 				}
-				if snapshot.Timestamp == target.Timestamp && !denySnapshotsEqual(snapshot, target) {
+				if snapshot.Timestamp == target.Timestamp && !denySnapshotL1WorldEqual(snapshot, target) {
 					removed = true
 					continue
 				}
@@ -376,9 +386,9 @@ func (c *simpleChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error
 	return c.denyList.PruneAfterTimestamp(timestamp, denyEntryDecisionTimestamp)
 }
 
-func (c *simpleChainContainer) ClearDenyList() error {
+func (c *simpleChainContainer) ClearDenyList() (bool, error) {
 	if c.denyList == nil {
-		return fmt.Errorf("deny list not initialized")
+		return false, fmt.Errorf("deny list not initialized")
 	}
 	return c.denyList.Clear()
 }
@@ -435,9 +445,8 @@ func decodeDenySnapshot(raw []byte) (denyResultSnapshot, error) {
 	return snapshot, nil
 }
 
-func denySnapshotsEqual(a, b denyResultSnapshot) bool {
+func denySnapshotL1WorldEqual(a, b denyResultSnapshot) bool {
 	return a.Timestamp == b.Timestamp &&
 		a.L1Inclusion == b.L1Inclusion &&
-		reflect.DeepEqual(a.L1Heads, b.L1Heads) &&
-		reflect.DeepEqual(a.L2Heads, b.L2Heads)
+		reflect.DeepEqual(a.L1Heads, b.L1Heads)
 }

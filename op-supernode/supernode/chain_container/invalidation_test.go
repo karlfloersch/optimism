@@ -613,17 +613,22 @@ func TestDenyList_PruneInconsistentWithSnapshot(t *testing.T) {
 		return raw
 	}
 
-	stale := makeSnapshot(1001, 5001, 101)
+	sameWorldDifferentL2 := makeSnapshot(1001, 5001, 101)
 	current := makeSnapshot(1001, 6001, 101)
+	staleDifferentWorld := makeSnapshot(1001, 5001, 102)
 	otherTS := makeSnapshot(1002, 7002, 102)
 
 	require.NoError(t, dl.AddEntry(5001, DenyEntry{
 		PayloadHash: common.HexToHash("0xaaaa"),
-		Result:      stale,
+		Result:      sameWorldDifferentL2,
 	}))
 	require.NoError(t, dl.AddEntry(6001, DenyEntry{
 		PayloadHash: common.HexToHash("0xbbbb"),
 		Result:      current,
+	}))
+	require.NoError(t, dl.AddEntry(6002, DenyEntry{
+		PayloadHash: common.HexToHash("0xbbbc"),
+		Result:      staleDifferentWorld,
 	}))
 	require.NoError(t, dl.AddEntry(7002, DenyEntry{
 		PayloadHash: common.HexToHash("0xcccc"),
@@ -636,11 +641,15 @@ func TestDenyList_PruneInconsistentWithSnapshot(t *testing.T) {
 
 	found, err := dl.Contains(5001, common.HexToHash("0xaaaa"))
 	require.NoError(t, err)
-	require.False(t, found, "stale frontier deny entry should be removed")
+	require.True(t, found, "same L1 frontier world with different L2 head should remain")
 
 	found, err = dl.Contains(6001, common.HexToHash("0xbbbb"))
 	require.NoError(t, err)
 	require.True(t, found, "matching frontier deny entry should remain")
+
+	found, err = dl.Contains(6002, common.HexToHash("0xbbbc"))
+	require.NoError(t, err)
+	require.False(t, found, "different L1 frontier world should be removed")
 
 	found, err = dl.Contains(7002, common.HexToHash("0xcccc"))
 	require.NoError(t, err)
@@ -658,7 +667,9 @@ func TestDenyList_Clear(t *testing.T) {
 	require.NoError(t, dl.AddEntry(10, DenyEntry{PayloadHash: common.HexToHash("0xaaaa")}))
 	require.NoError(t, dl.AddEntry(11, DenyEntry{PayloadHash: common.HexToHash("0xbbbb")}))
 
-	require.NoError(t, dl.Clear())
+	removed, err := dl.Clear()
+	require.NoError(t, err)
+	require.True(t, removed)
 
 	found, err := dl.Contains(10, common.HexToHash("0xaaaa"))
 	require.NoError(t, err)

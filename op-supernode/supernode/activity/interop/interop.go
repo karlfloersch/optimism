@@ -162,6 +162,10 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.started = true
 	i.mu.Unlock()
 
+	if err := i.scrubStateOnStart(); err != nil {
+		return err
+	}
+
 	for {
 		select {
 		case <-i.ctx.Done():

@@ -1146,6 +1146,66 @@ func TestRepairAcceptedState_ClearsDenyListWhenNoAcceptedPrefixRemains(t *testin
 	require.Equal(t, uint64(0), h.Mock(10).rewindCalls[0].timestamp)
 }
 
+func TestScrubStateOnStart_ReconcilesToVerifiedPrefix(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}
+			m.pruneDenyListRet = true
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	logsDB := &mockLogsDBForInterop{
+		firstSealedBlock: suptypes.BlockSeal{Number: 900, Hash: common.BigToHash(big.NewInt(900))},
+	}
+	h.interop.logsDBs[chainID] = logsDB
+
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   1000,
+		L1Inclusion: eth.BlockID{Number: 100, Hash: common.HexToHash("0x100")},
+		L1Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 100, Hash: common.HexToHash("0x100")},
+		},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			chainID: {Number: 1000, Hash: common.BigToHash(big.NewInt(1000))},
+		},
+	}))
+
+	require.NoError(t, h.interop.scrubStateOnStart())
+
+	require.Len(t, logsDB.rewindCalls, 1)
+	require.Equal(t, eth.BlockID{Number: 1000, Hash: common.BigToHash(big.NewInt(1000))}, logsDB.rewindCalls[0])
+	require.Equal(t, []uint64{1000}, h.Mock(10).pruneDenyListCalls)
+	require.Len(t, h.Mock(10).rewindCalls, 1)
+	require.Equal(t, uint64(1000), h.Mock(10).rewindCalls[0].timestamp)
+
+	h.interop.mu.RLock()
+	require.True(t, h.interop.validated.Valid)
+	require.Equal(t, uint64(1000), h.interop.validated.Timestamp)
+	h.interop.mu.RUnlock()
+}
+
+func TestScrubStateOnStart_ClearsStateWhenNoVerifiedPrefix(t *testing.T) {
+	h := newInteropTestHarness(t).
+		WithActivation(0).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 0, Hash: common.Hash{}}
+			m.clearDenyListRet = true
+		}).
+		Build()
+
+	chainID := h.Mock(10).id
+	logsDB := &mockLogsDBForInterop{}
+	h.interop.logsDBs[chainID] = logsDB
+
+	require.NoError(t, h.interop.scrubStateOnStart())
+
+	require.Equal(t, 1, h.Mock(10).clearDenyListCalls)
+	require.Equal(t, 1, logsDB.clearCalls)
+	require.Len(t, h.Mock(10).rewindCalls, 1)
+	require.Equal(t, uint64(0), h.Mock(10).rewindCalls[0].timestamp)
+}
+
 func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
 	h := newInteropTestHarness(t).
 		WithChain(10, func(m *mockChainContainer) {
@@ -1337,6 +1397,7 @@ type mockChainContainer struct {
 	pruneDenyListRet               bool
 	pruneDenyListErr               error
 	clearDenyListCalls             int
+	clearDenyListRet               bool
 	clearDenyListErr               error
 	pruneDenyListInconsistentCalls [][]byte
 	pruneDenyListInconsistentRet   bool
@@ -1471,11 +1532,11 @@ func (m *mockChainContainer) PruneDenyListAfter(timestamp uint64) (bool, error) 
 	m.pruneDenyListCalls = append(m.pruneDenyListCalls, timestamp)
 	return m.pruneDenyListRet, m.pruneDenyListErr
 }
-func (m *mockChainContainer) ClearDenyList() error {
+func (m *mockChainContainer) ClearDenyList() (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clearDenyListCalls++
-	return m.clearDenyListErr
+	return m.clearDenyListRet, m.clearDenyListErr
 }
 func (m *mockChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
 	m.mu.Lock()

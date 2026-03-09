@@ -104,8 +104,8 @@ func (m *mockCC) InvalidateBlock(ctx context.Context, height uint64, payloadHash
 func (m *mockCC) PruneDenyListAfter(timestamp uint64) (bool, error) {
 	return false, nil
 }
-func (m *mockCC) ClearDenyList() error {
-	return nil
+func (m *mockCC) ClearDenyList() (bool, error) {
+	return false, nil
 }
 func (m *mockCC) PruneDenyListInconsistentWith(snapshotMetadata []byte) (bool, error) {
 	return false, nil
