@@ -397,7 +397,16 @@ func (c *simpleChainContainer) PruneDenyListInconsistentWith(snapshotMetadata []
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
-	return c.denyList.PruneInconsistentWithSnapshot(snapshotMetadata)
+	removed, err := c.denyList.PruneInconsistentWithSnapshot(snapshotMetadata)
+	if err != nil {
+		return false, err
+	}
+	if removed {
+		c.log.Warn("pruned stale deny entries inconsistent with current frontier",
+			"chainID", c.chainID,
+		)
+	}
+	return removed, nil
 }
 
 func denyEntryDecisionTimestamp(entry DenyEntry) (uint64, error) {

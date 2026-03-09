@@ -57,6 +57,7 @@ type Interop struct {
 	validated  AcceptedBoundary
 	pending    []pendingReset
 	skipRepair AcceptedBoundary
+	skipFrontierRewind AcceptedBoundary
 
 	verifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
@@ -337,6 +338,7 @@ func (i *Interop) applyReset(reset pendingReset) error {
 		i.setValidatedBoundary(reset.timestamp, true)
 	}
 	i.skipRepair = AcceptedBoundary{Timestamp: reset.timestamp, Valid: true}
+	i.skipFrontierRewind = AcceptedBoundary{}
 	return nil
 }
 
@@ -390,6 +392,13 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 		return Result{}, RoundWait, nil
 	}
 
+	i.mu.Lock()
+	if i.skipFrontierRewind.Valid && i.skipFrontierRewind.Timestamp != ts {
+		i.skipFrontierRewind = AcceptedBoundary{}
+	}
+	frontierRewound := i.skipFrontierRewind.Valid && i.skipFrontierRewind.Timestamp == ts
+	i.mu.Unlock()
+
 	// 1: check if all chains are ready to process the next timestamp.
 	// if all chains are ready, we can proceed to download the logs
 	blocksAtTimestamp, err := i.checkChainsReady(ts)
@@ -409,11 +418,41 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 	if err != nil {
 		return Result{}, RoundWait, err
 	}
-	reconciled, err := i.reconcileFrontierDenylist(frontier)
+	affectedChains, reconciled, err := i.reconcileFrontierDenylist(frontier)
 	if err != nil {
 		return Result{}, RoundWait, err
 	}
 	if reconciled {
+		i.log.Warn("pruned stale frontier deny entries",
+			"timestamp", ts,
+			"affectedChains", affectedChains,
+			"frontierL1Heads", frontier.L1Heads,
+			"frontierL2Heads", frontier.L2Heads,
+			"frontierRewound", frontierRewound,
+		)
+		if !frontierRewound && len(affectedChains) > 0 {
+			resetTS := i.activationTimestamp
+			if initialized {
+				resetTS = accepted.Timestamp
+			}
+			i.log.Warn("rewinding affected chains after frontier deny prune",
+				"timestamp", ts,
+				"resetTimestamp", resetTS,
+				"affectedChains", affectedChains,
+			)
+			for _, chainID := range affectedChains {
+				chain, ok := i.chains[chainID]
+				if !ok {
+					continue
+				}
+				if err := chain.RewindEngine(i.ctx, resetTS, eth.BlockRef{}); err != nil {
+					return Result{}, RoundWait, err
+				}
+			}
+			i.mu.Lock()
+			i.skipFrontierRewind = AcceptedBoundary{Timestamp: ts, Valid: true}
+			i.mu.Unlock()
+		}
 		return Result{}, RoundWait, nil
 	}
 	consistent, err := i.checker.FrontierConsistent(i.ctx, accepted, frontier)
@@ -421,7 +460,14 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 		return Result{}, RoundWait, err
 	}
 	if !consistent {
-		i.log.Info("frontier inconsistent, waiting", "timestamp", ts)
+		i.log.Info("frontier inconsistent, waiting",
+			"timestamp", ts,
+			"acceptedTimestamp", accepted.Timestamp,
+			"acceptedL1Heads", accepted.L1Heads,
+			"acceptedL2Heads", accepted.L2Heads,
+			"frontierL1Heads", frontier.L1Heads,
+			"frontierL2Heads", frontier.L2Heads,
+		)
 		return Result{}, RoundWait, nil
 	}
 
@@ -472,23 +518,31 @@ func (i *Interop) progressInterop() (Result, RoundOutcome, error) {
 	return result, RoundCommitted, nil
 }
 
-func (i *Interop) reconcileFrontierDenylist(frontier VerifiedResult) (bool, error) {
+func (i *Interop) reconcileFrontierDenylist(frontier VerifiedResult) ([]eth.ChainID, bool, error) {
 	frontierMetadata, err := json.Marshal(frontier)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 
 	var prunedAny bool
-	for _, chain := range i.chains {
+	affectedChains := make([]eth.ChainID, 0, len(i.chains))
+	for chainID, chain := range i.chains {
 		removed, err := chain.PruneDenyListInconsistentWith(frontierMetadata)
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
 		if removed {
+			i.log.Warn("chain denylist pruned as stale for frontier",
+				"chainID", chainID,
+				"timestamp", frontier.Timestamp,
+				"frontierL1Heads", frontier.L1Heads,
+				"frontierL2Heads", frontier.L2Heads,
+			)
 			prunedAny = true
+			affectedChains = append(affectedChains, chainID)
 		}
 	}
-	return prunedAny, nil
+	return affectedChains, prunedAny, nil
 }
 
 func (i *Interop) handleResult(result Result) error {

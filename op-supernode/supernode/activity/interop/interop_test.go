@@ -1248,8 +1248,6 @@ func TestProgressInterop_PrunesStaleFrontierDeniesBeforeRetry(t *testing.T) {
 // This test currently fails: progressInterop() prunes stale frontier deny
 // entries and returns RoundWait, but it does not request a chain rewind.
 func TestProgressInterop_PrunesStaleFrontierDeniesAndRewindsAffectedChains(t *testing.T) {
-	t.Skip("exploratory stronger requirement; acceptance tests are being used to determine whether this rewind is necessary in the integrated system")
-
 	h := newInteropTestHarness(t).
 		WithChain(10, func(m *mockChainContainer) {
 			m.currentL1 = eth.BlockRef{Number: 100, Hash: common.HexToHash("0x100")}

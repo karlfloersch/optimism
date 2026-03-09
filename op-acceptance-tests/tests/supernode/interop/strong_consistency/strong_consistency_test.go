@@ -18,7 +18,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/txplan"
 	"github.com/ethereum-optimism/optimism/op-test-sequencer/sequencer/seqtypes"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 func nextAndResetTestSequencer(t devtest.T, ca apis.TestSequencerControlAPI) {
@@ -74,14 +73,13 @@ func TestSupernodeStrongConsistency_L1Reorg_RepairsAndRecovers(gt *testing.T) {
 		sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
 	})
 
-	// Rewind the L1 EL to the parent of the accepted dependency, then let
-	// FakePoS rebuild forward on the new canonical branch.
-	require.NoError(t, sys.L1EL.EthClient().RPC().CallContext(
-		t.Ctx(),
-		nil,
-		"debug_setHead",
-		hexutil.Uint64(divergence.Number-1),
-	))
+	// Rebuild L1 from the parent of the accepted dependency using the test
+	// sequencer while FakePoS is stopped, then let FakePoS continue on the new
+	// canonical branch.
+	sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), divergence.ParentHash)
+	for range 3 {
+		sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), common.Hash{})
+	}
 	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
 	sys.L1EL.ReorgTriggered(divergence, 10)
 
@@ -234,12 +232,10 @@ func TestSupernodeStrongConsistency_ExploresStaleFrontierDenyReplacement(gt *tes
 		sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
 	})
 
-	require.NoError(t, sys.L1EL.EthClient().RPC().CallContext(
-		ctx,
-		nil,
-		"debug_setHead",
-		hexutil.Uint64(divergence.Number-1),
-	))
+	sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), divergence.ParentHash)
+	for range 3 {
+		sys.TestSequencer.SequenceBlock(t, sys.L1Network.ChainID(), common.Hash{})
+	}
 	sys.ControlPlane.FakePoSState(l1CL.ID(), stack.Start)
 	sys.L1EL.ReorgTriggered(divergence, 10)
 
