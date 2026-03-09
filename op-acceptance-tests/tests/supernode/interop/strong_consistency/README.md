@@ -12,6 +12,63 @@ In practice, that means:
 - if the next candidate timestamp is inconsistent across chains, the supernode must wait rather than advancing
 - stale denylist decisions from discarded state must not survive and poison later derivation
 
+## Intuition
+
+The supernode is not trying to make the managed op-nodes perfectly synchronized at every instant.
+
+Instead, it maintains its own validated view **over** the op-nodes:
+
+- it reads a snapshot of what each chain currently thinks is safe
+- it decides whether that snapshot is a world it trusts
+- it only exposes / commits snapshots that survive those checks
+- on every loop, it re-checks the latest accepted snapshot against the current underlying chain state
+
+That gives the system an eventually consistent shape:
+
+- if the op-nodes reorg while interop is running, the next loop sees the drift
+- if the drift changed already-accepted state, interop rewinds its accepted prefix
+- if the drift only changed the next candidate frontier, interop waits and retries
+- if a stale deny decision previously caused a chain rewrite, repairing or pruning that deny decision also unwinds that write
+
+So the core idea is:
+
+- the supernode keeps a validated snapshot view over the chains
+- the chains may move underneath it
+- but every time interop re-enters the loop, it re-proves the latest accepted view before building on top of it
+
+## Mental Model
+
+```text
+underlying op-nodes
+    |
+    |  current local-safe / optimistic state
+    v
+collect snapshot
+    |
+    +--> does latest accepted snapshot still match?
+    |       |
+    |       +--> no: rewind accepted prefix, logs, and stale deny decisions
+    |       |
+    |       +--> yes: continue
+    |
+    +--> is next frontier coherent and canonical?
+            |
+            +--> no: wait
+            |
+            +--> yes: verify messages / cycles
+                        |
+                        +--> valid: commit new accepted snapshot
+                        |
+                        +--> invalid: deny bad payloads, possibly rewind affected chain
+```
+
+The important asymmetry is:
+
+- **reads** are from the supernode's validated snapshot view
+- **writes** to chains only happen when invalidation causes a rewind/replacement
+
+Because that write path is narrow, the supernode can also unwind it when the accepted world changes.
+
 ## How It Works
 
 The implementation uses three main mechanisms.
