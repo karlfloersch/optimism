@@ -1547,6 +1547,46 @@ func TestReset(t *testing.T) {
 	}
 }
 
+func TestReset_QueuesWhileStarted(t *testing.T) {
+	h := newInteropTestHarness(t)
+	h.WithChain(10, func(m *mockChainContainer) {
+		m.blockAtTimestamp = eth.L2BlockRef{Number: 99}
+	}).Build()
+
+	mockLogsDB := &mockLogsDBForInterop{}
+	mock := h.Mock(10)
+	h.interop.logsDBs[mock.id] = mockLogsDB
+	h.interop.started = true
+	h.interop.currentL1 = eth.BlockID{Number: 500, Hash: common.HexToHash("0xL1")}
+
+	for ts := uint64(98); ts <= 102; ts++ {
+		err := h.interop.verifiedDB.Commit(VerifiedResult{
+			Timestamp:   ts,
+			L1Inclusion: eth.BlockID{Number: ts},
+			L2Heads:     map[eth.ChainID]eth.BlockID{mock.id: {Number: ts}},
+		})
+		require.NoError(t, err)
+	}
+
+	invalidatedBlock := eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xPARENT")}
+	h.interop.Reset(mock.id, 100, invalidatedBlock)
+
+	require.Len(t, h.interop.pendingResets, 1)
+	require.Empty(t, mockLogsDB.rewindCalls)
+	has, err := h.interop.verifiedDB.Has(102)
+	require.NoError(t, err)
+	require.True(t, has)
+	require.Equal(t, uint64(500), h.interop.currentL1.Number)
+
+	require.NoError(t, h.interop.applyPendingResets())
+	require.Empty(t, h.interop.pendingResets)
+	require.Len(t, mockLogsDB.rewindCalls, 1)
+	has, err = h.interop.verifiedDB.Has(102)
+	require.NoError(t, err)
+	require.False(t, has)
+	require.Equal(t, eth.BlockID{}, h.interop.currentL1)
+}
+
 // =============================================================================
 // TestVerifiedBlockAtL1
 // =============================================================================

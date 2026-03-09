@@ -43,8 +43,9 @@ type Interop struct {
 	activationTimestamp uint64
 	dataDir             string
 
-	verifiedDB *VerifiedDB
-	logsDBs    map[eth.ChainID]LogsDB
+	verifiedDB    *VerifiedDB
+	logsDBs       map[eth.ChainID]LogsDB
+	pendingResets []queuedReset
 
 	mu      sync.RWMutex
 	ctx     context.Context
@@ -64,6 +65,12 @@ type Interop struct {
 	// When non-zero, progressInterop will return early without processing
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
+}
+
+type queuedReset struct {
+	chainID          eth.ChainID
+	timestamp        uint64
+	invalidatedBlock eth.BlockRef
 }
 
 func (i *Interop) Name() string {
@@ -186,6 +193,10 @@ func (i *Interop) Resume() {
 // progressAndRecord attempts to progress interop and record the result.
 // Returns (madeProgress, error) where madeProgress indicates if we advanced the verified timestamp.
 func (i *Interop) progressAndRecord() (bool, error) {
+	if err := i.applyPendingResets(); err != nil {
+		return false, err
+	}
+
 	// Check the L1s of each chain prior to performing interop
 	localCurrentL1, err := i.collectCurrentL1()
 	if err != nil {
@@ -507,14 +518,42 @@ func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock 
 		"invalidatedBlock", invalidatedBlock,
 	)
 
-	db, dbOk := i.logsDBs[chainID]
+	i.pendingResets = append(i.pendingResets, queuedReset{
+		chainID:          chainID,
+		timestamp:        timestamp,
+		invalidatedBlock: invalidatedBlock,
+	})
+	if !i.started {
+		i.applyPendingResetsLocked()
+	}
+}
+
+func (i *Interop) applyPendingResets() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.applyPendingResetsLocked()
+	return nil
+}
+
+func (i *Interop) applyPendingResetsLocked() {
+	if len(i.pendingResets) == 0 {
+		return
+	}
+	for _, reset := range i.pendingResets {
+		i.applyResetLocked(reset)
+	}
+	i.pendingResets = nil
+}
+
+func (i *Interop) applyResetLocked(reset queuedReset) {
+	db, dbOk := i.logsDBs[reset.chainID]
 	if !dbOk {
-		i.log.Error("logsDB not found for reset", "chainID", chainID)
+		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)
 		return
 	}
 
-	i.resetLogsDB(chainID, db, invalidatedBlock)
-	i.resetVerifiedDB(timestamp)
+	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
+	i.resetVerifiedDB(reset.timestamp)
 
 	// Reset the currentL1 to force re-evaluation
 	i.currentL1 = eth.BlockID{}
