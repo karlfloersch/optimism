@@ -120,7 +120,7 @@ func (h *interopTestHarness) seedAcceptedHistory(results ...VerifiedResult) {
 		state.AcceptedHistory = make(map[uint64]interopengine.AcceptedSnapshot, len(results))
 	}
 	for _, result := range results {
-		snapshot := acceptedSnapshotFromVerifiedResult(result)
+		snapshot := acceptedSnapshotFromVerifiedResultForTest(result)
 		state.AcceptedHistory[result.Timestamp] = snapshot
 		snapshotCopy := snapshot
 		state.Accepted = &snapshotCopy
@@ -128,6 +128,19 @@ func (h *interopTestHarness) seedAcceptedHistory(results ...VerifiedResult) {
 		state.LastValidatedTS = &ts
 	}
 	require.NoError(h.t, h.interop.stateStore.Commit(state))
+}
+
+func acceptedSnapshotFromVerifiedResultForTest(result VerifiedResult) interopengine.AcceptedSnapshot {
+	l1Heads := make(map[eth.ChainID]eth.BlockID, len(result.L2Heads))
+	for chainID := range result.L2Heads {
+		l1Heads[chainID] = result.L1Inclusion
+	}
+	return interopengine.AcceptedSnapshot{
+		Timestamp:   result.Timestamp,
+		L1Inclusion: result.L1Inclusion,
+		L1Heads:     l1Heads,
+		L2Heads:     result.L2Heads,
+	}
 }
 
 // =============================================================================
@@ -1036,7 +1049,7 @@ func TestReset(t *testing.T) {
 			},
 		},
 		{
-			name: "rewinds verifiedDB",
+			name: "rewinds accepted state",
 			setup: func(h *interopTestHarness) (*interopTestHarness, *mockLogsDBForInterop) {
 				h.WithChain(10, func(m *mockChainContainer) {
 					m.blockAtTimestamp = eth.L2BlockRef{Number: 99}

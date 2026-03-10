@@ -88,12 +88,6 @@ func New(
 	chains map[eth.ChainID]cc.ChainContainer,
 	dataDir string,
 ) *Interop {
-	verifiedDB, err := OpenVerifiedDB(dataDir)
-	if err != nil {
-		log.Error("failed to open verified DB", "err", err)
-		return nil
-	}
-
 	// Initialize logsDBs for each chain
 	logsDBs := make(map[eth.ChainID]LogsDB)
 	for chainID := range chains {
@@ -104,7 +98,6 @@ func New(
 			for _, db := range logsDBs {
 				_ = db.Close()
 			}
-			_ = verifiedDB.Close()
 			return nil
 		}
 		logsDBs[chainID] = logsDB
@@ -115,7 +108,6 @@ func New(
 		for _, db := range logsDBs {
 			_ = db.Close()
 		}
-		_ = verifiedDB.Close()
 		log.Error("failed to open interop state store", "err", err)
 		return nil
 	}
@@ -126,7 +118,6 @@ func New(
 			_ = db.Close()
 		}
 		_ = stateStore.Close()
-		_ = verifiedDB.Close()
 		log.Error("failed to initialize interop engine", "err", err)
 		return nil
 	}
@@ -144,23 +135,6 @@ func New(
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
-	if err := importVerifiedDBIfNeeded(activationTimestamp, verifiedDB, stateStore); err != nil {
-		for _, db := range logsDBs {
-			_ = db.Close()
-		}
-		_ = stateStore.Close()
-		_ = verifiedDB.Close()
-		log.Error("failed to import legacy interop state", "err", err)
-		return nil
-	}
-	if err := verifiedDB.Close(); err != nil {
-		for _, db := range logsDBs {
-			_ = db.Close()
-		}
-		_ = stateStore.Close()
-		log.Error("failed to close legacy verified DB after import", "err", err)
-		return nil
-	}
 	i.controller = interopcontroller.New(
 		activationTimestamp,
 		engine,
