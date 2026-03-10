@@ -537,7 +537,7 @@ func TestLoadLogs_ParentHashMismatch(t *testing.T) {
 	}
 
 	chains := map[eth.ChainID]cc.ChainContainer{chainID: mockChain}
-	interop := New(gethlog.New(), 1000, chains, dataDir)
+	interop := New(gethlog.New(), 1000, chains, dataDir, nil)
 	require.NotNil(t, interop)
 	interop.ctx = context.Background()
 	defer func() { _ = interop.Stop(context.Background()) }()
@@ -678,8 +678,14 @@ func (m *statefulMockChainContainer) BlockTime() uint64 { return 1 }
 func (m *statefulMockChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
 	return nil
 }
-func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
 	return false, nil
+}
+func (m *statefulMockChainContainer) PruneDeniedAtOrAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *statefulMockChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
+	return nil, nil
 }
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
@@ -687,3 +693,145 @@ func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.
 func (m *statefulMockChainContainer) SetResetCallback(cb cc.ResetCallback) {}
 
 var _ cc.ChainContainer = (*statefulMockChainContainer)(nil)
+
+// =============================================================================
+// TestLoadLogs_StaleLogsDB_SameHeightWrongHash
+// =============================================================================
+
+// TestLoadLogs_StaleLogsDB_SameHeightWrongHash verifies that when the logsDB
+// already has a block at the same height but with a different hash (reorg),
+// loadLogs returns ErrStaleLogsDB.
+func TestLoadLogs_StaleLogsDB_SameHeightWrongHash(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+
+	chainID := eth.ChainIDFromUInt64(10)
+	blockHashA := common.Hash{0x01}
+	blockHashB := common.Hash{0x02} // different hash at same height
+
+	callCount := 0
+	mockChain := &statefulMockChainContainer{
+		id: chainID,
+		blockAtTimestampFn: func(ts uint64) (eth.L2BlockRef, error) {
+			callCount++
+			if callCount == 1 {
+				// First call: return block A at height 100
+				return eth.L2BlockRef{
+					Hash:   blockHashA,
+					Number: 100,
+					Time:   1000,
+				}, nil
+			}
+			// Second call: return block B at the SAME height 100 (reorg)
+			return eth.L2BlockRef{
+				Hash:   blockHashB,
+				Number: 100,
+				Time:   1000,
+			}, nil
+		},
+		fetchReceiptsFn: func(blockID eth.BlockID) (eth.BlockInfo, types.Receipts, error) {
+			return &testBlockInfo{
+				hash:       blockID.Hash,
+				parentHash: common.Hash{},
+				number:     blockID.Number,
+				timestamp:  1000,
+			}, types.Receipts{}, nil
+		},
+	}
+
+	chains := map[eth.ChainID]cc.ChainContainer{chainID: mockChain}
+	interop := New(gethlog.New(), 1000, chains, dataDir, nil)
+	require.NotNil(t, interop)
+	interop.ctx = context.Background()
+	defer func() { _ = interop.Stop(context.Background()) }()
+
+	// Load logs for activation timestamp — writes block A at height 100
+	err := interop.loadLogs(1000)
+	require.NoError(t, err)
+
+	// Verify block A is in the logsDB
+	latestBlock, ok := interop.logsDBs[chainID].LatestSealedBlock()
+	require.True(t, ok)
+	require.Equal(t, blockHashA, latestBlock.Hash)
+	require.Equal(t, uint64(100), latestBlock.Number)
+
+	// Load logs again — mock now returns block B at same height 100
+	err = interop.loadLogs(1000)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStaleLogsDB)
+}
+
+// =============================================================================
+// TestLoadLogs_DBAhead_SkipsSafely
+// =============================================================================
+
+// TestLoadLogs_DBAhead_SkipsSafely verifies that when the logsDB is ahead of
+// the requested timestamp but has the correct block, loadLogs skips safely
+// without error.
+func TestLoadLogs_DBAhead_SkipsSafely(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+
+	chainID := eth.ChainIDFromUInt64(10)
+	blockHashT := common.Hash{0x01}
+	blockHashT1 := common.Hash{0x02}
+
+	callCount := 0
+	mockChain := &statefulMockChainContainer{
+		id: chainID,
+		blockAtTimestampFn: func(ts uint64) (eth.L2BlockRef, error) {
+			callCount++
+			if ts == 1000 {
+				return eth.L2BlockRef{
+					Hash:   blockHashT,
+					Number: 100,
+					Time:   1000,
+				}, nil
+			}
+			// ts == 1001
+			return eth.L2BlockRef{
+				Hash:   blockHashT1,
+				Number: 101,
+				Time:   1001,
+			}, nil
+		},
+		fetchReceiptsFn: func(blockID eth.BlockID) (eth.BlockInfo, types.Receipts, error) {
+			if blockID.Number == 100 {
+				return &testBlockInfo{
+					hash:       blockHashT,
+					parentHash: common.Hash{},
+					number:     100,
+					timestamp:  1000,
+				}, types.Receipts{}, nil
+			}
+			return &testBlockInfo{
+				hash:       blockHashT1,
+				parentHash: blockHashT, // correct parent
+				number:     101,
+				timestamp:  1001,
+			}, types.Receipts{}, nil
+		},
+	}
+
+	chains := map[eth.ChainID]cc.ChainContainer{chainID: mockChain}
+	interop := New(gethlog.New(), 1000, chains, dataDir, nil)
+	require.NotNil(t, interop)
+	interop.ctx = context.Background()
+	defer func() { _ = interop.Stop(context.Background()) }()
+
+	// Load logs for T=1000 and T=1001
+	err := interop.loadLogs(1000)
+	require.NoError(t, err)
+
+	err = interop.loadLogs(1001)
+	require.NoError(t, err)
+
+	// Verify DB is at height 101
+	latestBlock, ok := interop.logsDBs[chainID].LatestSealedBlock()
+	require.True(t, ok)
+	require.Equal(t, uint64(101), latestBlock.Number)
+
+	// Now call loadLogs for T=1000 again — DB is ahead but has correct block at height 100
+	err = interop.loadLogs(1000)
+	require.NoError(t, err, "loadLogs should skip safely when DB is ahead with correct block")
+}

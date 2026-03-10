@@ -89,6 +89,11 @@ var (
 	// ErrParentHashMismatch is returned when the block's parent hash does not match
 	// the hash of the last sealed block in the logsDB.
 	ErrParentHashMismatch = errors.New("block parent hash does not match logsDB")
+
+	// ErrStaleLogsDB is returned when the logsDB has data for a different block
+	// at the same height (e.g., after a chain reorg). The caller should repair
+	// the logsDB by trimming to the verified frontier and retrying.
+	ErrStaleLogsDB = errors.New("logsDB has stale block data from a reorg")
 )
 
 // loadLogs loads and persists logs for the given timestamp for all chains.
@@ -119,9 +124,23 @@ func (i *Interop) loadLogs(ts uint64) error {
 
 		// if the database has blocks, check if we can skip or need to verify continuity
 		if hasBlocks {
-			// if the latest block is the same or beyond the block we are loading, skip loading
-			if latestBlock.Number >= block.Number {
-				continue
+			if latestBlock.Number > block.Number {
+				// logsDB is ahead — check the sealed block at the expected height
+				seal, err := db.FindSealedBlock(block.Number)
+				if err == nil && seal.Hash == block.ID().Hash {
+					continue // correct block already sealed at this height
+				}
+				// Either can't find the block or hash mismatch — stale data
+				return fmt.Errorf("chain %s: logsDB has stale data at height %d: %w",
+					chainID, block.Number, ErrStaleLogsDB)
+			}
+			if latestBlock.Number == block.Number {
+				if latestBlock.Hash == block.ID().Hash {
+					continue // already loaded this exact block
+				}
+				// Same height, different hash — reorg
+				return fmt.Errorf("chain %s: logsDB has block %s at height %d, expected %s: %w",
+					chainID, latestBlock.Hash, latestBlock.Number, block.ID().Hash, ErrStaleLogsDB)
 			}
 
 			// Verify chain continuity: block's parent must match the last sealed block

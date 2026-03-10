@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
+
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -24,9 +27,20 @@ var (
 // bucketName is the name of the bbolt bucket used to store verified results.
 var bucketName = []byte("verified")
 
+var pendingBucketName = []byte("pending_invalidations")
+var pendingKey = []byte("pending")
+
+// PendingInvalidation records a chain invalidation that needs to be executed.
+type PendingInvalidation struct {
+	ChainID   eth.ChainID `json:"chainID"`
+	BlockID   eth.BlockID `json:"blockID"`
+	Timestamp uint64      `json:"timestamp"` // the interop decision timestamp
+}
+
 // VerifiedDB provides persistence for verified timestamps using bbolt.
 type VerifiedDB struct {
 	db            *bolt.DB
+	mu            sync.RWMutex
 	lastTimestamp uint64
 	initialized   bool
 }
@@ -39,9 +53,12 @@ func OpenVerifiedDB(dataDir string) (*VerifiedDB, error) {
 		return nil, fmt.Errorf("failed to open bbolt at %s: %w", dbPath, err)
 	}
 
-	// Ensure the bucket exists
+	// Ensure the buckets exist
 	err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(bucketName)
+		if _, err := tx.CreateBucketIfNotExists(bucketName); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(pendingBucketName)
 		return err
 	})
 	if err != nil {
@@ -63,7 +80,10 @@ func OpenVerifiedDB(dataDir string) (*VerifiedDB, error) {
 }
 
 // initLastTimestamp scans the database to find the highest committed timestamp.
+// Resets in-memory state first so it's correct even after a full rewind to empty.
 func (v *VerifiedDB) initLastTimestamp() error {
+	v.lastTimestamp = 0
+	v.initialized = false
 	return v.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		if b == nil {
@@ -92,6 +112,9 @@ func timestampToKey(ts uint64) []byte {
 // Commit stores a verified result at the given timestamp.
 // Timestamps must be committed sequentially with no gaps.
 func (v *VerifiedDB) Commit(result VerifiedResult) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	ts := result.Timestamp
 
 	// Check for sequential commitment
@@ -129,6 +152,9 @@ func (v *VerifiedDB) Commit(result VerifiedResult) error {
 
 // Get retrieves the verified result at the given timestamp.
 func (v *VerifiedDB) Get(ts uint64) (VerifiedResult, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
 	key := timestampToKey(ts)
 	var value []byte
 
@@ -160,6 +186,9 @@ func (v *VerifiedDB) Get(ts uint64) (VerifiedResult, error) {
 
 // Has returns whether a timestamp has been verified.
 func (v *VerifiedDB) Has(ts uint64) (bool, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
 	key := timestampToKey(ts)
 	var found bool
 
@@ -178,6 +207,8 @@ func (v *VerifiedDB) Has(ts uint64) (bool, error) {
 // LastTimestamp returns the most recently committed timestamp.
 // Returns 0 and false if no timestamps have been committed.
 func (v *VerifiedDB) LastTimestamp() (uint64, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
 	return v.lastTimestamp, v.initialized
 }
 
@@ -189,6 +220,9 @@ func (v *VerifiedDB) RewindAfter(timestamp uint64) (bool, error) {
 // Rewind removes all verified results at or after the given timestamp.
 // Returns true if any results were deleted, false otherwise.
 func (v *VerifiedDB) Rewind(timestamp uint64) (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	var deleted bool
 
 	err := v.db.Update(func(tx *bolt.Tx) error {
@@ -211,25 +245,59 @@ func (v *VerifiedDB) Rewind(timestamp uint64) (bool, error) {
 
 	// Update state
 	if deleted {
-		// Reinitialize lastTimestamp from the database
 		if err := v.initLastTimestamp(); err != nil {
 			return deleted, fmt.Errorf("failed to reinitialize lastTimestamp after rewind: %w", err)
-		}
-		// If no timestamps remain, reset initialized state
-		if err := v.db.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket(bucketName)
-			c := b.Cursor()
-			if k, _ := c.First(); k == nil {
-				v.initialized = false
-				v.lastTimestamp = 0
-			}
-			return nil
-		}); err != nil {
-			return deleted, err
 		}
 	}
 
 	return deleted, nil
+}
+
+// SetPendingInvalidations persists pending invalidations as a write-ahead log.
+// Must be called BEFORE executing the invalidations for crash safety.
+func (v *VerifiedDB) SetPendingInvalidations(pending []PendingInvalidation) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	value, err := json.Marshal(pending)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pending invalidations: %w", err)
+	}
+	return v.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pendingBucketName)
+		return b.Put(pendingKey, value)
+	})
+}
+
+// GetPendingInvalidations retrieves any pending invalidations from the WAL.
+// Returns nil if no pending work exists.
+func (v *VerifiedDB) GetPendingInvalidations() ([]PendingInvalidation, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	var pending []PendingInvalidation
+	err := v.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pendingBucketName)
+		val := b.Get(pendingKey)
+		if val == nil {
+			return nil
+		}
+		data := make([]byte, len(val))
+		copy(data, val)
+		return json.Unmarshal(data, &pending)
+	})
+	return pending, err
+}
+
+// ClearPendingInvalidations removes the WAL entry after invalidations are executed.
+func (v *VerifiedDB) ClearPendingInvalidations() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	return v.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pendingBucketName)
+		return b.Delete(pendingKey)
+	})
 }
 
 // Close closes the database.
