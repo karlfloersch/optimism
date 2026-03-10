@@ -332,3 +332,67 @@ func TestVerifiedDB_RewindTo(t *testing.T) {
 		require.Equal(t, common.HexToHash("0xNEW"), result.L1Inclusion.Hash)
 	})
 }
+
+func TestVerifiedDB_PendingInvalidations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set get clear round trip", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		vdb, err := OpenVerifiedDB(dir)
+		require.NoError(t, err)
+		defer vdb.Close()
+
+		// Initially empty
+		pending, err := vdb.GetPendingInvalidations()
+		require.NoError(t, err)
+		require.Nil(t, pending)
+
+		// Set pending
+		invalidations := []PendingInvalidation{
+			{ChainID: eth.ChainIDFromUInt64(1), BlockID: eth.BlockID{Hash: common.HexToHash("0xaaaa"), Number: 100}, Timestamp: 42},
+			{ChainID: eth.ChainIDFromUInt64(2), BlockID: eth.BlockID{Hash: common.HexToHash("0xbbbb"), Number: 200}, Timestamp: 42},
+		}
+		require.NoError(t, vdb.SetPendingInvalidations(invalidations))
+
+		// Get pending
+		got, err := vdb.GetPendingInvalidations()
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, invalidations[0].ChainID, got[0].ChainID)
+		require.Equal(t, invalidations[0].BlockID, got[0].BlockID)
+		require.Equal(t, invalidations[1].ChainID, got[1].ChainID)
+
+		// Clear
+		require.NoError(t, vdb.ClearPendingInvalidations())
+		got, err = vdb.GetPendingInvalidations()
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("survives close and reopen", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+
+		// Write pending and close
+		vdb, err := OpenVerifiedDB(dir)
+		require.NoError(t, err)
+		invalidations := []PendingInvalidation{
+			{ChainID: eth.ChainIDFromUInt64(1), BlockID: eth.BlockID{Hash: common.HexToHash("0xdead"), Number: 50}, Timestamp: 99},
+		}
+		require.NoError(t, vdb.SetPendingInvalidations(invalidations))
+		require.NoError(t, vdb.Close())
+
+		// Reopen and verify
+		vdb2, err := OpenVerifiedDB(dir)
+		require.NoError(t, err)
+		defer vdb2.Close()
+
+		got, err := vdb2.GetPendingInvalidations()
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		require.Equal(t, invalidations[0].ChainID, got[0].ChainID)
+		require.Equal(t, invalidations[0].BlockID, got[0].BlockID)
+		require.Equal(t, invalidations[0].Timestamp, got[0].Timestamp)
+	})
+}

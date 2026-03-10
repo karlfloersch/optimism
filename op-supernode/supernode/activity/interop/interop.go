@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,50 @@ func init() {
 	flags.RegisterActivityFlags(InteropActivationTimestampFlag)
 }
 
+// chainsReadyResult holds the parallel query results from checkChainsReady.
+type chainsReadyResult struct {
+	blocks  map[eth.ChainID]eth.BlockID // L2 blocks at the timestamp
+	l1Heads map[eth.ChainID]eth.BlockID // per-chain L1 inclusion heads
+}
+
+// RoundObservation is a consistent snapshot of the current round's state,
+// captured upfront so the decision function operates on immutable data.
+type RoundObservation struct {
+	LastVerifiedTS     *uint64
+	LastVerified       *VerifiedResult
+	AcceptedStillValid bool
+	NextTimestamp      uint64
+	ChainsReady        bool
+	BlocksAtTS         map[eth.ChainID]eth.BlockID
+	L1Heads            map[eth.ChainID]eth.BlockID
+	L1Consistent       bool
+	Paused             bool
+}
+
+// Decision represents the outcome of the pure decision function.
+type Decision int
+
+const (
+	DecisionWait       Decision = iota
+	DecisionAdvance
+	DecisionInvalidate
+	DecisionRewind
+	DecisionConflict
+)
+
+// StepOutput combines a decision with the verification result (if any).
+type StepOutput struct {
+	Decision Decision
+	Result   Result
+}
+
+// queuedReset represents a reset that will be applied at the start of the next cycle.
+type queuedReset struct {
+	chainID          eth.ChainID
+	timestamp        uint64
+	invalidatedBlock eth.BlockRef
+}
+
 // Interop is a VerificationActivity that can also run background work as a RunnableActivity.
 type Interop struct {
 	log                 log.Logger
@@ -56,14 +101,18 @@ type Interop struct {
 	verifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
 	// cycleVerifyFn handles same-timestamp cycle verification.
-	// It is called after verifyFn in progressInterop, and its results are merged.
+	// It is called after verifyFn, and its results are merged.
 	// Set to verifyCycleMessages by default in New().
 	cycleVerifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
 	// pauseAtTimestamp is used for integration test control only.
-	// When non-zero, progressInterop will return early without processing
+	// When non-zero, the activity will return early without processing
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
+
+	l1Source      l1ByNumberSource
+	l1Checker     *byNumberConsistencyChecker
+	pendingResets []queuedReset
 }
 
 func (i *Interop) Name() string {
@@ -76,6 +125,7 @@ func New(
 	activationTimestamp uint64,
 	chains map[eth.ChainID]cc.ChainContainer,
 	dataDir string,
+	l1Source l1ByNumberSource,
 ) *Interop {
 	verifiedDB, err := OpenVerifiedDB(dataDir)
 	if err != nil {
@@ -111,6 +161,8 @@ func New(
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
+	i.l1Source = l1Source
+	i.l1Checker = newByNumberConsistencyChecker(l1Source)
 	return i
 }
 
@@ -125,6 +177,15 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.ctx, i.cancel = context.WithCancel(ctx)
 	i.started = true
 	i.mu.Unlock()
+
+	// Startup recovery: prune and trim stale state first, then replay the
+	// invalidation WAL. This order ensures replayed deny entries aren't
+	// immediately pruned by the stale-entry cleanup.
+	i.pruneStaleDenyListEntries()
+	i.trimLogsDBToVerifiedFrontier()
+	if err := i.replayPendingInvalidations(); err != nil {
+		i.log.Error("failed to replay pending invalidations", "err", err)
+	}
 
 	for {
 		select {
@@ -167,7 +228,7 @@ func (i *Interop) Stop(ctx context.Context) error {
 }
 
 // PauseAt sets a timestamp at which the interop activity should pause.
-// When progressInterop encounters this timestamp or any later timestamp, it returns early without processing.
+// When the activity encounters this timestamp or any later timestamp, it returns early without processing.
 // Uses >= check so that if the activity is already beyond the pause point, it will still stop.
 // This function is for integration test control only.
 // Pass 0 to clear the pause (equivalent to calling Resume).
@@ -183,52 +244,419 @@ func (i *Interop) Resume() {
 	i.log.Info("interop pause cleared")
 }
 
+// Decide is a pure function that determines the next action based on observations
+// and an optional verification result. No side effects, no I/O.
+func Decide(obs RoundObservation, verified *Result) StepOutput {
+	if obs.LastVerifiedTS != nil && !obs.AcceptedStillValid {
+		return StepOutput{Decision: DecisionRewind}
+	}
+	if obs.Paused {
+		return StepOutput{Decision: DecisionWait}
+	}
+	if !obs.ChainsReady {
+		return StepOutput{Decision: DecisionWait}
+	}
+	if !obs.L1Consistent {
+		return StepOutput{Decision: DecisionConflict}
+	}
+	if verified == nil || verified.IsEmpty() {
+		return StepOutput{Decision: DecisionWait}
+	}
+	if !verified.IsValid() {
+		return StepOutput{Decision: DecisionInvalidate, Result: *verified}
+	}
+	return StepOutput{Decision: DecisionAdvance, Result: *verified}
+}
+
 // progressAndRecord attempts to progress interop and record the result.
 // Returns (madeProgress, error) where madeProgress indicates if we advanced the verified timestamp.
 func (i *Interop) progressAndRecord() (bool, error) {
-	// Check the L1s of each chain prior to performing interop
-	localCurrentL1, err := i.collectCurrentL1()
+	i.applyPendingResets()
+
+	obs, err := i.observeRound()
 	if err != nil {
-		i.log.Error("failed to collect current L1", "err", err)
 		return false, err
 	}
 
-	// Perform the interop evaluation
-	result, err := i.progressInterop()
+	// If the observation alone determines the outcome, skip expensive verification.
+	early := Decide(obs, nil)
+	if early.Decision != DecisionWait || !obs.ChainsReady {
+		return i.executeDecision(early, obs)
+	}
+
+	result, err := i.verify(obs.NextTimestamp, obs.BlocksAtTS)
 	if err != nil {
-		i.log.Error("failed to progress interop", "err", err)
 		return false, err
 	}
 
-	// Handle the result by committing verified results or invalidating blocks
-	err = i.handleResult(result)
-	if err != nil {
-		i.log.Error("failed to handle result", "err", err)
-		return false, err
+	output := Decide(obs, &result)
+	return i.executeDecision(output, obs)
+}
+
+// observeRound captures a consistent snapshot of the current round state.
+// All reads happen here; the decision function operates on this snapshot.
+func (i *Interop) observeRound() (RoundObservation, error) {
+	var obs RoundObservation
+
+	lastTS, initialized := i.verifiedDB.LastTimestamp()
+	if initialized {
+		ts := lastTS
+		obs.LastVerifiedTS = &ts
+		result, err := i.verifiedDB.Get(lastTS)
+		if err != nil {
+			return obs, fmt.Errorf("failed to read last verified result: %w", err)
+		}
+		obs.LastVerified = &result
+		obs.NextTimestamp = lastTS + 1
+	} else {
+		obs.NextTimestamp = i.activationTimestamp
 	}
-	// if the result is invalid, exit without updating the current L1s
-	if !result.IsEmpty() && !result.IsValid() {
-		i.log.Warn("result is invalid, skipping current L1 update", "results", result)
+
+	if pauseTS := i.pauseAtTimestamp.Load(); pauseTS != 0 && obs.NextTimestamp >= pauseTS {
+		obs.Paused = true
+		return obs, nil
+	}
+
+	// Check if the accepted L1 head has been reorged out.
+	obs.AcceptedStillValid = true
+	if obs.LastVerified != nil && i.l1Checker != nil {
+		same, err := i.l1Checker.SameL1Chain(i.ctx, []eth.BlockID{obs.LastVerified.L1Inclusion})
+		if err != nil {
+			return obs, fmt.Errorf("check accepted L1 canonicality: %w", err)
+		}
+		if !same {
+			i.log.Warn("accepted L1 head reorged out",
+				"timestamp", *obs.LastVerifiedTS,
+				"l1Inclusion", obs.LastVerified.L1Inclusion,
+			)
+			obs.AcceptedStillValid = false
+			return obs, nil
+		}
+	}
+
+	ready, err := i.checkChainsReady(obs.NextTimestamp)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			obs.ChainsReady = false
+			return obs, nil
+		}
+		return obs, err
+	}
+	obs.ChainsReady = true
+	obs.BlocksAtTS = ready.blocks
+	obs.L1Heads = ready.l1Heads
+
+	// Check that all chains' L1 heads are on the same canonical fork.
+	obs.L1Consistent = true
+	if i.l1Checker != nil {
+		heads := make([]eth.BlockID, 0, len(obs.L1Heads))
+		for _, l1 := range obs.L1Heads {
+			heads = append(heads, l1)
+		}
+		same, err := i.l1Checker.SameL1Chain(i.ctx, heads)
+		if err != nil {
+			return obs, fmt.Errorf("L1 consistency check: %w", err)
+		}
+		obs.L1Consistent = same
+	}
+
+	return obs, nil
+}
+
+// verify runs the heavy I/O: log loading, message verification, and cycle detection.
+func (i *Interop) verify(ts uint64, blocksAtTS map[eth.ChainID]eth.BlockID) (Result, error) {
+	if err := i.loadLogs(ts); err != nil {
+		if errors.Is(err, ErrPreviousTimestampNotSealed) {
+			i.log.Info("logsDB not ready (likely after reset), returning early", "timestamp", ts, "err", err)
+			return Result{}, nil
+		}
+		if errors.Is(err, ErrStaleLogsDB) {
+			i.log.Warn("stale logsDB detected, trimming to verified frontier", "timestamp", ts, "err", err)
+			i.trimLogsDBToVerifiedFrontier()
+			return Result{}, nil
+		}
+		return Result{}, fmt.Errorf("failed to load logs: %w", err)
+	}
+
+	result, err := i.verifyFn(ts, blocksAtTS)
+	if err != nil {
+		return Result{}, err
+	}
+
+	cycleResult, err := i.cycleVerifyFn(ts, blocksAtTS)
+	if err != nil {
+		return Result{}, fmt.Errorf("cycle verification failed: %w", err)
+	}
+
+	if len(cycleResult.InvalidHeads) > 0 {
+		if result.InvalidHeads == nil {
+			result.InvalidHeads = make(map[eth.ChainID]eth.BlockID)
+		}
+		for chainID, invalidBlock := range cycleResult.InvalidHeads {
+			result.InvalidHeads[chainID] = invalidBlock
+		}
+	}
+
+	return result, nil
+}
+
+// executeDecision applies the side effects of a decision.
+func (i *Interop) executeDecision(output StepOutput, obs RoundObservation) (bool, error) {
+	switch output.Decision {
+	case DecisionRewind:
+		if obs.LastVerifiedTS == nil {
+			return false, nil
+		}
+		if err := i.rewindAccepted(*obs.LastVerifiedTS); err != nil {
+			return false, fmt.Errorf("rewind accepted: %w", err)
+		}
+		i.mu.Lock()
+		i.currentL1 = eth.BlockID{}
+		i.mu.Unlock()
+		return false, nil
+
+	case DecisionInvalidate:
+		// Persist intended invalidations before executing them (write-ahead log).
+		// If the process crashes mid-execution, pending entries survive for replay on restart.
+		pending := make([]PendingInvalidation, 0, len(output.Result.InvalidHeads))
+		for chainID, blockID := range output.Result.InvalidHeads {
+			pending = append(pending, PendingInvalidation{
+				ChainID:   chainID,
+				BlockID:   blockID,
+				Timestamp: output.Result.Timestamp,
+			})
+		}
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].ChainID.Cmp(pending[j].ChainID) < 0
+		})
+		if err := i.verifiedDB.SetPendingInvalidations(pending); err != nil {
+			return false, fmt.Errorf("persist pending invalidations: %w", err)
+		}
+		var failedAny bool
+		for _, p := range pending {
+			if err := i.invalidateBlock(p.ChainID, p.BlockID, p.Timestamp); err != nil {
+				i.log.Error("invalidation failed, WAL preserved for retry on restart",
+					"chain", p.ChainID, "block", p.BlockID, "err", err)
+				failedAny = true
+			}
+		}
+		if failedAny {
+			return false, fmt.Errorf("one or more invalidations failed, WAL preserved")
+		}
+		if err := i.verifiedDB.ClearPendingInvalidations(); err != nil {
+			return false, fmt.Errorf("clear pending invalidations: %w", err)
+		}
+		return false, nil
+
+	case DecisionAdvance:
+		// If a reset arrived during this iteration, skip the commit.
+		i.mu.RLock()
+		hasPendingResets := len(i.pendingResets) > 0
+		i.mu.RUnlock()
+		if hasPendingResets {
+			i.log.Warn("aborting commit due to pending reset during iteration",
+				"timestamp", output.Result.Timestamp)
+			return false, nil
+		}
+
+		if err := i.commitVerifiedResult(output.Result.Timestamp, output.Result.ToVerifiedResult()); err != nil {
+			return false, fmt.Errorf("commit verified result: %w", err)
+		}
+		i.log.Info("committed verified result", "timestamp", output.Result.Timestamp)
+		i.mu.Lock()
+		i.currentL1 = output.Result.L1Inclusion
+		i.mu.Unlock()
+		return true, nil
+
+	case DecisionWait:
+		localL1, err := i.collectCurrentL1()
+		if err != nil {
+			// Non-fatal: just keep existing currentL1
+			i.log.Debug("failed to collect current L1 on wait", "err", err)
+			return false, nil
+		}
+		i.mu.Lock()
+		i.currentL1 = localL1
+		i.mu.Unlock()
+		return false, nil
+
+	case DecisionConflict:
+		i.log.Warn("L1 fork inconsistency, waiting for resolution")
 		return false, nil
 	}
 
-	// Once interop is complete and recorded, update the current L1s
-	// the current L1s being considered by the Activity right now depend on what progress was made:
-	// - if interop failed to run, the current L1s are not updated
-	// - if interop ran but did not advance the verified timestamp, the CurrentL1 values collected are used directly
-	// - if interop ran and advanced the verified timestamp, the L1Inclusion is the L1 inclusion at the verified timestamp
-	// this is because the individual chains may advance their CurrentL1, and if progress is being made, we might not be done using the collected L1s.
-	verifiedAdvanced := !result.IsEmpty()
-	i.mu.Lock()
-	if verifiedAdvanced {
-		// the new CurrentL1 is the L1 inclusion at the verified timestamp
-		i.currentL1 = result.L1Inclusion
-	} else {
-		// the new CurrentL1 is the lowest CurrentL1 from the collected chains
-		i.currentL1 = localCurrentL1
+	return false, nil
+}
+
+// rewindAccepted rolls back the last verified timestamp and all dependent state:
+// verifiedDB entry, deny-list entries, logsDBs, and chain engines (if deny entries were pruned).
+func (i *Interop) rewindAccepted(lastTS uint64) error {
+	i.log.Warn("rewinding accepted state due to drift", "timestamp", lastTS)
+
+	if _, err := i.verifiedDB.Rewind(lastTS); err != nil {
+		return fmt.Errorf("rewind verifiedDB: %w", err)
 	}
-	i.mu.Unlock()
-	return verifiedAdvanced, nil
+
+	// Prune deny-list entries from the rewound decision. Chains with pruned
+	// entries need an engine reset so their VNs re-derive without the removed entries.
+	sortedChainIDs := make([]eth.ChainID, 0, len(i.chains))
+	for chainID := range i.chains {
+		sortedChainIDs = append(sortedChainIDs, chainID)
+	}
+	sort.Slice(sortedChainIDs, func(a, b int) bool {
+		return sortedChainIDs[a].Cmp(sortedChainIDs[b]) < 0
+	})
+
+	rewindTargetTS, hasPrev := i.verifiedDB.LastTimestamp()
+	for _, chainID := range sortedChainIDs {
+		chain := i.chains[chainID]
+		removed, err := chain.PruneDeniedAtOrAfterTimestamp(lastTS)
+		if err != nil {
+			i.log.Error("failed to prune deny list on rewind", "chain", chainID, "err", err)
+			continue
+		}
+		if len(removed) > 0 && hasPrev {
+			i.log.Info("resetting chain engine after deny-list prune",
+				"chain", chainID, "prunedEntries", len(removed), "rewindTo", rewindTargetTS)
+			if err := chain.RewindEngine(i.ctx, rewindTargetTS, eth.BlockRef{}); err != nil {
+				i.log.Error("failed to reset chain engine on rewind", "chain", chainID, "err", err)
+			}
+		}
+	}
+
+	// Rewind logsDBs to the previous verified frontier.
+	if !hasPrev {
+		for chainID, db := range i.logsDBs {
+			if err := db.Clear(&noopInvalidator{}); err != nil {
+				i.log.Error("failed to clear logsDB on full rewind", "chain", chainID, "err", err)
+			}
+		}
+		return nil
+	}
+
+	prevResult, err := i.verifiedDB.Get(rewindTargetTS)
+	if err != nil {
+		// Leave logsDBs as-is; loadLogs will detect stale data on the next round.
+		i.log.Error("failed to read previous verified result for logsDB rewind", "err", err)
+		return nil
+	}
+
+	for chainID, db := range i.logsDBs {
+		expectedHead, ok := prevResult.L2Heads[chainID]
+		if !ok {
+			continue // chain not in previous result — leave as-is
+		}
+		latestBlock, hasBlocks := db.LatestSealedBlock()
+		if !hasBlocks {
+			continue // already empty
+		}
+		if latestBlock == expectedHead {
+			continue // already at the right state
+		}
+		if latestBlock.Number < expectedHead.Number {
+			continue // logsDB is behind — it will catch up naturally via loadLogs
+		}
+		// logsDB is ahead or has wrong hash at same height — rewind to expected head
+		i.log.Info("rewinding logsDB to previous verified head",
+			"chain", chainID, "from", latestBlock, "to", expectedHead)
+		if err := db.Rewind(&noopInvalidator{}, expectedHead); err != nil {
+			// Leave as-is rather than clearing (which causes liveness failure).
+			// loadLogs stale detection will catch hash mismatches on the next round.
+			i.log.Error("failed to rewind logsDB, leaving as-is",
+				"chain", chainID, "err", err)
+		}
+	}
+
+	return nil
+}
+
+// replayPendingInvalidations replays any incomplete invalidations from a previous crash.
+func (i *Interop) replayPendingInvalidations() error {
+	pending, err := i.verifiedDB.GetPendingInvalidations()
+	if err != nil {
+		return fmt.Errorf("get pending invalidations: %w", err)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	i.log.Warn("replaying pending invalidations from previous crash", "count", len(pending))
+	var failedAny bool
+	for _, p := range pending {
+		if err := i.invalidateBlock(p.ChainID, p.BlockID, p.Timestamp); err != nil {
+			i.log.Error("failed to replay invalidation, WAL preserved",
+				"chain", p.ChainID, "block", p.BlockID, "err", err)
+			failedAny = true
+		}
+	}
+	if failedAny {
+		return fmt.Errorf("one or more invalidation replays failed, WAL preserved")
+	}
+	return i.verifiedDB.ClearPendingInvalidations()
+}
+
+// pruneStaleDenyListEntries removes deny-list entries whose DecisionTimestamp
+// exceeds the current verified frontier (left over from incomplete rewinds).
+func (i *Interop) pruneStaleDenyListEntries() {
+	lastTS, initialized := i.verifiedDB.LastTimestamp()
+	if !initialized {
+		return
+	}
+	for chainID, chain := range i.chains {
+		removed, err := chain.PruneDeniedAtOrAfterTimestamp(lastTS + 1)
+		if err != nil {
+			i.log.Error("failed to prune stale deny entries on startup", "chain", chainID, "err", err)
+		}
+		if len(removed) > 0 {
+			i.log.Warn("pruned stale deny entries on startup",
+				"chain", chainID, "prunedHeights", len(removed), "lastVerifiedTS", lastTS)
+		}
+	}
+}
+
+// trimLogsDBToVerifiedFrontier rewinds any logsDB whose head is beyond or
+// inconsistent with the verified frontier (stale data from incomplete rounds).
+func (i *Interop) trimLogsDBToVerifiedFrontier() {
+	lastTS, initialized := i.verifiedDB.LastTimestamp()
+
+	for chainID, db := range i.logsDBs {
+		latestBlock, hasBlocks := db.LatestSealedBlock()
+		if !hasBlocks {
+			continue
+		}
+
+		if !initialized {
+			// No verified state but logsDB has data — clear it
+			if err := db.Clear(&noopInvalidator{}); err != nil {
+				i.log.Error("failed to clear logsDB during trim", "chain", chainID, "err", err)
+			}
+			continue
+		}
+
+		result, err := i.verifiedDB.Get(lastTS)
+		if err != nil {
+			i.log.Error("failed to read verified result during logsDB trim, leaving as-is",
+				"chain", chainID, "timestamp", lastTS, "err", err)
+			continue
+		}
+		expectedHead, ok := result.L2Heads[chainID]
+		if !ok {
+			continue // chain not in verified result — leave as-is
+		}
+
+		if latestBlock.Number > expectedHead.Number ||
+			(latestBlock.Number == expectedHead.Number && latestBlock.Hash != expectedHead.Hash) {
+			i.log.Info("trimming logsDB to verified frontier",
+				"chain", chainID,
+				"logsDBHead", latestBlock,
+				"verifiedHead", expectedHead,
+			)
+			if err := db.Rewind(&noopInvalidator{}, expectedHead); err != nil {
+				// Leave as-is rather than clearing.
+				i.log.Error("failed to rewind logsDB during trim, leaving as-is",
+					"chain", chainID, "err", err)
+			}
+		}
+	}
 }
 
 // collectCurrentL1 collects the current L1 head of all chains,
@@ -250,128 +678,14 @@ func (i *Interop) collectCurrentL1() (eth.BlockID, error) {
 	return currentL1, nil
 }
 
-func (i *Interop) progressInterop() (Result, error) {
-	start := time.Now()
-	defer func() {
-		i.log.Debug("progressInterop: time taken", "time", time.Since(start))
-	}()
-
-	// 0: identify the next timestamp to process.
-	// The next timestamp to process is the previous timestamp + 1.
-	// if the database is not initialized, we use the activation timestamp instead.
-	lastTimestamp, initialized := i.verifiedDB.LastTimestamp()
-	var ts uint64
-	if !initialized {
-		i.log.Info("initializing interop activity with activation timestamp", "activationTimestamp", i.activationTimestamp)
-		ts = i.activationTimestamp
-	} else {
-		i.log.Info("attempting to progress interop to next timestamp", "lastTimestamp", lastTimestamp, "timestamp", lastTimestamp+1)
-		ts = lastTimestamp + 1
-	}
-
-	// Check if we're paused at this timestamp (integration test control only)
-	// Uses >= so that if the activity is already beyond the pause point, it will still stop.
-	if pauseTs := i.pauseAtTimestamp.Load(); pauseTs != 0 && ts >= pauseTs {
-		i.log.Info("interop paused at timestamp", "timestamp", ts, "pauseTs", pauseTs)
-		return Result{}, nil
-	}
-
-	// 1: check if all chains are ready to process the next timestamp.
-	// if all chains are ready, we can proceed to download the logs
-	blocksAtTimestamp, err := i.checkChainsReady(ts)
-	if err != nil {
-		if errors.Is(err, ethereum.NotFound) {
-			// if the chains are not ready, we can return early and wait for the next timestamp
-			// no error is returned, as this is expected behavior
-			i.log.Info("chains not ready, returning early", "timestamp", ts)
-			return Result{}, nil
-		}
-		// other errors should be treated as fatal and returned to the caller
-		return Result{}, err
-	}
-
-	// 2: load the logs up through the next timestamp
-	// the previous timestamp is assumed to already be downloaded and verified
-	if err := i.loadLogs(ts); err != nil {
-		// If the logsDB is empty (likely after a reset), treat it like chains not ready
-		// The chains will rebuild blocks and we'll retry on the next tick
-		if errors.Is(err, ErrPreviousTimestampNotSealed) {
-			i.log.Info("logsDB not ready (likely after reset), returning early", "timestamp", ts, "err", err)
-			return Result{}, nil
-		}
-		i.log.Error("failed to load logs", "err", err)
-		return Result{}, err
-	}
-
-	// 3: validate interop messages using verifyFn
-	result, err := i.verifyFn(ts, blocksAtTimestamp)
-	if err != nil {
-		return Result{}, err
-	}
-
-	// 4: run cycle verification and merge results
-	cycleResult, err := i.cycleVerifyFn(ts, blocksAtTimestamp)
-	if err != nil {
-		return Result{}, fmt.Errorf("cycle verification failed: %w", err)
-	}
-	// Merge invalid heads from cycle verification into result
-	if len(cycleResult.InvalidHeads) > 0 {
-		if result.InvalidHeads == nil {
-			result.InvalidHeads = make(map[eth.ChainID]eth.BlockID)
-		}
-		for chainID, invalidBlock := range cycleResult.InvalidHeads {
-			result.InvalidHeads[chainID] = invalidBlock
-		}
-	}
-
-	return result, nil
-}
-
-func (i *Interop) handleResult(result Result) error {
-	// if the result is empty, return nil
-	if result.IsEmpty() {
-		return nil
-	}
-
-	// if the result is invalid, invalidate the blocks and return
-	if !result.IsValid() {
-		i.log.Error("interop validation failed", "results", result)
-		for chainID, invalidHead := range result.InvalidHeads {
-			if err := i.invalidateBlock(chainID, invalidHead); err != nil {
-				i.log.Error("failed to invalidate block", "chainID", chainID, "blockID", invalidHead, "err", err)
-				return err
-			}
-		}
-		return nil
-	}
-
-	// if the result is valid, commit the verified result
-	err := i.commitVerifiedResult(result.Timestamp, result.ToVerifiedResult())
-	if err != nil {
-		i.log.Error("failed to commit verified result", "err", err)
-		return err
-	}
-	i.log.Info("committed verified result", "timestamp", result.Timestamp)
-	return nil
-}
-
-// invalidateBlock notifies the chain container to add the block to the denylist
-// and potentially rewind if the chain is currently using that block.
-func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID) error {
-	chain, ok := i.chains[chainID]
-	if !ok {
-		return fmt.Errorf("chain %s not found", chainID)
-	}
-	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash)
-	return err
-}
-
 // checkChainsReady checks if all chains are ready to process the next timestamp.
 // Queries all chains in parallel for better performance.
-func (i *Interop) checkChainsReady(ts uint64) (map[eth.ChainID]eth.BlockID, error) {
+// Returns both the L2 blocks at the timestamp and the L1 inclusion heads.
+func (i *Interop) checkChainsReady(ts uint64) (chainsReadyResult, error) {
 	type result struct {
 		chainID eth.ChainID
 		blockID eth.BlockID
+		l1Head  eth.BlockID
 		err     error
 	}
 
@@ -380,18 +694,23 @@ func (i *Interop) checkChainsReady(ts uint64) (map[eth.ChainID]eth.BlockID, erro
 	// Query all chains in parallel
 	for _, chain := range i.chains {
 		go func(c cc.ChainContainer) {
-			block, err := c.LocalSafeBlockAtTimestamp(i.ctx, ts)
+			// Use OptimisticAt as the single atomic source for both L2 block and L1 head.
+			// This avoids a TOCTOU race between separate LocalSafeBlockAtTimestamp and OptimisticAt calls.
+			l2Block, l1Block, err := c.OptimisticAt(i.ctx, ts)
 			if err != nil {
 				results <- result{chainID: c.ID(), err: fmt.Errorf("chain %s not ready for timestamp %d: %w", c.ID(), ts, err)}
 				return
 			}
-			results <- result{chainID: c.ID(), blockID: block.ID()}
+			results <- result{chainID: c.ID(), blockID: l2Block, l1Head: l1Block}
 		}(chain)
 	}
 
 	// Collect all results before returning so every goroutine completes before the
 	// next call spawns a new batch, preventing accumulation of in-flight RPC calls.
-	blocksAtTimestamp := make(map[eth.ChainID]eth.BlockID)
+	ready := chainsReadyResult{
+		blocks:  make(map[eth.ChainID]eth.BlockID),
+		l1Heads: make(map[eth.ChainID]eth.BlockID),
+	}
 	var firstErr error
 	for range i.chains {
 		r := <-results
@@ -400,14 +719,15 @@ func (i *Interop) checkChainsReady(ts uint64) (map[eth.ChainID]eth.BlockID, erro
 				firstErr = r.err
 			}
 		} else {
-			blocksAtTimestamp[r.chainID] = r.blockID
+			ready.blocks[r.chainID] = r.blockID
+			ready.l1Heads[r.chainID] = r.l1Head
 		}
 	}
 	if firstErr != nil {
-		return nil, firstErr
+		return chainsReadyResult{}, firstErr
 	}
 
-	return blocksAtTimestamp, nil
+	return ready, nil
 }
 
 func (i *Interop) commitVerifiedResult(timestamp uint64, verifiedResult VerifiedResult) error {
@@ -471,8 +791,10 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 	}
 
 	// Search backwards from the last timestamp to find the latest result
-	// where the L1 inclusion block is at or below the supplied L1 block number
-	for ts := lastTs; ts > 0; ts-- {
+	// where the L1 inclusion block is at or below the supplied L1 block number.
+	// Stop at activationTimestamp — no verified results exist before that.
+	lowerBound := i.activationTimestamp
+	for ts := lastTs; ts >= lowerBound && ts <= lastTs; ts-- {
 		result, err := i.verifiedDB.Get(ts)
 		if err != nil {
 			// Timestamp might not exist (due to gaps or rewinds), continue searching
@@ -495,29 +817,73 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 }
 
 // Reset is called when a chain container resets due to an invalidated block.
-// It prunes the logsDB and verifiedDB for that chain at and after the timestamp.
-// The invalidatedBlock contains the block info that triggered the reset.
+// It queues the reset for application at the start of the next cycle.
 func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	i.log.Warn("Reset called",
+	i.log.Warn("reset queued",
 		"chainID", chainID,
 		"timestamp", timestamp,
 		"invalidatedBlock", invalidatedBlock,
 	)
 
-	db, dbOk := i.logsDBs[chainID]
-	if !dbOk {
-		i.log.Error("logsDB not found for reset", "chainID", chainID)
+	i.pendingResets = append(i.pendingResets, queuedReset{
+		chainID:          chainID,
+		timestamp:        timestamp,
+		invalidatedBlock: invalidatedBlock,
+	})
+	// If not started yet, apply immediately (for pre-start resets during construction)
+	if !i.started {
+		i.applyPendingResetsLocked()
+	}
+}
+
+// applyPendingResets drains queued resets at the start of each cycle.
+func (i *Interop) applyPendingResets() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.applyPendingResetsLocked()
+}
+
+func (i *Interop) applyPendingResetsLocked() {
+	if len(i.pendingResets) == 0 {
+		return
+	}
+	for _, reset := range i.pendingResets {
+		i.applyResetLocked(reset)
+	}
+	i.pendingResets = nil
+}
+
+func (i *Interop) applyResetLocked(reset queuedReset) {
+	// Empty BlockRef signals a reset triggered by rewindAccepted's engine reset,
+	// which has already handled the state changes. Skip to avoid double-processing.
+	if reset.invalidatedBlock == (eth.BlockRef{}) {
+		i.log.Info("ignoring controller-originated reset callback",
+			"chainID", reset.chainID, "timestamp", reset.timestamp)
 		return
 	}
 
-	i.resetLogsDB(chainID, db, invalidatedBlock)
-	i.resetVerifiedDB(timestamp)
-
-	// Reset the currentL1 to force re-evaluation
+	db, ok := i.logsDBs[reset.chainID]
+	if !ok {
+		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)
+		return
+	}
+	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
+	i.resetVerifiedDB(reset.timestamp)
 	i.currentL1 = eth.BlockID{}
+}
+
+// invalidateBlock notifies the chain container to add the block to the denylist
+// and potentially rewind if the chain is currently using that block.
+func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, decisionTimestamp uint64) error {
+	chain, ok := i.chains[chainID]
+	if !ok {
+		return fmt.Errorf("chain %s not found", chainID)
+	}
+	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash, decisionTimestamp)
+	return err
 }
 
 // resetLogsDB rewinds or clears the logsDB for a chain to the block before the invalidated block.
