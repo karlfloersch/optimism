@@ -50,7 +50,7 @@ type DeniedDecision struct {
 type InteropState struct {
 	Accepted        *AcceptedSnapshot
 	AcceptedHistory map[uint64]AcceptedSnapshot
-	DeniedByTS      map[uint64][]DeniedDecision
+	DeniedByTS      map[uint64]DeniedDecision
 	LastValidatedTS *uint64
 	PendingEffects  []PendingEffect
 }
@@ -193,7 +193,7 @@ func EffectID(effect Effect) string {
 func CopyState(state InteropState) InteropState {
 	out := InteropState{
 		AcceptedHistory: make(map[uint64]AcceptedSnapshot, len(state.AcceptedHistory)),
-		DeniedByTS:      make(map[uint64][]DeniedDecision, len(state.DeniedByTS)),
+		DeniedByTS:      make(map[uint64]DeniedDecision, len(state.DeniedByTS)),
 		PendingEffects:  make([]PendingEffect, 0, len(state.PendingEffects)),
 	}
 	if state.Accepted != nil {
@@ -214,16 +214,12 @@ func CopyState(state InteropState) InteropState {
 			L2Heads:     maps.Clone(snapshot.L2Heads),
 		}
 	}
-	for ts, decisions := range state.DeniedByTS {
-		cloned := make([]DeniedDecision, 0, len(decisions))
-		for _, decision := range decisions {
-			cloned = append(cloned, DeniedDecision{
-				Timestamp:      decision.Timestamp,
-				DeniedFrontier: cloneFrontierSnapshot(decision.DeniedFrontier),
-				InvalidHeads:   maps.Clone(decision.InvalidHeads),
-			})
+	for ts, decision := range state.DeniedByTS {
+		out.DeniedByTS[ts] = DeniedDecision{
+			Timestamp:      decision.Timestamp,
+			DeniedFrontier: cloneFrontierSnapshot(decision.DeniedFrontier),
+			InvalidHeads:   maps.Clone(decision.InvalidHeads),
 		}
-		out.DeniedByTS[ts] = cloned
 	}
 	for _, pending := range state.PendingEffects {
 		out.PendingEffects = append(out.PendingEffects, pending)
@@ -240,7 +236,7 @@ func cloneFrontierSnapshot(snapshot FrontierSnapshot) FrontierSnapshot {
 	}
 }
 
-func sortedDeniedTimestamps(deniedByTS map[uint64][]DeniedDecision) []uint64 {
+func sortedDeniedTimestamps(deniedByTS map[uint64]DeniedDecision) []uint64 {
 	timestamps := slices.Collect(maps.Keys(deniedByTS))
 	slices.Sort(timestamps)
 	return timestamps

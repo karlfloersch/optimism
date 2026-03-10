@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-supernode/flags"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity"
 	interopcontroller "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/controller"
@@ -69,6 +70,7 @@ type Interop struct {
 	stateStore *interopstore.Store
 	controller *interopcontroller.Controller
 	engine     *interopengine.Engine
+	l1Source   l1ByNumberSource
 }
 
 type queuedReset struct {
@@ -87,6 +89,7 @@ func New(
 	activationTimestamp uint64,
 	chains map[eth.ChainID]cc.ChainContainer,
 	dataDir string,
+	l1Source l1ByNumberSource,
 ) *Interop {
 	// Initialize logsDBs for each chain
 	logsDBs := make(map[eth.ChainID]LogsDB)
@@ -130,22 +133,34 @@ func New(
 		dataDir:             dataDir,
 		activationTimestamp: activationTimestamp,
 		engine:              engine,
+		l1Source:            l1Source,
 	}
 	// default to using the verifyInteropMessages function
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
+	var checker interopcontroller.ConsistencyChecker
+	if l1Source != nil {
+		checker = newByNumberConsistencyChecker(l1Source)
+	}
 	i.controller = interopcontroller.New(
 		activationTimestamp,
 		engine,
 		stateStore,
 		&runtimeObservationSource{interop: i},
+		checker,
 		&runtimeEvidenceResolver{interop: i},
 		&runtimeVerifier{interop: i},
 		&runtimeEffectRunner{interop: i},
 	)
 	return i
 }
+
+type l1ByNumberSource interface {
+	L1BlockRefByNumber(ctx context.Context, num uint64) (eth.L1BlockRef, error)
+}
+
+var _ l1ByNumberSource = (*sources.L1Client)(nil)
 
 // Start begins the Interop activity background loop and blocks until ctx is canceled.
 func (i *Interop) Start(ctx context.Context) error {
@@ -534,7 +549,7 @@ func (i *Interop) resetStateStore(timestamp uint64) {
 	if nextAccepted == nil {
 		state.Accepted = nil
 		state.LastValidatedTS = nil
-		state.DeniedByTS = map[uint64][]interopengine.DeniedDecision{}
+		state.DeniedByTS = map[uint64]interopengine.DeniedDecision{}
 	} else {
 		state.Accepted = nextAccepted
 		state.LastValidatedTS = nextValidated

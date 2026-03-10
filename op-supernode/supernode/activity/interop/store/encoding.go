@@ -9,7 +9,7 @@ import (
 type encodedState struct {
 	Accepted        *interopengine.AcceptedSnapshot           `json:"accepted"`
 	AcceptedHistory map[uint64]interopengine.AcceptedSnapshot `json:"acceptedHistory"`
-	DeniedByTS      map[uint64][]interopengine.DeniedDecision `json:"deniedByTS"`
+	DeniedByTS      map[uint64]interopengine.DeniedDecision   `json:"deniedByTS"`
 	LastValidatedTS *uint64                                   `json:"lastValidatedTS"`
 	PendingEffects  []encodedPendingEffect                    `json:"pendingEffects"`
 }
@@ -88,7 +88,7 @@ func (e encodedState) decode() (interopengine.InteropState, error) {
 		out.AcceptedHistory = map[uint64]interopengine.AcceptedSnapshot{}
 	}
 	if out.DeniedByTS == nil {
-		out.DeniedByTS = map[uint64][]interopengine.DeniedDecision{}
+		out.DeniedByTS = map[uint64]interopengine.DeniedDecision{}
 	}
 	for _, pending := range e.PendingEffects {
 		decoded, err := pending.decode()

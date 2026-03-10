@@ -70,19 +70,18 @@ func ValidateState(cfg Config, state InteropState) error {
 		}
 	}
 	for _, ts := range sortedDeniedTimestamps(state.DeniedByTS) {
-		for idx, decision := range state.DeniedByTS[ts] {
-			if decision.Timestamp != ts {
-				return fmt.Errorf("denied decision %d stored under timestamp %d has timestamp %d", idx, ts, decision.Timestamp)
-			}
-			if decision.DeniedFrontier.Timestamp != ts {
-				return fmt.Errorf("denied frontier %d stored under timestamp %d has frontier timestamp %d", idx, ts, decision.DeniedFrontier.Timestamp)
-			}
-			if len(decision.InvalidHeads) == 0 {
-				return fmt.Errorf("denied decision %d at timestamp %d must include invalid heads", idx, ts)
-			}
-			if decision.DeniedFrontier.L1Inclusion != maxL1Head(decision.DeniedFrontier.L1Heads) {
-				return fmt.Errorf("denied decision %d at timestamp %d has invalid L1 inclusion", idx, ts)
-			}
+		decision := state.DeniedByTS[ts]
+		if decision.Timestamp != ts {
+			return fmt.Errorf("denied decision stored under timestamp %d has timestamp %d", ts, decision.Timestamp)
+		}
+		if decision.DeniedFrontier.Timestamp != ts {
+			return fmt.Errorf("denied frontier stored under timestamp %d has frontier timestamp %d", ts, decision.DeniedFrontier.Timestamp)
+		}
+		if len(decision.InvalidHeads) == 0 {
+			return fmt.Errorf("denied decision at timestamp %d must include invalid heads", ts)
+		}
+		if decision.DeniedFrontier.L1Inclusion != maxL1Head(decision.DeniedFrontier.L1Heads) {
+			return fmt.Errorf("denied decision at timestamp %d has invalid L1 inclusion", ts)
 		}
 	}
 	return nil
@@ -146,36 +145,17 @@ func maxL1Head(heads map[eth.ChainID]eth.BlockID) eth.BlockID {
 	return maxHead
 }
 
-func identicalDeniedFrontierExists(decisions []DeniedDecision, frontier FrontierSnapshot) bool {
-	for _, decision := range decisions {
-		if EqualFrontierSnapshots(&decision.DeniedFrontier, &frontier) {
-			return true
-		}
-	}
-	return false
-}
-
-func pruneStaleDeniedFrontiers(decisions []DeniedDecision, frontier FrontierSnapshot) []DeniedDecision {
-	filtered := make([]DeniedDecision, 0, len(decisions))
-	for _, decision := range decisions {
-		if EqualFrontierSnapshots(&decision.DeniedFrontier, &frontier) {
-			filtered = append(filtered, decision)
-		}
-	}
-	return filtered
-}
-
-func pruneDeniedAfter(deniedByTS map[uint64][]DeniedDecision, keepTS *uint64) map[uint64][]DeniedDecision {
+func pruneDeniedAfter(deniedByTS map[uint64]DeniedDecision, keepTS *uint64) map[uint64]DeniedDecision {
 	if len(deniedByTS) == 0 {
 		return deniedByTS
 	}
 	if keepTS == nil {
-		return map[uint64][]DeniedDecision{}
+		return map[uint64]DeniedDecision{}
 	}
-	filtered := make(map[uint64][]DeniedDecision, len(deniedByTS))
-	for ts, decisions := range deniedByTS {
+	filtered := make(map[uint64]DeniedDecision, len(deniedByTS))
+	for ts, decision := range deniedByTS {
 		if ts <= *keepTS {
-			filtered[ts] = decisions
+			filtered[ts] = decision
 		}
 	}
 	return filtered

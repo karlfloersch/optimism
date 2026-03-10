@@ -51,10 +51,9 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 	}
 
 	frontier := input.Observation.Frontier.Value
-	existingDenied := newState.DeniedByTS[frontier.Timestamp]
-	newState.DeniedByTS[frontier.Timestamp] = pruneStaleDeniedFrontiers(existingDenied, frontier)
-	prunedFrontierDenied := len(existingDenied) > 0 && len(newState.DeniedByTS[frontier.Timestamp]) != len(existingDenied)
-	if len(newState.DeniedByTS[frontier.Timestamp]) == 0 {
+	existingDenied, hadDenied := newState.DeniedByTS[frontier.Timestamp]
+	prunedFrontierDenied := hadDenied && !EqualFrontierSnapshots(&existingDenied.DeniedFrontier, &frontier)
+	if prunedFrontierDenied {
 		delete(newState.DeniedByTS, frontier.Timestamp)
 	}
 	switch input.Verification.Status {
@@ -63,11 +62,11 @@ func (e *Engine) Step(state InteropState, input StepInput) (StepResult, error) {
 	case VerificationConflict:
 		return StepResult{NewState: newState, Effects: pruneFrontierEffects(frontier.Timestamp, prunedFrontierDenied), Outcome: OutcomeConflict}, nil
 	case VerificationInvalid:
-		newState.DeniedByTS[frontier.Timestamp] = []DeniedDecision{{
+		newState.DeniedByTS[frontier.Timestamp] = DeniedDecision{
 			Timestamp:      frontier.Timestamp,
 			DeniedFrontier: cloneFrontierSnapshot(frontier),
 			InvalidHeads:   maps.Clone(input.Verification.InvalidHeads),
-		}}
+		}
 		effects := make([]Effect, 0, len(input.Verification.InvalidHeads))
 		for chainID, block := range input.Verification.InvalidHeads {
 			effects = append(effects, InvalidateChainHead{
@@ -104,7 +103,7 @@ func (e *Engine) rewindOneStep(state InteropState) (StepResult, error) {
 		prunedChains := affectedChainsForDiscardedSuffix(state.DeniedByTS, nil)
 		state.Accepted = nil
 		state.LastValidatedTS = nil
-		state.DeniedByTS = map[uint64][]DeniedDecision{}
+		state.DeniedByTS = map[uint64]DeniedDecision{}
 		effects := []Effect{ClearDeniedDecisions{}}
 		resetTS := uint64(0)
 		if e.cfg.ActivationTimestamp > 0 {
@@ -145,16 +144,14 @@ func (e *Engine) rewindOneStep(state InteropState) (StepResult, error) {
 	return StepResult{NewState: state, Effects: effects, Outcome: OutcomeRewind}, nil
 }
 
-func affectedChainsForDiscardedSuffix(deniedByTS map[uint64][]DeniedDecision, keepTS *uint64) map[eth.ChainID]struct{} {
+func affectedChainsForDiscardedSuffix(deniedByTS map[uint64]DeniedDecision, keepTS *uint64) map[eth.ChainID]struct{} {
 	affected := make(map[eth.ChainID]struct{})
-	for ts, decisions := range deniedByTS {
+	for ts, decision := range deniedByTS {
 		if keepTS != nil && ts <= *keepTS {
 			continue
 		}
-		for _, decision := range decisions {
-			for chainID := range decision.InvalidHeads {
-				affected[chainID] = struct{}{}
-			}
+		for chainID := range decision.InvalidHeads {
+			affected[chainID] = struct{}{}
 		}
 	}
 	return affected

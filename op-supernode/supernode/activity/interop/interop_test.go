@@ -90,7 +90,7 @@ func (h *interopTestHarness) Build() *interopTestHarness {
 	for id, mock := range h.mocks {
 		chains[id] = mock
 	}
-	h.interop = New(testLogger(), h.activationTime, chains, h.dataDir)
+	h.interop = New(testLogger(), h.activationTime, chains, h.dataDir, nil)
 	if h.interop != nil {
 		h.interop.ctx = context.Background()
 		h.t.Cleanup(func() { _ = h.interop.Stop(context.Background()) })
@@ -161,7 +161,7 @@ func TestNew(t *testing.T) {
 				return h.WithChain(10, nil).WithChain(8453, nil).SkipBuild()
 			},
 			run: func(t *testing.T, h *interopTestHarness) {
-				interop := New(testLogger(), h.activationTime, h.Chains(), h.dataDir)
+				interop := New(testLogger(), h.activationTime, h.Chains(), h.dataDir, nil)
 				require.NotNil(t, interop)
 				t.Cleanup(func() { _ = interop.Stop(context.Background()) })
 
@@ -183,7 +183,7 @@ func TestNew(t *testing.T) {
 				return h.WithDataDir("/nonexistent/path").SkipBuild()
 			},
 			run: func(t *testing.T, h *interopTestHarness) {
-				interop := New(testLogger(), h.activationTime, h.Chains(), h.dataDir)
+				interop := New(testLogger(), h.activationTime, h.Chains(), h.dataDir, nil)
 				require.Nil(t, interop)
 			},
 		},

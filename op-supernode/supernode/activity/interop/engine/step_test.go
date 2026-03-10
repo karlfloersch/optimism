@@ -90,7 +90,7 @@ func TestStepStoresDeniedDecisionForInvalidFrontier(t *testing.T) {
 		Accepted:        accepted,
 		AcceptedHistory: map[uint64]AcceptedSnapshot{100: *accepted},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS:      map[uint64][]DeniedDecision{},
+		DeniedByTS:      map[uint64]DeniedDecision{},
 	}, StepInput{
 		Observation: RoundObservation{
 			AcceptedTS: 100,
@@ -116,8 +116,7 @@ func TestStepStoresDeniedDecisionForInvalidFrontier(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, OutcomeNoOp, result.Outcome)
-	require.Len(t, result.NewState.DeniedByTS[101], 1)
-	require.Equal(t, frontier, result.NewState.DeniedByTS[101][0].DeniedFrontier)
+	require.Equal(t, frontier, result.NewState.DeniedByTS[101].DeniedFrontier)
 	require.Len(t, result.Effects, 1)
 	require.Equal(t, InvalidateChainHead{
 		ChainID:   chainB,
@@ -148,7 +147,7 @@ func TestStepWaitsWhenFrontierNotReady(t *testing.T) {
 		Accepted:        accepted,
 		AcceptedHistory: map[uint64]AcceptedSnapshot{100: *accepted},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS:      map[uint64][]DeniedDecision{},
+		DeniedByTS:      map[uint64]DeniedDecision{},
 	}, StepInput{
 		Observation: RoundObservation{
 			AcceptedTS: 100,
@@ -210,14 +209,14 @@ func TestStepPrunesStaleFrontierDeniedDecisionsBeforeWaiting(t *testing.T) {
 		Accepted:        accepted,
 		AcceptedHistory: map[uint64]AcceptedSnapshot{100: *accepted},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS: map[uint64][]DeniedDecision{
-			101: {{
+		DeniedByTS: map[uint64]DeniedDecision{
+			101: {
 				Timestamp:      101,
 				DeniedFrontier: staleFrontier,
 				InvalidHeads: map[eth.ChainID]eth.BlockID{
 					chainA: {Hash: common.HexToHash("0x44"), Number: 101},
 				},
-			}},
+			},
 		},
 	}, StepInput{
 		Observation: RoundObservation{
@@ -277,7 +276,7 @@ func TestStepRejectsAcceptedDriftUntilHistoryExists(t *testing.T) {
 			100: *stateAccepted,
 		},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS:      map[uint64][]DeniedDecision{},
+		DeniedByTS:      map[uint64]DeniedDecision{},
 	}, StepInput{
 		Observation: RoundObservation{
 			AcceptedTS: 100,
@@ -340,21 +339,21 @@ func TestStepRewindsOneTimestampAndPrunesFutureDenies(t *testing.T) {
 			101: accepted101,
 		},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS: map[uint64][]DeniedDecision{
-			101: {{
+		DeniedByTS: map[uint64]DeniedDecision{
+			101: {
 				Timestamp:      101,
 				DeniedFrontier: FrontierSnapshot{Timestamp: 101},
 				InvalidHeads: map[eth.ChainID]eth.BlockID{
 					chainA: {Hash: common.HexToHash("0x44"), Number: 101},
 				},
-			}},
-			102: {{
+			},
+			102: {
 				Timestamp:      102,
 				DeniedFrontier: FrontierSnapshot{Timestamp: 102},
 				InvalidHeads: map[eth.ChainID]eth.BlockID{
 					chainA: {Hash: common.HexToHash("0x55"), Number: 102},
 				},
-			}},
+			},
 		},
 	}, StepInput{
 		Observation: RoundObservation{
@@ -421,14 +420,14 @@ func TestStepRewindsFromActivationToPreActivation(t *testing.T) {
 			100: accepted,
 		},
 		LastValidatedTS: &validatedTS,
-		DeniedByTS: map[uint64][]DeniedDecision{
-			100: {{
+		DeniedByTS: map[uint64]DeniedDecision{
+			100: {
 				Timestamp:      100,
 				DeniedFrontier: FrontierSnapshot{Timestamp: 100},
 				InvalidHeads: map[eth.ChainID]eth.BlockID{
 					chainA: {Hash: common.HexToHash("0x22"), Number: 100},
 				},
-			}},
+			},
 		},
 	}, StepInput{
 		Observation: RoundObservation{

@@ -58,8 +58,8 @@ func TestStoreRoundTripsInteropState(t *testing.T) {
 				},
 			},
 		},
-		DeniedByTS: map[uint64][]interopengine.DeniedDecision{
-			102: {{
+		DeniedByTS: map[uint64]interopengine.DeniedDecision{
+			102: {
 				Timestamp: 102,
 				DeniedFrontier: interopengine.FrontierSnapshot{
 					Timestamp:   102,
@@ -74,7 +74,7 @@ func TestStoreRoundTripsInteropState(t *testing.T) {
 				InvalidHeads: map[eth.ChainID]eth.BlockID{
 					chainA: {Hash: common.HexToHash("0x44"), Number: 102},
 				},
-			}},
+			},
 		},
 		LastValidatedTS: &validatedTS,
 		PendingEffects: []interopengine.PendingEffect{

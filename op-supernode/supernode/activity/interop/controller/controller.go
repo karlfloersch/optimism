@@ -31,6 +31,10 @@ type Verifier interface {
 	Verify(ctx context.Context, observation interopengine.RoundObservation, evidence FrontierEvidence) (interopengine.VerificationResult, error)
 }
 
+type ConsistencyChecker interface {
+	SameL1Chain(ctx context.Context, heads []eth.BlockID) (bool, error)
+}
+
 type StateStore interface {
 	Load() (interopengine.InteropState, error)
 	Commit(state interopengine.InteropState) error
@@ -45,6 +49,7 @@ type Controller struct {
 	engine              *interopengine.Engine
 	store               StateStore
 	source              ObservationSource
+	checker             ConsistencyChecker
 	resolver            EvidenceResolver
 	verifier            Verifier
 	effectExec          EffectRunner
@@ -55,6 +60,7 @@ func New(
 	engine *interopengine.Engine,
 	store StateStore,
 	source ObservationSource,
+	checker ConsistencyChecker,
 	resolver EvidenceResolver,
 	verifier Verifier,
 	effectExec EffectRunner,
@@ -64,6 +70,7 @@ func New(
 		engine:              engine,
 		store:               store,
 		source:              source,
+		checker:             checker,
 		resolver:            resolver,
 		verifier:            verifier,
 		effectExec:          effectExec,
@@ -89,6 +96,9 @@ func (c *Controller) Step(ctx context.Context) (interopengine.StepResult, error)
 	observation, err := c.source.ObserveRound(ctx, acceptedTS(state), c.frontierTS(state))
 	if err != nil {
 		return interopengine.StepResult{}, fmt.Errorf("observe round: %w", err)
+	}
+	if observation, err = c.ensureSameL1Chain(ctx, observation); err != nil {
+		return interopengine.StepResult{}, fmt.Errorf("check round L1 consistency: %w", err)
 	}
 
 	verification, err := c.verify(ctx, observation)
@@ -121,6 +131,51 @@ func (c *Controller) Step(ctx context.Context) (interopengine.StepResult, error)
 		return interopengine.StepResult{}, fmt.Errorf("commit cleared step effects: %w", err)
 	}
 	return step, nil
+}
+
+func (c *Controller) ensureSameL1Chain(ctx context.Context, observation interopengine.RoundObservation) (interopengine.RoundObservation, error) {
+	if c.checker == nil {
+		return observation, nil
+	}
+	heads := collectObservedL1Heads(observation)
+	if len(heads) == 0 {
+		return observation, nil
+	}
+	same, err := c.checker.SameL1Chain(ctx, heads)
+	if err != nil {
+		return interopengine.RoundObservation{}, err
+	}
+	if same {
+		return observation, nil
+	}
+	if observation.Accepted.Present {
+		observation.Accepted = interopengine.SnapshotAvailability[interopengine.AcceptedSnapshot]{
+			Present: false,
+			Reason:  interopengine.AvailabilityConflict,
+		}
+	}
+	if observation.Frontier.Present {
+		observation.Frontier = interopengine.SnapshotAvailability[interopengine.FrontierSnapshot]{
+			Present: false,
+			Reason:  interopengine.AvailabilityConflict,
+		}
+	}
+	return observation, nil
+}
+
+func collectObservedL1Heads(observation interopengine.RoundObservation) []eth.BlockID {
+	var heads []eth.BlockID
+	if observation.Accepted.Present {
+		for _, head := range observation.Accepted.Value.L1Heads {
+			heads = append(heads, head)
+		}
+	}
+	if observation.Frontier.Present {
+		for _, head := range observation.Frontier.Value.L1Heads {
+			heads = append(heads, head)
+		}
+	}
+	return heads
 }
 
 func (c *Controller) verify(ctx context.Context, observation interopengine.RoundObservation) (interopengine.VerificationResult, error) {

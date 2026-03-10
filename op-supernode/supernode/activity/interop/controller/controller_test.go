@@ -45,6 +45,17 @@ func (s *stubResolver) ResolveFrontier(context.Context, interopengine.FrontierSn
 	return s.evidence, nil
 }
 
+type stubChecker struct {
+	same  bool
+	err   error
+	calls int
+}
+
+func (s *stubChecker) SameL1Chain(context.Context, []eth.BlockID) (bool, error) {
+	s.calls++
+	return s.same, s.err
+}
+
 type stubVerifier struct {
 	result interopengine.VerificationResult
 	calls  int
@@ -97,7 +108,7 @@ func TestControllerDrainsPendingEffectsBeforeStepping(t *testing.T) {
 		},
 	}
 	runner := &stubRunner{}
-	controller := New(100, engine, store, source, &stubResolver{}, &stubVerifier{}, runner)
+	controller := New(100, engine, store, source, &stubChecker{same: true}, &stubResolver{}, &stubVerifier{}, runner)
 
 	result, err := controller.Step(context.Background())
 	require.NoError(t, err)
@@ -148,7 +159,7 @@ func TestControllerAdvancesAndExecutesStepEffects(t *testing.T) {
 	}
 	store := &stubStore{state: interopengine.InteropState{}}
 	runner := &stubRunner{}
-	controller := New(100, engine, store, source, resolver, verifier, runner)
+	controller := New(100, engine, store, source, &stubChecker{same: true}, resolver, verifier, runner)
 
 	result, err := controller.Step(context.Background())
 	require.NoError(t, err)
@@ -184,7 +195,7 @@ func TestControllerSkipsResolverAndVerifierWhenFrontierNotReady(t *testing.T) {
 	resolver := &stubResolver{}
 	verifier := &stubVerifier{}
 	runner := &stubRunner{}
-	controller := New(100, engine, store, source, resolver, verifier, runner)
+	controller := New(100, engine, store, source, &stubChecker{same: true}, resolver, verifier, runner)
 
 	result, err := controller.Step(context.Background())
 	require.NoError(t, err)
@@ -236,7 +247,7 @@ func TestControllerRunsInvalidationEffectsForInvalidFrontier(t *testing.T) {
 	}
 	store := &stubStore{state: interopengine.InteropState{}}
 	runner := &stubRunner{}
-	controller := New(100, engine, store, source, resolver, verifier, runner)
+	controller := New(100, engine, store, source, &stubChecker{same: true}, resolver, verifier, runner)
 
 	result, err := controller.Step(context.Background())
 	require.NoError(t, err)
@@ -252,4 +263,75 @@ func TestControllerRunsInvalidationEffectsForInvalidFrontier(t *testing.T) {
 	require.Len(t, store.commits, 2)
 	require.Len(t, store.commits[0].PendingEffects, 1)
 	require.Empty(t, store.commits[1].PendingEffects)
+}
+
+func TestControllerTreatsMixedAcceptedAndFrontierL1AsConflict(t *testing.T) {
+	t.Parallel()
+
+	engine, err := interopengine.New(interopengine.Config{ActivationTimestamp: 100})
+	require.NoError(t, err)
+
+	chainA := eth.ChainIDFromUInt64(10)
+	acceptedTS := uint64(100)
+	store := &stubStore{
+		state: interopengine.InteropState{
+			Accepted: &interopengine.AcceptedSnapshot{
+				Timestamp:   100,
+				L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x11"), Number: 5},
+				L1Heads: map[eth.ChainID]eth.BlockID{
+					chainA: {Hash: common.HexToHash("0x11"), Number: 5},
+				},
+				L2Heads: map[eth.ChainID]eth.BlockID{
+					chainA: {Hash: common.HexToHash("0x22"), Number: 100},
+				},
+			},
+			AcceptedHistory: map[uint64]interopengine.AcceptedSnapshot{
+				100: {
+					Timestamp:   100,
+					L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x11"), Number: 5},
+					L1Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x11"), Number: 5},
+					},
+					L2Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x22"), Number: 100},
+					},
+				},
+			},
+			LastValidatedTS: &acceptedTS,
+		},
+	}
+	source := &stubSource{
+		observation: interopengine.RoundObservation{
+			AcceptedTS: 100,
+			Accepted: interopengine.SnapshotAvailability[interopengine.AcceptedSnapshot]{
+				Present: true,
+				Reason:  interopengine.AvailabilityPresent,
+				Value:   *store.state.Accepted,
+			},
+			FrontierTS: 101,
+			Frontier: interopengine.SnapshotAvailability[interopengine.FrontierSnapshot]{
+				Present: true,
+				Reason:  interopengine.AvailabilityPresent,
+				Value: interopengine.FrontierSnapshot{
+					Timestamp:   101,
+					L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x33"), Number: 6},
+					L1Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x33"), Number: 6},
+					},
+					L2Heads: map[eth.ChainID]eth.BlockID{
+						chainA: {Hash: common.HexToHash("0x44"), Number: 101},
+					},
+				},
+			},
+		},
+	}
+	resolver := &stubResolver{}
+	verifier := &stubVerifier{}
+	controller := New(100, engine, store, source, &stubChecker{same: false}, resolver, verifier, &stubRunner{})
+
+	result, err := controller.Step(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, interopengine.OutcomeConflict, result.Outcome)
+	require.Zero(t, resolver.calls)
+	require.Zero(t, verifier.calls)
 }

@@ -226,6 +226,43 @@ const (
 That gives the controller a stable semantic contract instead of inferring
 behavior from incidental effect combinations.
 
+### 2a. L1 Consistency Checker
+
+The controller should not trust `L1Heads` merely because they were observed.
+It should run a dedicated same-chain check across the full set of heads involved
+in the round:
+
+- all accepted `L1Heads`, if an accepted snapshot exists
+- all frontier `L1Heads`, if a frontier snapshot exists
+
+I recommend an explicit interface:
+
+```go
+type ConsistencyChecker interface {
+    SameL1Chain(ctx context.Context, heads []eth.BlockID) (bool, error)
+}
+```
+
+The engine should only receive observations that have already passed this check.
+If the check fails:
+
+- accepted observation should be surfaced as `AvailabilityConflict`
+- frontier observation should be surfaced as `AvailabilityConflict`
+
+Planned implementations:
+
+- v1: by-number checker
+  - fetch canonical `L1BlockRefByNumber` for each observed height
+  - compare hashes
+  - this is a synchrony-assumption implementation
+- v2: ancestry walker
+  - verify same-chain ancestry by walking parent hashes
+  - this is the stronger long-term implementation
+
+This check should be run over the combined accepted + frontier set so the
+controller proves that the previously accepted world and the candidate frontier
+belong to one L1 history before stepping the engine.
+
 ### 3. Atomic Store + Effect Runner
 
 The store persists the entire interop state atomically in one place.
@@ -285,14 +322,14 @@ type FrontierSnapshot struct {
 }
 
 type DeniedDecision struct {
-    Timestamp    uint64
+    Timestamp      uint64
     DeniedFrontier FrontierSnapshot
-    InvalidHeads map[eth.ChainID]eth.BlockID
+    InvalidHeads   map[eth.ChainID]eth.BlockID
 }
 
 type InteropState struct {
     Accepted         *AcceptedSnapshot
-    DeniedByTS       map[uint64][]DeniedDecision
+    DeniedByTS       map[uint64]DeniedDecision
     LastValidatedTS  *uint64
     PendingEffects   []PendingEffect
 }
@@ -378,6 +415,9 @@ These are the invariants the new engine should own directly.
 - accepted timestamp movement per step is in `{-1, 0, +1}`
 - if `Accepted != nil`, then `LastValidatedTS != nil` and `*LastValidatedTS == Accepted.Timestamp`
 - if `Accepted == nil`, the next legal frontier timestamp is `activationTimestamp`
+- all `Accepted.L1Heads` and all candidate frontier `L1Heads` that are present in
+  the same round must be proven to lie on one L1 chain before the engine may
+  trust the observation
 
 ### Frontier / Retry Invariants
 
@@ -391,13 +431,18 @@ These are the invariants the new engine should own directly.
 
 ### Deny Invariants
 
+- there is at most one denied decision per timestamp
 - deny decisions are scoped to a specific frontier timestamp
 - deny decisions are only valid relative to the exact frontier snapshot that produced them
 - deny decisions should compare by exact snapshot equality, not loose timestamp/height matching
-- `DeniedByTS[t]` may contain multiple decisions over time, but only decisions whose
-  `DeniedFrontier` exactly matches the current frontier at `t` may remain live
+- a denied decision may contain multiple `InvalidHeads`, but only one denied
+  frontier world may exist for a timestamp
+- writing a new denied decision at timestamp `t` replaces any prior denied
+  decision at `t`
 - if accepted state rewinds past a deny decision timestamp, that deny decision must be pruned
 - if the current frontier at the same timestamp differs from the denied frontier, that deny decision must be pruned
+- the chain-local denylist is a derived projection of authoritative denied
+  decisions, not a second source of truth
 
 ### Reset Invariants
 
@@ -448,6 +493,15 @@ The controller can then map those effects to:
 - store updates
 
 without hiding the decision logic in side-effecting code.
+
+The chain-local denylist should be treated as a compatibility projection for the
+op-node interface:
+
+- the authoritative deny state lives only in `InteropState.DeniedByTS`
+- runtime code should rebuild or overwrite the timestamp-local deny projection
+  from that authoritative state
+- runtime code should not maintain an independently-meaningful deny database
+  through incremental edits
 
 Under the single-step progression rule, `RewindAcceptedState` may only target
 the immediately previous timestamp.
