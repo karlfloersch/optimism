@@ -259,6 +259,9 @@ func (s *Supernode) onChainReset(chainID eth.ChainID, timestamp uint64, invalida
 		"invalidatedBlock", invalidatedBlock,
 	)
 	for _, a := range s.activities {
+		if _, ok := a.(*interop.Interop); ok {
+			continue
+		}
 		a.Reset(chainID, timestamp, invalidatedBlock)
 	}
 }

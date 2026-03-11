@@ -167,6 +167,59 @@ func (i *Interop) loadLogs(ts uint64) error {
 	return nil
 }
 
+// persistFrontierLogs persists the exact accepted frontier blocks for a
+// timestamp. This is the only frontier logsDB write path once verification is
+// read-only.
+func (i *Interop) persistFrontierLogs(ts uint64, blocksAtTS map[eth.ChainID]eth.BlockID) error {
+	for chainID, blockID := range blocksAtTS {
+		chain, ok := i.chains[chainID]
+		if !ok {
+			continue
+		}
+		db := i.logsDBs[chainID]
+
+		latestBlock, hasBlocks, err := i.verifyCanAddTimestamp(chainID, db, ts, chain.BlockTime())
+		if err != nil {
+			return err
+		}
+
+		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, blockID)
+		if err != nil {
+			return fmt.Errorf("chain %s: failed to fetch receipts for block %d: %w", chainID, blockID.Number, err)
+		}
+
+		if hasBlocks {
+			if latestBlock.Number > blockID.Number {
+				seal, err := db.FindSealedBlock(blockID.Number)
+				if err == nil && seal.Hash == blockID.Hash {
+					continue
+				}
+				return fmt.Errorf("chain %s: logsDB has stale data at height %d: %w",
+					chainID, blockID.Number, ErrStaleLogsDB)
+			}
+			if latestBlock.Number == blockID.Number {
+				if latestBlock.Hash == blockID.Hash {
+					continue
+				}
+				return fmt.Errorf("chain %s: logsDB has block %s at height %d, expected %s: %w",
+					chainID, latestBlock.Hash, latestBlock.Number, blockID.Hash, ErrStaleLogsDB)
+			}
+
+			if blockInfo.ParentHash() != latestBlock.Hash {
+				return fmt.Errorf("chain %s: block %d parent hash %s does not match logsDB last sealed block hash %s: %w",
+					chainID, blockID.Number, blockInfo.ParentHash(), latestBlock.Hash, ErrParentHashMismatch)
+			}
+		}
+
+		isFirstBlock := !hasBlocks
+		if err := i.processBlockLogs(db, blockInfo, receipts, isFirstBlock); err != nil {
+			return fmt.Errorf("chain %s: failed to process block logs for block %d: %w", chainID, blockID.Number, err)
+		}
+	}
+
+	return nil
+}
+
 func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint64, blockTime uint64) (eth.BlockID, bool, error) {
 	latestBlock, hasBlocks := db.LatestSealedBlock()
 

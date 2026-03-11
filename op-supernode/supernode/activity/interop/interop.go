@@ -64,20 +64,12 @@ const (
 	DecisionAdvance
 	DecisionInvalidate
 	DecisionRewind
-	DecisionConflict
 )
 
 // StepOutput combines a decision with the verification result (if any).
 type StepOutput struct {
 	Decision Decision
 	Result   Result
-}
-
-// queuedReset represents a reset that will be applied at the start of the next cycle.
-type queuedReset struct {
-	chainID          eth.ChainID
-	timestamp        uint64
-	invalidatedBlock eth.BlockRef
 }
 
 // Interop is a VerificationActivity that can also run background work as a RunnableActivity.
@@ -100,18 +92,17 @@ type Interop struct {
 	verifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
 	// cycleVerifyFn handles same-timestamp cycle verification.
-	// It is called after verifyFn, and its results are merged.
+	// It is called after verifyFn in progressInterop, and its results are merged.
 	// Set to verifyCycleMessages by default in New().
 	cycleVerifyFn func(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) (Result, error)
 
 	// pauseAtTimestamp is used for integration test control only.
-	// When non-zero, the activity will return early without processing
+	// When non-zero, progressInterop will return early without processing
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
 
-	l1Source      l1ByNumberSource
-	l1Checker     *byNumberConsistencyChecker
-	pendingResets []queuedReset
+	l1Checker    *byNumberConsistencyChecker
+	frontierView *frontierVerificationView
 }
 
 func (i *Interop) Name() string {
@@ -160,7 +151,6 @@ func New(
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
 	i.cycleVerifyFn = i.verifyCycleMessages
-	i.l1Source = l1Source
 	i.l1Checker = newByNumberConsistencyChecker(l1Source)
 	return i
 }
@@ -176,15 +166,6 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.ctx, i.cancel = context.WithCancel(ctx)
 	i.started = true
 	i.mu.Unlock()
-
-	// Startup recovery: prune and trim stale state first, then replay the
-	// invalidation WAL. This order ensures replayed deny entries aren't
-	// immediately pruned by the stale-entry cleanup.
-	i.pruneStaleDenyListEntries()
-	i.trimLogsDBToVerifiedFrontier()
-	if err := i.replayPendingInvalidations(); err != nil {
-		i.log.Error("failed to replay pending invalidations", "err", err)
-	}
 
 	for {
 		select {
@@ -227,7 +208,7 @@ func (i *Interop) Stop(ctx context.Context) error {
 }
 
 // PauseAt sets a timestamp at which the interop activity should pause.
-// When the activity encounters this timestamp or any later timestamp, it returns early without processing.
+// When progressInterop encounters this timestamp or any later timestamp, it returns early without processing.
 // Uses >= check so that if the activity is already beyond the pause point, it will still stop.
 // This function is for integration test control only.
 // Pass 0 to clear the pause (equivalent to calling Resume).
@@ -243,50 +224,101 @@ func (i *Interop) Resume() {
 	i.log.Info("interop pause cleared")
 }
 
-// Decide is a pure function that determines the next action based on observations
-// and an optional verification result. No side effects, no I/O.
-func Decide(obs RoundObservation, verified *Result) StepOutput {
+// checkPreconditions determines whether observation alone already implies an
+// action, before running verification. It returns nil when verification should
+// proceed.
+func checkPreconditions(obs RoundObservation) *StepOutput {
 	if obs.Paused {
-		return StepOutput{Decision: DecisionWait}
+		output := StepOutput{Decision: DecisionWait}
+		return &output
 	}
 	if !obs.ChainsReady {
-		return StepOutput{Decision: DecisionWait}
+		output := StepOutput{Decision: DecisionWait}
+		return &output
 	}
 	if !obs.L1Consistent {
-		return StepOutput{Decision: DecisionRewind}
+		output := StepOutput{Decision: DecisionRewind}
+		return &output
 	}
-	if verified == nil || verified.IsEmpty() {
+	return nil
+}
+
+// decideVerifiedResult determines the next action from a completed verification
+// result. No side effects, no I/O.
+func decideVerifiedResult(_ RoundObservation, verified Result) StepOutput {
+	if verified.IsEmpty() {
 		return StepOutput{Decision: DecisionWait}
 	}
 	if !verified.IsValid() {
-		return StepOutput{Decision: DecisionInvalidate, Result: *verified}
+		return StepOutput{Decision: DecisionInvalidate, Result: verified}
 	}
-	return StepOutput{Decision: DecisionAdvance, Result: *verified}
+	return StepOutput{Decision: DecisionAdvance, Result: verified}
 }
 
 // progressAndRecord attempts to progress interop and record the result.
 // Returns (madeProgress, error) where madeProgress indicates if we advanced the verified timestamp.
 func (i *Interop) progressAndRecord() (bool, error) {
-	i.applyPendingResets()
+	pending, err := i.verifiedDB.GetPendingTransition()
+	if err != nil {
+		return false, fmt.Errorf("get pending transition: %w", err)
+	}
+	if pending != nil {
+		return i.applyPendingTransition(*pending)
+	}
 
-	obs, err := i.observeRound()
+	output, obs, err := i.progressInterop()
 	if err != nil {
 		return false, err
 	}
+	if output.Decision == DecisionWait {
+		return i.refreshCurrentL1OnWait()
+	}
 
-	// If the observation alone determines the outcome, skip expensive verification.
-	early := Decide(obs, nil)
-	if early.Decision != DecisionWait || !obs.ChainsReady {
-		return i.executeDecision(early, obs)
+	pendingTx, ok, err := i.buildPendingTransition(output, obs)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if err := i.verifiedDB.SetPendingTransition(pendingTx); err != nil {
+		return false, fmt.Errorf("persist pending transition: %w", err)
+	}
+	return i.applyPendingTransition(pendingTx)
+}
+
+func (i *Interop) refreshCurrentL1OnWait() (bool, error) {
+	localL1, err := i.collectCurrentL1()
+	if err != nil {
+		// Non-fatal: just keep existing currentL1.
+		i.log.Debug("failed to collect current L1 on wait", "err", err)
+		return false, nil
+	}
+	i.mu.Lock()
+	i.currentL1 = localL1
+	i.mu.Unlock()
+	return false, nil
+}
+
+// progressInterop prepares the next interop action by observing the world,
+// optionally verifying the frontier, and returning the resulting decision.
+// It does not apply any side effects itself.
+func (i *Interop) progressInterop() (StepOutput, RoundObservation, error) {
+	obs, err := i.observeRound()
+	if err != nil {
+		return StepOutput{}, RoundObservation{}, err
+	}
+
+	if early := checkPreconditions(obs); early != nil {
+		return *early, obs, nil
 	}
 
 	result, err := i.verify(obs.NextTimestamp, obs.BlocksAtTS)
 	if err != nil {
-		return false, err
+		return StepOutput{}, obs, err
 	}
 
-	output := Decide(obs, &result)
-	return i.executeDecision(output, obs)
+	return decideVerifiedResult(obs, result), obs, nil
 }
 
 // observeRound captures a consistent snapshot of the current round state.
@@ -347,18 +379,14 @@ func (i *Interop) observeRound() (RoundObservation, error) {
 
 // verify runs the heavy I/O: log loading, message verification, and cycle detection.
 func (i *Interop) verify(ts uint64, blocksAtTS map[eth.ChainID]eth.BlockID) (Result, error) {
-	if err := i.loadLogs(ts); err != nil {
-		if errors.Is(err, ErrPreviousTimestampNotSealed) {
-			i.log.Info("logsDB not ready (likely after reset), returning early", "timestamp", ts, "err", err)
-			return Result{}, nil
-		}
-		if errors.Is(err, ErrStaleLogsDB) {
-			i.log.Warn("stale logsDB detected, trimming to verified frontier", "timestamp", ts, "err", err)
-			i.trimLogsDBToVerifiedFrontier()
-			return Result{}, nil
-		}
-		return Result{}, fmt.Errorf("failed to load logs: %w", err)
+	view, err := i.resolveFrontierVerificationView(blocksAtTS)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve frontier verification view: %w", err)
 	}
+	i.frontierView = view
+	defer func() {
+		i.frontierView = nil
+	}()
 
 	result, err := i.verifyFn(ts, blocksAtTS)
 	if err != nil {
@@ -382,104 +410,145 @@ func (i *Interop) verify(ts uint64, blocksAtTS map[eth.ChainID]eth.BlockID) (Res
 	return result, nil
 }
 
-// executeDecision applies the side effects of a decision.
-func (i *Interop) executeDecision(output StepOutput, obs RoundObservation) (bool, error) {
+func (i *Interop) buildPendingTransition(output StepOutput, obs RoundObservation) (PendingTransition, bool, error) {
 	switch output.Decision {
+	case DecisionAdvance, DecisionInvalidate:
+		result := output.Result
+		return PendingTransition{
+			Decision: output.Decision,
+			Result:   &result,
+		}, true, nil
 	case DecisionRewind:
 		if obs.LastVerifiedTS == nil {
-			return false, nil
+			return PendingTransition{}, false, nil
 		}
-		if err := i.rewindAccepted(*obs.LastVerifiedTS); err != nil {
-			return false, fmt.Errorf("rewind accepted: %w", err)
+		rewindPlan, err := i.buildRewindPlan(*obs.LastVerifiedTS)
+		if err != nil {
+			return PendingTransition{}, false, fmt.Errorf("build rewind plan: %w", err)
+		}
+		return PendingTransition{
+			Decision: DecisionRewind,
+			Rewind:   &rewindPlan,
+		}, true, nil
+	default:
+		return PendingTransition{}, false, nil
+	}
+}
+
+func (i *Interop) applyPendingTransition(pending PendingTransition) (bool, error) {
+	switch pending.Decision {
+	case DecisionRewind:
+		if pending.Rewind == nil {
+			if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+				return false, fmt.Errorf("clear empty rewind transition: %w", err)
+			}
+			return false, nil
 		}
 		i.mu.Lock()
 		i.currentL1 = eth.BlockID{}
 		i.mu.Unlock()
+		if err := i.applyRewindPlan(*pending.Rewind); err != nil {
+			return false, fmt.Errorf("apply rewind plan: %w", err)
+		}
+		if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+			return false, fmt.Errorf("clear pending transition: %w", err)
+		}
 		return false, nil
 
 	case DecisionInvalidate:
-		// Persist intended invalidations before executing them (write-ahead log).
-		// If the process crashes mid-execution, pending entries survive for replay on restart.
-		pending := make([]PendingInvalidation, 0, len(output.Result.InvalidHeads))
-		for chainID, blockID := range output.Result.InvalidHeads {
-			pending = append(pending, PendingInvalidation{
+		if pending.Result == nil {
+			if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+				return false, fmt.Errorf("clear empty invalidation transition: %w", err)
+			}
+			return false, nil
+		}
+		invalidations := make([]PendingInvalidation, 0, len(pending.Result.InvalidHeads))
+		for chainID, blockID := range pending.Result.InvalidHeads {
+			invalidations = append(invalidations, PendingInvalidation{
 				ChainID:   chainID,
 				BlockID:   blockID,
-				Timestamp: output.Result.Timestamp,
+				Timestamp: pending.Result.Timestamp,
 			})
 		}
-		sort.Slice(pending, func(i, j int) bool {
-			return pending[i].ChainID.Cmp(pending[j].ChainID) < 0
+		sort.Slice(invalidations, func(i, j int) bool {
+			return invalidations[i].ChainID.Cmp(invalidations[j].ChainID) < 0
 		})
-		if err := i.verifiedDB.SetPendingInvalidations(pending); err != nil {
-			return false, fmt.Errorf("persist pending invalidations: %w", err)
-		}
 		var failedAny bool
-		for _, p := range pending {
+		for _, p := range invalidations {
 			if err := i.invalidateBlock(p.ChainID, p.BlockID, p.Timestamp); err != nil {
-				i.log.Error("invalidation failed, WAL preserved for retry on restart",
+				i.log.Error("invalidation failed, transition preserved for retry on restart",
 					"chain", p.ChainID, "block", p.BlockID, "err", err)
 				failedAny = true
 			}
 		}
 		if failedAny {
-			return false, fmt.Errorf("one or more invalidations failed, WAL preserved")
+			return false, fmt.Errorf("one or more invalidations failed, transition preserved")
 		}
-		if err := i.verifiedDB.ClearPendingInvalidations(); err != nil {
-			return false, fmt.Errorf("clear pending invalidations: %w", err)
+		if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+			return false, fmt.Errorf("clear pending transition: %w", err)
 		}
 		return false, nil
 
 	case DecisionAdvance:
-		// If a reset arrived during this iteration, skip the commit.
-		i.mu.RLock()
-		hasPendingResets := len(i.pendingResets) > 0
-		i.mu.RUnlock()
-		if hasPendingResets {
-			i.log.Warn("aborting commit due to pending reset during iteration",
-				"timestamp", output.Result.Timestamp)
+		if pending.Result == nil {
+			if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+				return false, fmt.Errorf("clear empty advance transition: %w", err)
+			}
 			return false, nil
 		}
+		if err := i.persistFrontierLogs(pending.Result.Timestamp, pending.Result.L2Heads); err != nil {
+			return false, fmt.Errorf("persist frontier logs: %w", err)
+		}
 
-		if err := i.commitVerifiedResult(output.Result.Timestamp, output.Result.ToVerifiedResult()); err != nil {
+		if err := i.commitVerifiedResult(pending.Result.Timestamp, pending.Result.ToVerifiedResult()); err != nil {
 			return false, fmt.Errorf("commit verified result: %w", err)
 		}
-		i.log.Info("committed verified result", "timestamp", output.Result.Timestamp)
+		if err := i.verifiedDB.ClearPendingTransition(); err != nil {
+			return false, fmt.Errorf("clear pending transition: %w", err)
+		}
+		i.log.Info("committed verified result", "timestamp", pending.Result.Timestamp)
 		i.mu.Lock()
-		i.currentL1 = output.Result.L1Inclusion
+		i.currentL1 = pending.Result.L1Inclusion
 		i.mu.Unlock()
 		return true, nil
-
-	case DecisionWait:
-		localL1, err := i.collectCurrentL1()
-		if err != nil {
-			// Non-fatal: just keep existing currentL1
-			i.log.Debug("failed to collect current L1 on wait", "err", err)
-			return false, nil
-		}
-		i.mu.Lock()
-		i.currentL1 = localL1
-		i.mu.Unlock()
-		return false, nil
-
-	case DecisionConflict:
-		return false, nil
 	}
 
 	return false, nil
 }
 
-// rewindAccepted rolls back the last verified timestamp and all dependent state:
-// verifiedDB entry, deny-list entries, logsDBs, and chain engines (if deny entries were pruned).
-func (i *Interop) rewindAccepted(lastTS uint64) error {
-	i.log.Warn("rewinding accepted state due to drift", "timestamp", lastTS)
+func (i *Interop) buildRewindPlan(lastTS uint64) (RewindPlan, error) {
+	plan := RewindPlan{
+		RewindAtOrAfter: lastTS,
+	}
 
-	if _, err := i.verifiedDB.Rewind(lastTS); err != nil {
+	if lastTS <= i.activationTimestamp {
+		return plan, nil
+	}
+
+	rewindTargetTS := lastTS - 1
+	prevResult, err := i.verifiedDB.Get(rewindTargetTS)
+	if err != nil {
+		return RewindPlan{}, fmt.Errorf("read previous verified result at %d: %w", rewindTargetTS, err)
+	}
+	plan.ResetAllChainsTo = &rewindTargetTS
+	plan.TargetHeads = prevResult.L2Heads
+	return plan, nil
+}
+
+func (i *Interop) applyRewindPlan(plan RewindPlan) error {
+	i.log.Warn("rewinding accepted state due to drift", "timestamp", plan.RewindAtOrAfter)
+
+	if _, err := i.verifiedDB.Rewind(plan.RewindAtOrAfter); err != nil {
 		return fmt.Errorf("rewind verifiedDB: %w", err)
 	}
 
-	// Prune deny-list entries from the rewound decision. Chains with pruned
-	// entries need an engine reset so their VNs re-derive without the removed entries.
+	var firstErr error
+	recordErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
 	sortedChainIDs := make([]eth.ChainID, 0, len(i.chains))
 	for chainID := range i.chains {
 		sortedChainIDs = append(sortedChainIDs, chainID)
@@ -488,156 +557,59 @@ func (i *Interop) rewindAccepted(lastTS uint64) error {
 		return sortedChainIDs[a].Cmp(sortedChainIDs[b]) < 0
 	})
 
-	rewindTargetTS, hasPrev := i.verifiedDB.LastTimestamp()
 	for _, chainID := range sortedChainIDs {
 		chain := i.chains[chainID]
-		removed, err := chain.PruneDeniedAtOrAfterTimestamp(lastTS)
-		if err != nil {
+		if _, err := chain.PruneDeniedAtOrAfterTimestamp(plan.RewindAtOrAfter); err != nil {
 			i.log.Error("failed to prune deny list on rewind", "chain", chainID, "err", err)
-			continue
+			recordErr(fmt.Errorf("chain %s: prune deny list on rewind: %w", chainID, err))
 		}
-		if len(removed) > 0 && hasPrev {
-			i.log.Info("resetting chain engine after deny-list prune",
-				"chain", chainID, "prunedEntries", len(removed), "rewindTo", rewindTargetTS)
-			if err := chain.RewindEngine(i.ctx, rewindTargetTS, eth.BlockRef{}); err != nil {
+		if plan.ResetAllChainsTo != nil {
+			if err := chain.RewindEngine(i.ctx, *plan.ResetAllChainsTo, eth.BlockRef{}); err != nil {
 				i.log.Error("failed to reset chain engine on rewind", "chain", chainID, "err", err)
+				recordErr(fmt.Errorf("chain %s: reset chain engine on rewind: %w", chainID, err))
 			}
 		}
 	}
 
-	// Rewind logsDBs to the previous verified frontier.
-	if !hasPrev {
+	if plan.TargetHeads == nil {
 		for chainID, db := range i.logsDBs {
 			if err := db.Clear(&noopInvalidator{}); err != nil {
 				i.log.Error("failed to clear logsDB on full rewind", "chain", chainID, "err", err)
+				recordErr(fmt.Errorf("chain %s: clear logsDB on full rewind: %w", chainID, err))
 			}
 		}
-		return nil
-	}
-
-	prevResult, err := i.verifiedDB.Get(rewindTargetTS)
-	if err != nil {
-		// Leave logsDBs as-is; loadLogs will detect stale data on the next round.
-		i.log.Error("failed to read previous verified result for logsDB rewind", "err", err)
-		return nil
+		return firstErr
 	}
 
 	for chainID, db := range i.logsDBs {
-		expectedHead, ok := prevResult.L2Heads[chainID]
+		expectedHead, ok := plan.TargetHeads[chainID]
 		if !ok {
-			continue // chain not in previous result — leave as-is
+			continue
 		}
 		latestBlock, hasBlocks := db.LatestSealedBlock()
-		if !hasBlocks {
-			continue // already empty
+		if !hasBlocks || latestBlock == expectedHead || latestBlock.Number < expectedHead.Number {
+			continue
 		}
-		if latestBlock == expectedHead {
-			continue // already at the right state
-		}
-		if latestBlock.Number < expectedHead.Number {
-			continue // logsDB is behind — it will catch up naturally via loadLogs
-		}
-		// logsDB is ahead or has wrong hash at same height — rewind to expected head
 		i.log.Info("rewinding logsDB to previous verified head",
 			"chain", chainID, "from", latestBlock, "to", expectedHead)
 		if err := db.Rewind(&noopInvalidator{}, expectedHead); err != nil {
-			// Leave as-is rather than clearing (which causes liveness failure).
-			// loadLogs stale detection will catch hash mismatches on the next round.
-			i.log.Error("failed to rewind logsDB, leaving as-is",
+			i.log.Error("failed to rewind logsDB, transition preserved for retry",
 				"chain", chainID, "err", err)
+			recordErr(fmt.Errorf("chain %s: rewind logsDB to previous verified head: %w", chainID, err))
 		}
 	}
 
-	return nil
+	return firstErr
 }
 
-// replayPendingInvalidations replays any incomplete invalidations from a previous crash.
-func (i *Interop) replayPendingInvalidations() error {
-	pending, err := i.verifiedDB.GetPendingInvalidations()
+// rewindAccepted rolls back the last verified timestamp and all dependent state:
+// verifiedDB entry, deny-list entries, logsDBs, and chain engines.
+func (i *Interop) rewindAccepted(lastTS uint64) error {
+	plan, err := i.buildRewindPlan(lastTS)
 	if err != nil {
-		return fmt.Errorf("get pending invalidations: %w", err)
+		return err
 	}
-	if len(pending) == 0 {
-		return nil
-	}
-	i.log.Warn("replaying pending invalidations from previous crash", "count", len(pending))
-	var failedAny bool
-	for _, p := range pending {
-		if err := i.invalidateBlock(p.ChainID, p.BlockID, p.Timestamp); err != nil {
-			i.log.Error("failed to replay invalidation, WAL preserved",
-				"chain", p.ChainID, "block", p.BlockID, "err", err)
-			failedAny = true
-		}
-	}
-	if failedAny {
-		return fmt.Errorf("one or more invalidation replays failed, WAL preserved")
-	}
-	return i.verifiedDB.ClearPendingInvalidations()
-}
-
-// pruneStaleDenyListEntries removes deny-list entries whose DecisionTimestamp
-// exceeds the current verified frontier (left over from incomplete rewinds).
-func (i *Interop) pruneStaleDenyListEntries() {
-	lastTS, initialized := i.verifiedDB.LastTimestamp()
-	if !initialized {
-		return
-	}
-	for chainID, chain := range i.chains {
-		removed, err := chain.PruneDeniedAtOrAfterTimestamp(lastTS + 1)
-		if err != nil {
-			i.log.Error("failed to prune stale deny entries on startup", "chain", chainID, "err", err)
-		}
-		if len(removed) > 0 {
-			i.log.Warn("pruned stale deny entries on startup",
-				"chain", chainID, "prunedHeights", len(removed), "lastVerifiedTS", lastTS)
-		}
-	}
-}
-
-// trimLogsDBToVerifiedFrontier rewinds any logsDB whose head is beyond or
-// inconsistent with the verified frontier (stale data from incomplete rounds).
-func (i *Interop) trimLogsDBToVerifiedFrontier() {
-	lastTS, initialized := i.verifiedDB.LastTimestamp()
-
-	for chainID, db := range i.logsDBs {
-		latestBlock, hasBlocks := db.LatestSealedBlock()
-		if !hasBlocks {
-			continue
-		}
-
-		if !initialized {
-			// No verified state but logsDB has data — clear it
-			if err := db.Clear(&noopInvalidator{}); err != nil {
-				i.log.Error("failed to clear logsDB during trim", "chain", chainID, "err", err)
-			}
-			continue
-		}
-
-		result, err := i.verifiedDB.Get(lastTS)
-		if err != nil {
-			i.log.Error("failed to read verified result during logsDB trim, leaving as-is",
-				"chain", chainID, "timestamp", lastTS, "err", err)
-			continue
-		}
-		expectedHead, ok := result.L2Heads[chainID]
-		if !ok {
-			continue // chain not in verified result — leave as-is
-		}
-
-		if latestBlock.Number > expectedHead.Number ||
-			(latestBlock.Number == expectedHead.Number && latestBlock.Hash != expectedHead.Hash) {
-			i.log.Info("trimming logsDB to verified frontier",
-				"chain", chainID,
-				"logsDBHead", latestBlock,
-				"verifiedHead", expectedHead,
-			)
-			if err := db.Rewind(&noopInvalidator{}, expectedHead); err != nil {
-				// Leave as-is rather than clearing.
-				i.log.Error("failed to rewind logsDB during trim, leaving as-is",
-					"chain", chainID, "err", err)
-			}
-		}
-	}
+	return i.applyRewindPlan(plan)
 }
 
 // collectCurrentL1 collects the current L1 head of all chains,
@@ -797,63 +769,17 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 	return eth.BlockID{}, 0
 }
 
-// Reset is called when a chain container resets due to an invalidated block.
-// It queues the reset for application at the start of the next cycle.
+// Reset is intentionally a no-op for interop.
+// Interop-owned invalidation and rewind handling is driven synchronously through
+// PendingTransition application, so callback-driven resets are not part of the
+// correctness path anymore. If other activities need reset semantics here in
+// the future, that should be modeled explicitly rather than reusing this hook.
 func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-
-	i.log.Warn("reset queued",
+	i.log.Debug("ignoring reset callback; interop state is reconciled through pending transitions",
 		"chainID", chainID,
 		"timestamp", timestamp,
 		"invalidatedBlock", invalidatedBlock,
 	)
-
-	i.pendingResets = append(i.pendingResets, queuedReset{
-		chainID:          chainID,
-		timestamp:        timestamp,
-		invalidatedBlock: invalidatedBlock,
-	})
-	// If not started yet, apply immediately (for pre-start resets during construction)
-	if !i.started {
-		i.applyPendingResetsLocked()
-	}
-}
-
-// applyPendingResets drains queued resets at the start of each cycle.
-func (i *Interop) applyPendingResets() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.applyPendingResetsLocked()
-}
-
-func (i *Interop) applyPendingResetsLocked() {
-	if len(i.pendingResets) == 0 {
-		return
-	}
-	for _, reset := range i.pendingResets {
-		i.applyResetLocked(reset)
-	}
-	i.pendingResets = nil
-}
-
-func (i *Interop) applyResetLocked(reset queuedReset) {
-	// Empty BlockRef signals a reset triggered by rewindAccepted's engine reset,
-	// which has already handled the state changes. Skip to avoid double-processing.
-	if reset.invalidatedBlock == (eth.BlockRef{}) {
-		i.log.Info("ignoring controller-originated reset callback",
-			"chainID", reset.chainID, "timestamp", reset.timestamp)
-		return
-	}
-
-	db, ok := i.logsDBs[reset.chainID]
-	if !ok {
-		i.log.Error("logsDB not found for reset", "chainID", reset.chainID)
-		return
-	}
-	i.resetLogsDB(reset.chainID, db, reset.invalidatedBlock)
-	i.resetVerifiedDB(reset.timestamp)
-	i.currentL1 = eth.BlockID{}
 }
 
 // invalidateBlock notifies the chain container to add the block to the denylist
@@ -865,65 +791,4 @@ func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, deci
 	}
 	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash, decisionTimestamp)
 	return err
-}
-
-// resetLogsDB rewinds or clears the logsDB for a chain to the block before the invalidated block.
-// The invalidatedBlock provides the block info directly, avoiding RPC calls during reset.
-func (i *Interop) resetLogsDB(chainID eth.ChainID, db LogsDB, invalidatedBlock eth.BlockRef) {
-	// The target block is the parent of the invalidated block
-	targetBlockID := eth.BlockID{
-		Hash:   invalidatedBlock.ParentHash,
-		Number: invalidatedBlock.Number - 1,
-	}
-
-	i.log.Info("resetLogsDB: computing target from invalidated block",
-		"chainID", chainID,
-		"invalidatedBlock", invalidatedBlock.Number,
-		"targetBlock", targetBlockID.Number,
-	)
-
-	// Check the first block in the logsDB to decide whether to clear or rewind
-	firstBlock, err := db.FirstSealedBlock()
-	if err != nil {
-		// If logsDB is empty or has an error, clear it
-		i.log.Info("logsDB appears empty or errored, clearing", "chainID", chainID, "err", err)
-		if clearErr := db.Clear(&noopInvalidator{}); clearErr != nil {
-			i.log.Error("failed to clear logsDB", "chainID", chainID, "err", clearErr)
-		}
-		return
-	}
-
-	if firstBlock.Number > targetBlockID.Number {
-		i.log.Info("logsDB is to be cleared", "chainID", chainID, "firstBlock", firstBlock.Number, "targetBlock", targetBlockID.Number)
-		if err := db.Clear(&noopInvalidator{}); err != nil {
-			i.log.Error("failed to clear logsDB", "chainID", chainID, "err", err)
-		}
-	} else {
-		i.log.Info("logsDB is to be rewound", "chainID", chainID, "targetBlock", targetBlockID.Number, "firstBlock", firstBlock.Number)
-		if err := db.Rewind(&noopInvalidator{}, targetBlockID); err != nil {
-			i.log.Error("failed to rewind logsDB", "chainID", chainID, "err", err)
-		}
-	}
-}
-
-// resetVerifiedDB removes any verified results after the given timestamp.
-func (i *Interop) resetVerifiedDB(timestamp uint64) {
-	if i.verifiedDB == nil {
-		return
-	}
-
-	deleted, err := i.verifiedDB.RewindAfter(timestamp)
-	if err != nil {
-		i.log.Error("failed to rewind verifiedDB",
-			"timestamp", timestamp,
-			"err", err,
-		)
-	}
-	if deleted {
-		// This is unexpected - we shouldn't have verified results at timestamps
-		// that are being reset. Log an error for visibility.
-		i.log.Error("UNEXPECTED: verified results were deleted on reset",
-			"timestamp", timestamp,
-		)
-	}
 }

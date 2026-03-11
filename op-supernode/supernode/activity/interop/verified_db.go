@@ -1,6 +1,7 @@
 package interop
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,8 @@ var (
 // bucketName is the name of the bbolt bucket used to store verified results.
 var bucketName = []byte("verified")
 
-var pendingBucketName = []byte("pending_invalidations")
-var pendingKey = []byte("pending")
+var pendingTransitionBucketName = []byte("pending_transition")
+var pendingTransitionKey = []byte("pending")
 
 // PendingInvalidation records a chain invalidation that needs to be executed.
 type PendingInvalidation struct {
@@ -58,7 +59,7 @@ func OpenVerifiedDB(dataDir string) (*VerifiedDB, error) {
 		if _, err := tx.CreateBucketIfNotExists(bucketName); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(pendingBucketName)
+		_, err := tx.CreateBucketIfNotExists(pendingTransitionBucketName)
 		return err
 	})
 	if err != nil {
@@ -80,7 +81,6 @@ func OpenVerifiedDB(dataDir string) (*VerifiedDB, error) {
 }
 
 // initLastTimestamp scans the database to find the highest committed timestamp.
-// Resets in-memory state first so it's correct even after a full rewind to empty.
 func (v *VerifiedDB) initLastTimestamp() error {
 	v.lastTimestamp = 0
 	v.initialized = false
@@ -117,20 +117,38 @@ func (v *VerifiedDB) Commit(result VerifiedResult) error {
 
 	ts := result.Timestamp
 
+	// Serialize the result up front so replay of an already-applied transition can
+	// be treated as success when the stored value is identical.
+	value, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("failed to marshal verified result: %w", err)
+	}
+
 	// Check for sequential commitment
 	if v.initialized {
 		if ts != v.lastTimestamp+1 {
 			if ts <= v.lastTimestamp {
+				key := timestampToKey(ts)
+				var existing []byte
+				err := v.db.View(func(tx *bolt.Tx) error {
+					b := tx.Bucket(bucketName)
+					val := b.Get(key)
+					if val == nil {
+						return ErrNotFound
+					}
+					existing = append(existing[:0], val...)
+					return nil
+				})
+				if err != nil {
+					return fmt.Errorf("failed to read existing verified result at %d: %w", ts, err)
+				}
+				if bytes.Equal(existing, value) {
+					return nil
+				}
 				return fmt.Errorf("%w: %d", ErrAlreadyCommitted, ts)
 			}
 			return fmt.Errorf("%w: expected %d, got %d", ErrNonSequential, v.lastTimestamp+1, ts)
 		}
-	}
-
-	// Serialize the result
-	value, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("failed to marshal verified result: %w", err)
 	}
 
 	// Store in database
@@ -253,50 +271,58 @@ func (v *VerifiedDB) Rewind(timestamp uint64) (bool, error) {
 	return deleted, nil
 }
 
-// SetPendingInvalidations persists pending invalidations as a write-ahead log.
-// Must be called BEFORE executing the invalidations for crash safety.
-func (v *VerifiedDB) SetPendingInvalidations(pending []PendingInvalidation) error {
+// SetPendingTransition persists a generic interop transition as a write-ahead log.
+// Must be called BEFORE executing any durable side effects for crash safety.
+func (v *VerifiedDB) SetPendingTransition(pending PendingTransition) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
 	value, err := json.Marshal(pending)
 	if err != nil {
-		return fmt.Errorf("failed to marshal pending invalidations: %w", err)
+		return fmt.Errorf("failed to marshal pending transition: %w", err)
 	}
 	return v.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(pendingBucketName)
-		return b.Put(pendingKey, value)
+		b := tx.Bucket(pendingTransitionBucketName)
+		return b.Put(pendingTransitionKey, value)
 	})
 }
 
-// GetPendingInvalidations retrieves any pending invalidations from the WAL.
+// GetPendingTransition retrieves any pending transition from the WAL.
 // Returns nil if no pending work exists.
-func (v *VerifiedDB) GetPendingInvalidations() ([]PendingInvalidation, error) {
+func (v *VerifiedDB) GetPendingTransition() (*PendingTransition, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	var pending []PendingInvalidation
+	var pending PendingTransition
+	var found bool
 	err := v.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(pendingBucketName)
-		val := b.Get(pendingKey)
+		b := tx.Bucket(pendingTransitionBucketName)
+		val := b.Get(pendingTransitionKey)
 		if val == nil {
 			return nil
 		}
+		found = true
 		data := make([]byte, len(val))
 		copy(data, val)
 		return json.Unmarshal(data, &pending)
 	})
-	return pending, err
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &pending, nil
 }
 
-// ClearPendingInvalidations removes the WAL entry after invalidations are executed.
-func (v *VerifiedDB) ClearPendingInvalidations() error {
+// ClearPendingTransition removes the WAL entry after the transition is fully applied.
+func (v *VerifiedDB) ClearPendingTransition() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
 	return v.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(pendingBucketName)
-		return b.Delete(pendingKey)
+		b := tx.Bucket(pendingTransitionBucketName)
+		return b.Delete(pendingTransitionKey)
 	})
 }
 
