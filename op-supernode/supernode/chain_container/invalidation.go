@@ -260,40 +260,6 @@ func (d *DenyList) PruneAtOrAfterTimestamp(timestamp uint64) (map[uint64][]commo
 	return removed, err
 }
 
-// Clear removes ALL entries from the deny list.
-// Returns map of removed hashes by height.
-func (d *DenyList) Clear() (map[uint64][]common.Hash, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	removed := make(map[uint64][]common.Hash)
-
-	err := d.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(denyListBucketName)
-		c := b.Cursor()
-
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			height := binary.BigEndian.Uint64(k)
-
-			records, err := decodeDenyRecords(v)
-			if err != nil {
-				return err
-			}
-
-			for _, r := range records {
-				removed[height] = append(removed[height], r.PayloadHash)
-			}
-
-			if err := b.Delete(k); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-
-	return removed, err
-}
-
 // Close closes the database.
 func (d *DenyList) Close() error {
 	return d.db.Close()
