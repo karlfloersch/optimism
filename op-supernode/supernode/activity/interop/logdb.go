@@ -185,9 +185,11 @@ func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint6
 			chainID, ts-blockTime, ts, blockTime, seal.Timestamp, ErrPreviousTimestampNotSealed)
 	}
 
-	// if the gap is less than a block time, we can append the timestamp to the database, but warn the caller
+	// If the gap is less than a block time, we can still append the timestamp to the database.
+	// This is expected for chains whose block time is greater than one second, since the
+	// interop timestamp may legitimately fall between consecutive L2 blocks.
 	if gap < blockTime {
-		i.log.Warn("verifyCanAddTimestamp: requested for timestamp which is not a multiple of block time",
+		i.log.Warn("verifyCanAddTimestamp: timestamp falls between L2 blocks for this chain; this can be expected for chains with block times greater than one second",
 			"chain", chainID,
 			"timestamp", ts,
 			"block time", blockTime,
