@@ -436,10 +436,7 @@ func (i *Interop) applyPendingTransition(pending PendingTransition) (bool, error
 	switch pending.Decision {
 	case DecisionRewind:
 		if pending.Rewind == nil {
-			if err := i.verifiedDB.ClearPendingTransition(); err != nil {
-				return false, fmt.Errorf("clear empty rewind transition: %w", err)
-			}
-			return false, nil
+			return false, fmt.Errorf("invalid pending rewind transition: missing rewind plan")
 		}
 		i.mu.Lock()
 		i.currentL1 = eth.BlockID{}
