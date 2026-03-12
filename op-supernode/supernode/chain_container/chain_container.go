@@ -61,8 +61,6 @@ type ChainContainer interface {
 	// PruneDeniedAtOrAfterTimestamp removes deny-list entries with DecisionTimestamp >= timestamp.
 	// Returns map of removed hashes by height.
 	PruneDeniedAtOrAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error)
-	// ClearDenied removes ALL deny-list entries. Returns map of removed hashes by height.
-	ClearDenied() (map[uint64][]common.Hash, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.

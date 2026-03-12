@@ -1366,9 +1366,6 @@ func (m *mockChainContainer) PruneDeniedAtOrAfterTimestamp(timestamp uint64) (ma
 	}
 	return nil, nil
 }
-func (m *mockChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
-	return nil, nil
-}
 func (m *mockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }

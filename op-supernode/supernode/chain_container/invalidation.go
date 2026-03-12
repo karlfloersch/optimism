@@ -372,10 +372,3 @@ func (c *simpleChainContainer) PruneDeniedAtOrAfterTimestamp(timestamp uint64) (
 	}
 	return c.denyList.PruneAtOrAfterTimestamp(timestamp)
 }
-
-func (c *simpleChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
-	if c.denyList == nil {
-		return nil, fmt.Errorf("deny list not initialized")
-	}
-	return c.denyList.Clear()
-}
