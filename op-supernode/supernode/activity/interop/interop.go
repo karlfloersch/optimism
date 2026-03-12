@@ -756,14 +756,9 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 // Reset is intentionally a no-op for interop.
 // Interop-owned invalidation and rewind handling is driven synchronously through
 // PendingTransition application, so callback-driven resets are not part of the
-// correctness path anymore. If other activities need reset semantics here in
-// the future, that should be modeled explicitly rather than reusing this hook.
+// correctness path anymore.
 func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef) {
-	i.log.Debug("ignoring reset callback; interop state is reconciled through pending transitions",
-		"chainID", chainID,
-		"timestamp", timestamp,
-		"invalidatedBlock", invalidatedBlock,
-	)
+	return
 }
 
 // invalidateBlock notifies the chain container to add the block to the denylist
