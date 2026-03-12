@@ -273,13 +273,13 @@ func (i *Interop) progressAndRecord() (bool, error) {
 	if output.Decision == DecisionWait {
 		return i.refreshCurrentL1OnWait()
 	}
+	if output.Decision == DecisionRewind && obs.LastVerifiedTS == nil {
+		return false, nil
+	}
 
-	pendingTx, ok, err := i.buildPendingTransition(output, obs)
+	pendingTx, err := i.buildPendingTransition(output, obs)
 	if err != nil {
 		return false, err
-	}
-	if !ok {
-		return false, nil
 	}
 	if err := i.verifiedDB.SetPendingTransition(pendingTx); err != nil {
 		return false, fmt.Errorf("persist pending transition: %w", err)
@@ -410,28 +410,25 @@ func (i *Interop) verify(ts uint64, blocksAtTS map[eth.ChainID]eth.BlockID) (Res
 	return result, nil
 }
 
-func (i *Interop) buildPendingTransition(output StepOutput, obs RoundObservation) (PendingTransition, bool, error) {
+func (i *Interop) buildPendingTransition(output StepOutput, obs RoundObservation) (PendingTransition, error) {
 	switch output.Decision {
 	case DecisionAdvance, DecisionInvalidate:
 		result := output.Result
 		return PendingTransition{
 			Decision: output.Decision,
 			Result:   &result,
-		}, true, nil
+		}, nil
 	case DecisionRewind:
-		if obs.LastVerifiedTS == nil {
-			return PendingTransition{}, false, nil
-		}
 		rewindPlan, err := i.buildRewindPlan(*obs.LastVerifiedTS)
 		if err != nil {
-			return PendingTransition{}, false, fmt.Errorf("build rewind plan: %w", err)
+			return PendingTransition{}, fmt.Errorf("build rewind plan: %w", err)
 		}
 		return PendingTransition{
 			Decision: DecisionRewind,
 			Rewind:   &rewindPlan,
-		}, true, nil
+		}, nil
 	default:
-		return PendingTransition{}, false, nil
+		return PendingTransition{}, fmt.Errorf("unsupported transition decision: %v", output.Decision)
 	}
 }
 

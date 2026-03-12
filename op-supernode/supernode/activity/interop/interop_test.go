@@ -1409,12 +1409,11 @@ func TestWAL_PreservedOnInvalidationFailure(t *testing.T) {
 	}
 
 	// Execute the invalidation decision
-	pending, ok, err := h.interop.buildPendingTransition(
+	pending, err := h.interop.buildPendingTransition(
 		StepOutput{Decision: DecisionInvalidate, Result: invalidResult},
 		RoundObservation{},
 	)
 	require.NoError(t, err)
-	require.True(t, ok)
 	require.NoError(t, h.interop.verifiedDB.SetPendingTransition(pending))
 	_, err = h.interop.applyPendingTransition(pending)
 
@@ -1497,12 +1496,11 @@ func TestPendingTransition_RecoverRewindPreservedOnFailure(t *testing.T) {
 	}))
 
 	lastTS := uint64(1001)
-	pending, ok, err := h.interop.buildPendingTransition(
+	pending, err := h.interop.buildPendingTransition(
 		StepOutput{Decision: DecisionRewind},
 		RoundObservation{LastVerifiedTS: &lastTS},
 	)
 	require.NoError(t, err)
-	require.True(t, ok)
 	require.NoError(t, h.interop.verifiedDB.SetPendingTransition(pending))
 	_, err = h.interop.applyPendingTransition(pending)
 	require.Error(t, err)
@@ -1755,12 +1753,9 @@ func applyResultCompat(i *Interop, result Result) error {
 	} else {
 		output = StepOutput{Decision: DecisionAdvance, Result: result}
 	}
-	pending, ok, err := i.buildPendingTransition(output, obs)
+	pending, err := i.buildPendingTransition(output, obs)
 	if err != nil {
 		return err
-	}
-	if !ok {
-		return nil
 	}
 	if err := i.verifiedDB.SetPendingTransition(pending); err != nil {
 		return err
