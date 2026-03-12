@@ -267,6 +267,10 @@ func (d *DenyList) Close() error {
 
 // InvalidateBlock adds a block to the deny list and triggers a rewind if the chain
 // currently uses that block at the specified height.
+// WARNING: this should only be called by interop transition application.
+// Other callers risk triggering chain rewinds outside the interop WAL model.
+// TODO: remove this footgun by moving reorg-triggering operations behind a
+// smaller interop-owned interface.
 // Returns true if a rewind was triggered, false otherwise.
 // Note: Genesis block (height=0) cannot be invalidated as there is no prior block to rewind to.
 func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
