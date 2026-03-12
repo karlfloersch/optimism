@@ -75,6 +75,21 @@ type virtualNodeFactory func(cfg *opnodecfg.Config, log gethlog.Logger, initOver
 // invalidatedBlock is the block that was invalidated and triggered the reset.
 type ResetCallback func(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef)
 
+type interopCallerKey struct{}
+
+// WithInteropCaller marks a context as originating from the interop activity.
+// Rewind-triggering chain-container operations reject unmarked callers.
+func WithInteropCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, interopCallerKey{}, true)
+}
+
+func requireInteropCaller(ctx context.Context, op string) error {
+	if ok, _ := ctx.Value(interopCallerKey{}).(bool); ok {
+		return nil
+	}
+	return fmt.Errorf("%s may only be called by the interop activity", op)
+}
+
 type simpleChainContainer struct {
 	vn                 virtual_node.VirtualNode
 	vncfg              *opnodecfg.Config
@@ -509,6 +524,9 @@ func isCriticalRewindError(err error) bool {
 }
 
 func (c *simpleChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
+	if err := requireInteropCaller(ctx, "RewindEngine"); err != nil {
+		return err
+	}
 	if !c.resetting.CompareAndSwap(false, true) {
 		return fmt.Errorf("reset already in progress")
 	}
