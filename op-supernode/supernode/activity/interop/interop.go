@@ -558,7 +558,7 @@ func (i *Interop) applyRewindPlan(plan RewindPlan) error {
 			recordErr(fmt.Errorf("chain %s: prune deny list on rewind: %w", chainID, err))
 		}
 		if plan.ResetAllChainsTo != nil {
-			if err := chain.RewindEngine(cc.WithInteropCaller(i.ctx), *plan.ResetAllChainsTo, eth.BlockRef{}); err != nil {
+			if err := chain.RewindEngine(i.ctx, *plan.ResetAllChainsTo, eth.BlockRef{}); err != nil {
 				i.log.Error("failed to reset chain engine on rewind", "chain", chainID, "err", err)
 				recordErr(fmt.Errorf("chain %s: reset chain engine on rewind: %w", chainID, err))
 			}
@@ -753,14 +753,17 @@ func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef)
 	return eth.BlockID{}, 0
 }
 
-// Reset should never be called for interop.
+// Reset is intentionally a no-op for interop.
 // Interop-owned invalidation and rewind handling is driven synchronously through
-// PendingTransition application, and supernode reset fanout skips interop
-// entirely. If this fires, some caller is incorrectly treating interop as part
-// of the callback-driven reset path.
+// PendingTransition application, so callback-driven resets are not part of the
+// correctness path anymore. If other activities need reset semantics here in
+// the future, that should be modeled explicitly rather than reusing this hook.
 func (i *Interop) Reset(chainID eth.ChainID, timestamp uint64, invalidatedBlock eth.BlockRef) {
-	panic(fmt.Sprintf("interop Reset() should never be called (chain=%s timestamp=%d invalidatedBlock=%s)",
-		chainID, timestamp, invalidatedBlock))
+	i.log.Debug("ignoring reset callback; interop state is reconciled through pending transitions",
+		"chainID", chainID,
+		"timestamp", timestamp,
+		"invalidatedBlock", invalidatedBlock,
+	)
 }
 
 // invalidateBlock notifies the chain container to add the block to the denylist
@@ -770,6 +773,6 @@ func (i *Interop) invalidateBlock(chainID eth.ChainID, blockID eth.BlockID, deci
 	if !ok {
 		return fmt.Errorf("chain %s not found", chainID)
 	}
-	_, err := chain.InvalidateBlock(cc.WithInteropCaller(i.ctx), blockID.Number, blockID.Hash, decisionTimestamp)
+	_, err := chain.InvalidateBlock(i.ctx, blockID.Number, blockID.Hash, decisionTimestamp)
 	return err
 }

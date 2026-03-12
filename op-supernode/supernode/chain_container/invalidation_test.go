@@ -349,25 +349,6 @@ func TestInvalidateBlock(t *testing.T) {
 	genesisTime := uint64(1000)
 	blockTime := uint64(2)
 
-	t.Run("rejects non-interop callers", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-
-		dl, err := OpenDenyList(filepath.Join(dir, "denylist"))
-		require.NoError(t, err)
-		defer dl.Close()
-
-		c := &simpleChainContainer{
-			denyList: dl,
-			log:      testLogger(),
-		}
-
-		rewound, err := c.InvalidateBlock(context.Background(), 1, common.HexToHash("0x1"), 0)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "InvalidateBlock may only be called by the interop activity")
-		require.False(t, rewound)
-	})
-
 	tests := []struct {
 		name             string
 		height           uint64
@@ -427,7 +408,7 @@ func TestInvalidateBlock(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		rewound, err := c.InvalidateBlock(WithInteropCaller(ctx), 0, common.HexToHash("0xgenesis"), 0)
+		rewound, err := c.InvalidateBlock(ctx, 0, common.HexToHash("0xgenesis"), 0)
 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "cannot invalidate genesis block")
@@ -470,7 +451,7 @@ func TestInvalidateBlock(t *testing.T) {
 
 			// Call InvalidateBlock
 			ctx := context.Background()
-			rewound, err := c.InvalidateBlock(WithInteropCaller(ctx), tt.height, tt.payloadHash, 0)
+			rewound, err := c.InvalidateBlock(ctx, tt.height, tt.payloadHash, 0)
 			require.NoError(t, err)
 
 			// Verify rewind behavior

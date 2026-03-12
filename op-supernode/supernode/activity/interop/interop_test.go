@@ -3,7 +3,6 @@ package interop
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -1905,13 +1904,14 @@ func TestResetIsNoOp(t *testing.T) {
 	h.interop.logsDBs[mock.id] = trackingDB
 	h.interop.currentL1 = eth.BlockID{Number: 999, Hash: common.HexToHash("0xL1")}
 
-	require.PanicsWithValue(t,
-		fmt.Sprintf("interop Reset() should never be called (chain=%s timestamp=%d invalidatedBlock=%s)",
-			mock.id, uint64(1000), eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xparent")}),
-		func() {
-			h.interop.Reset(mock.id, 1000, eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xparent")})
-		},
-	)
+	h.interop.Reset(mock.id, 1000, eth.BlockRef{Number: 100, ParentHash: common.HexToHash("0xparent")})
+
+	has, err := h.interop.verifiedDB.Has(1000)
+	require.NoError(t, err)
+	require.True(t, has, "reset callback should not mutate verifiedDB")
+	require.False(t, trackingDB.rewindCalled, "reset callback should not rewind logsDB")
+	require.Zero(t, trackingDB.clearCalled, "reset callback should not clear logsDB")
+	require.Equal(t, eth.BlockID{Number: 999, Hash: common.HexToHash("0xL1")}, h.interop.currentL1)
 }
 
 // =============================================================================

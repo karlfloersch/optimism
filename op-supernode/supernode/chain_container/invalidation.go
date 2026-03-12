@@ -270,9 +270,6 @@ func (d *DenyList) Close() error {
 // Returns true if a rewind was triggered, false otherwise.
 // Note: Genesis block (height=0) cannot be invalidated as there is no prior block to rewind to.
 func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
-	if err := requireInteropCaller(ctx, "InvalidateBlock"); err != nil {
-		return false, err
-	}
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
