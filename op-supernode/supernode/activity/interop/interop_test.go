@@ -1516,6 +1516,49 @@ func TestPendingTransition_RecoverRewindPreservedOnFailure(t *testing.T) {
 	require.Equal(t, uint64(1000), mock.rewindEngineCalls[0])
 }
 
+func TestPendingTransition_RecoverRewindReportsAllFailures(t *testing.T) {
+	h := newInteropTestHarness(t). // newInteropTestHarness calls t.Parallel()
+		WithChain(10, func(m *mockChainContainer) {
+			m.rewindEngineErr = errors.New("rewind failed a")
+		}).
+		WithChain(8453, func(m *mockChainContainer) {
+			m.rewindEngineErr = errors.New("rewind failed b")
+		}).
+		Build()
+
+	mockA := h.Mock(10)
+	mockB := h.Mock(8453)
+
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   1000,
+		L1Inclusion: eth.BlockID{Number: 50, Hash: common.HexToHash("0xL1a")},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			mockA.id: {Number: 100, Hash: common.HexToHash("0x1")},
+			mockB.id: {Number: 200, Hash: common.HexToHash("0x2")},
+		},
+	}))
+	require.NoError(t, h.interop.verifiedDB.Commit(VerifiedResult{
+		Timestamp:   1001,
+		L1Inclusion: eth.BlockID{Number: 51, Hash: common.HexToHash("0xL1b")},
+		L2Heads: map[eth.ChainID]eth.BlockID{
+			mockA.id: {Number: 101, Hash: common.HexToHash("0x3")},
+			mockB.id: {Number: 201, Hash: common.HexToHash("0x4")},
+		},
+	}))
+
+	lastTS := uint64(1001)
+	pending, err := h.interop.buildPendingTransition(
+		StepOutput{Decision: DecisionRewind},
+		RoundObservation{LastVerifiedTS: &lastTS},
+	)
+	require.NoError(t, err)
+	require.NoError(t, h.interop.verifiedDB.SetPendingTransition(pending))
+	_, err = h.interop.applyPendingTransition(pending)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "chain 10: reset chain engine on rewind")
+	require.Contains(t, err.Error(), "chain 8453: reset chain engine on rewind")
+}
+
 func TestPendingTransition_RecoverAdvanceAfterCommitClearsPendingTransition(t *testing.T) {
 	h := newInteropTestHarness(t). // newInteropTestHarness calls t.Parallel()
 		WithChain(10, nil).

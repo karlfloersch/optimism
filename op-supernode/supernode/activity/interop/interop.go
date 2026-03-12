@@ -536,10 +536,10 @@ func (i *Interop) applyRewindPlan(plan RewindPlan) error {
 		return fmt.Errorf("rewind verifiedDB: %w", err)
 	}
 
-	var firstErr error
+	var allErrs []error
 	recordErr := func(err error) {
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			allErrs = append(allErrs, err)
 		}
 	}
 
@@ -572,7 +572,7 @@ func (i *Interop) applyRewindPlan(plan RewindPlan) error {
 				recordErr(fmt.Errorf("chain %s: clear logsDB on full rewind: %w", chainID, err))
 			}
 		}
-		return firstErr
+		return errors.Join(allErrs...)
 	}
 
 	for chainID, db := range i.logsDBs {
@@ -593,7 +593,7 @@ func (i *Interop) applyRewindPlan(plan RewindPlan) error {
 		}
 	}
 
-	return firstErr
+	return errors.Join(allErrs...)
 }
 
 // collectCurrentL1 collects the current L1 head of all chains,
