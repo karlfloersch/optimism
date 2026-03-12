@@ -441,8 +441,9 @@ func (c *simpleChainContainer) OptimisticAt(ctx context.Context, ts uint64) (l2,
 		return eth.BlockID{}, eth.BlockID{}, err
 	}
 
-	// if there were Verification Activities, we could check if there was a pre-verified block which was added to the denylist
-	// but there are currently no verification activities, so we just return the l2 and l1 blocks
+	// VerifiedAt only constrains the result when registered verification
+	// activities report that the timestamp is not yet verified. Otherwise the
+	// current safe L2/L1 pair can be returned directly.
 	return l2Block.ID(), l1Block, nil
 }
 

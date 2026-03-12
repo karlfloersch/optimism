@@ -602,16 +602,6 @@ func (i *Interop) applyRewindPlan(plan RewindPlan) error {
 	return firstErr
 }
 
-// rewindAccepted rolls back the last verified timestamp and all dependent state:
-// verifiedDB entry, deny-list entries, logsDBs, and chain engines.
-func (i *Interop) rewindAccepted(lastTS uint64) error {
-	plan, err := i.buildRewindPlan(lastTS)
-	if err != nil {
-		return err
-	}
-	return i.applyRewindPlan(plan)
-}
-
 // collectCurrentL1 collects the current L1 head of all chains,
 // which is the minimum L1 head of all the derivation pipelines in Chain Containers
 func (i *Interop) collectCurrentL1() (eth.BlockID, error) {
@@ -708,7 +698,7 @@ func (i *Interop) VerifiedAtTimestamp(ts uint64) (bool, error) {
 	return i.verifiedDB.Has(ts)
 }
 
-// LatestVerifiedL3Block returns the latest L2 block which has been verified,
+// LatestVerifiedL2Block returns the latest L2 block which has been verified,
 // along with the timestamp at which it was verified.
 func (i *Interop) LatestVerifiedL2Block(chainID eth.ChainID) (eth.BlockID, uint64) {
 	emptyBlock := eth.BlockID{}
@@ -728,7 +718,7 @@ func (i *Interop) LatestVerifiedL2Block(chainID eth.ChainID) (eth.BlockID, uint6
 }
 
 // VerifiedBlockAtL1 returns the verified L2 block and timestamp
-// which guarantees that the verified data at that pauseAtTimestamp
+// which guarantees that the verified data at that timestamp
 // originates from or before the supplied L1 block.
 func (i *Interop) VerifiedBlockAtL1(chainID eth.ChainID, l1Block eth.L1BlockRef) (eth.BlockID, uint64) {
 	// If L1 block is empty/zero (e.g. during startup before FinalizedL1 is set),

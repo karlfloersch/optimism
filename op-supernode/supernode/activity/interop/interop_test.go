@@ -1627,7 +1627,9 @@ func TestRewindAccepted(t *testing.T) {
 		h.interop.logsDBs[chainID] = trackingDB
 
 		// Rewind timestamp 1001
-		err = h.interop.rewindAccepted(1001)
+		plan, err := h.interop.buildRewindPlan(1001)
+		require.NoError(t, err)
+		err = h.interop.applyRewindPlan(plan)
 		require.NoError(t, err)
 
 		// verifiedDB should only have T=1000
@@ -1663,7 +1665,9 @@ func TestRewindAccepted(t *testing.T) {
 		h.interop.logsDBs[chainID] = trackingDB
 
 		// Rewind the only entry — verifiedDB becomes empty
-		err = h.interop.rewindAccepted(1000)
+		plan, err := h.interop.buildRewindPlan(1000)
+		require.NoError(t, err)
+		err = h.interop.applyRewindPlan(plan)
 		require.NoError(t, err)
 
 		// logsDB should be cleared (no previous frontier to rewind to)

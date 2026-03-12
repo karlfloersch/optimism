@@ -82,8 +82,8 @@ func openLogsDB(logger log.Logger, chainID eth.ChainID, dataDir string) (LogsDB,
 }
 
 var (
-	// ErrPreviousTimestampNotSealed is returned when loadLogs is called but the
-	// previous timestamp has not been sealed in the logsDB.
+	// ErrPreviousTimestampNotSealed is returned when a logsDB write path needs a
+	// previous timestamp that has not been sealed yet.
 	ErrPreviousTimestampNotSealed = errors.New("previous timestamp not sealed in logsDB")
 
 	// ErrParentHashMismatch is returned when the block's parent hash does not match
@@ -95,77 +95,6 @@ var (
 	// the logsDB by trimming to the verified frontier and retrying.
 	ErrStaleLogsDB = errors.New("logsDB has stale block data from a reorg")
 )
-
-// loadLogs loads and persists logs for the given timestamp for all chains.
-// The previous timestamp MUST already be sealed in the database; if not, an error is returned.
-// For the activation timestamp (first timestamp), the logsDB must be empty.
-func (i *Interop) loadLogs(ts uint64) error {
-	for chainID, chain := range i.chains {
-		db := i.logsDBs[chainID]
-
-		// Verify the previous timestamp is sealed (or DB is empty for activation timestamp)
-		// Returns the hash of the previous sealed block, or nil if DB is empty
-		latestBlock, hasBlocks, err := i.verifyCanAddTimestamp(chainID, db, ts, chain.BlockTime())
-		if err != nil {
-			return err
-		}
-
-		// Get the block at timestamp ts
-		block, err := chain.LocalSafeBlockAtTimestamp(i.ctx, ts)
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to get block at timestamp %d: %w", chainID, ts, err)
-		}
-
-		// Fetch receipts for the block
-		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, block.ID())
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to fetch receipts for block %d: %w", chainID, block.Number, err)
-		}
-
-		// if the database has blocks, check if we can skip or need to verify continuity
-		if hasBlocks {
-			if latestBlock.Number > block.Number {
-				// logsDB is ahead — check the sealed block at the expected height
-				seal, err := db.FindSealedBlock(block.Number)
-				if err == nil && seal.Hash == block.ID().Hash {
-					continue // correct block already sealed at this height
-				}
-				// Either can't find the block or hash mismatch — stale data
-				return fmt.Errorf("chain %s: logsDB has stale data at height %d: %w",
-					chainID, block.Number, ErrStaleLogsDB)
-			}
-			if latestBlock.Number == block.Number {
-				if latestBlock.Hash == block.ID().Hash {
-					continue // already loaded this exact block
-				}
-				// Same height, different hash — reorg
-				return fmt.Errorf("chain %s: logsDB has block %s at height %d, expected %s: %w",
-					chainID, latestBlock.Hash, latestBlock.Number, block.ID().Hash, ErrStaleLogsDB)
-			}
-
-			// Verify chain continuity: block's parent must match the last sealed block
-			if blockInfo.ParentHash() != latestBlock.Hash {
-				return fmt.Errorf("chain %s: block %d parent hash %s does not match logsDB last sealed block hash %s: %w",
-					chainID, block.Number, blockInfo.ParentHash(), latestBlock.Hash, ErrParentHashMismatch)
-			}
-		}
-
-		// Process logs and seal the block
-		// If DB is empty (!hasBlocks), this is the first block - treat it as genesis for the logsDB
-		isFirstBlock := !hasBlocks
-		if err := i.processBlockLogs(db, blockInfo, receipts, isFirstBlock); err != nil {
-			return fmt.Errorf("chain %s: failed to process block logs for block %d: %w", chainID, block.Number, err)
-		}
-
-		i.log.Debug("loaded logs for chain",
-			"chain", chainID,
-			"block", block.Number,
-			"timestamp", ts,
-		)
-	}
-
-	return nil
-}
 
 // persistFrontierLogs persists the exact accepted frontier blocks for a
 // timestamp. This is the only frontier logsDB write path once verification is
