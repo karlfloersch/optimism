@@ -107,9 +107,6 @@ func (m *mockCC) InvalidateBlock(ctx context.Context, height uint64, payloadHash
 func (m *mockCC) PruneDeniedAtOrAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
 	return nil, nil
 }
-func (m *mockCC) ClearDenied() (map[uint64][]common.Hash, error) {
-	return nil, nil
-}
 func (m *mockCC) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
 }

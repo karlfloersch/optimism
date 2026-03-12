@@ -44,6 +44,11 @@ type ChainContainer interface {
 	OptimisticOutputAtTimestamp(ctx context.Context, ts uint64) (*eth.OutputResponse, error)
 	// RewindEngine rewinds the engine to the highest block with timestamp less than or equal to the given timestamp.
 	// invalidatedBlock is the block that triggered the rewind and is passed to reset callbacks.
+	// WARNING: this is a dangerous stateful operation and is intended to be called only
+	// by interop transition application. Other callers should not use it until the
+	// interface is refactored to make that ownership explicit.
+	// TODO: remove this footgun by moving reorg-triggering operations behind a
+	// smaller interop-owned interface.
 	RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error
 	RegisterVerifier(v activity.VerificationActivity)
 	// VerifierCurrentL1s returns the CurrentL1 from each registered verifier.
@@ -56,13 +61,16 @@ type ChainContainer interface {
 	BlockTime() uint64
 	// InvalidateBlock adds a block to the deny list and triggers a rewind if the chain
 	// currently uses that block at the specified height.
+	// WARNING: this is a dangerous stateful operation and is intended to be called only
+	// by interop transition application. Other callers should not use it until the
+	// interface is refactored to make that ownership explicit.
+	// TODO: remove this footgun by moving reorg-triggering operations behind a
+	// smaller interop-owned interface.
 	// Returns true if a rewind was triggered, false otherwise.
 	InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error)
 	// PruneDeniedAtOrAfterTimestamp removes deny-list entries with DecisionTimestamp >= timestamp.
 	// Returns map of removed hashes by height.
 	PruneDeniedAtOrAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error)
-	// ClearDenied removes ALL deny-list entries. Returns map of removed hashes by height.
-	ClearDenied() (map[uint64][]common.Hash, error)
 	// IsDenied checks if a block hash is on the deny list at the given height.
 	IsDenied(height uint64, payloadHash common.Hash) (bool, error)
 	// SetResetCallback sets a callback that is invoked when the chain resets.
@@ -441,8 +449,9 @@ func (c *simpleChainContainer) OptimisticAt(ctx context.Context, ts uint64) (l2,
 		return eth.BlockID{}, eth.BlockID{}, err
 	}
 
-	// if there were Verification Activities, we could check if there was a pre-verified block which was added to the denylist
-	// but there are currently no verification activities, so we just return the l2 and l1 blocks
+	// VerifiedAt only constrains the result when registered verification
+	// activities report that the timestamp is not yet verified. Otherwise the
+	// current safe L2/L1 pair can be returned directly.
 	return l2Block.ID(), l1Block, nil
 }
 
@@ -509,6 +518,10 @@ func isCriticalRewindError(err error) bool {
 		errors.Is(err, engine_controller.ErrRewindOverFinalizedHead)
 }
 
+// WARNING: this should only be called by interop transition application.
+// Other callers risk triggering chain rewinds outside the interop WAL model.
+// TODO: remove this footgun by moving reorg-triggering operations behind a
+// smaller interop-owned interface.
 func (c *simpleChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
 	if !c.resetting.CompareAndSwap(false, true) {
 		return fmt.Errorf("reset already in progress")

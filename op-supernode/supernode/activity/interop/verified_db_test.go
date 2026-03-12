@@ -333,7 +333,7 @@ func TestVerifiedDB_RewindTo(t *testing.T) {
 	})
 }
 
-func TestVerifiedDB_PendingInvalidations(t *testing.T) {
+func TestVerifiedDB_PendingTransition(t *testing.T) {
 	t.Parallel()
 
 	t.Run("set get clear round trip", func(t *testing.T) {
@@ -344,28 +344,36 @@ func TestVerifiedDB_PendingInvalidations(t *testing.T) {
 		defer vdb.Close()
 
 		// Initially empty
-		pending, err := vdb.GetPendingInvalidations()
+		pending, err := vdb.GetPendingTransition()
 		require.NoError(t, err)
 		require.Nil(t, pending)
 
 		// Set pending
-		invalidations := []PendingInvalidation{
-			{ChainID: eth.ChainIDFromUInt64(1), BlockID: eth.BlockID{Hash: common.HexToHash("0xaaaa"), Number: 100}, Timestamp: 42},
-			{ChainID: eth.ChainIDFromUInt64(2), BlockID: eth.BlockID{Hash: common.HexToHash("0xbbbb"), Number: 200}, Timestamp: 42},
+		transition := PendingTransition{
+			Decision: DecisionInvalidate,
+			Result: &Result{
+				Timestamp:   42,
+				L1Inclusion: eth.BlockID{Hash: common.HexToHash("0x1111"), Number: 42},
+				InvalidHeads: map[eth.ChainID]eth.BlockID{
+					eth.ChainIDFromUInt64(1): {Hash: common.HexToHash("0xaaaa"), Number: 100},
+					eth.ChainIDFromUInt64(2): {Hash: common.HexToHash("0xbbbb"), Number: 200},
+				},
+			},
 		}
-		require.NoError(t, vdb.SetPendingInvalidations(invalidations))
+		require.NoError(t, vdb.SetPendingTransition(transition))
 
 		// Get pending
-		got, err := vdb.GetPendingInvalidations()
+		got, err := vdb.GetPendingTransition()
 		require.NoError(t, err)
-		require.Len(t, got, 2)
-		require.Equal(t, invalidations[0].ChainID, got[0].ChainID)
-		require.Equal(t, invalidations[0].BlockID, got[0].BlockID)
-		require.Equal(t, invalidations[1].ChainID, got[1].ChainID)
+		require.NotNil(t, got)
+		require.Equal(t, transition.Decision, got.Decision)
+		require.NotNil(t, got.Result)
+		require.Equal(t, transition.Result.Timestamp, got.Result.Timestamp)
+		require.Equal(t, transition.Result.InvalidHeads, got.Result.InvalidHeads)
 
 		// Clear
-		require.NoError(t, vdb.ClearPendingInvalidations())
-		got, err = vdb.GetPendingInvalidations()
+		require.NoError(t, vdb.ClearPendingTransition())
+		got, err = vdb.GetPendingTransition()
 		require.NoError(t, err)
 		require.Nil(t, got)
 	})
@@ -377,10 +385,13 @@ func TestVerifiedDB_PendingInvalidations(t *testing.T) {
 		// Write pending and close
 		vdb, err := OpenVerifiedDB(dir)
 		require.NoError(t, err)
-		invalidations := []PendingInvalidation{
-			{ChainID: eth.ChainIDFromUInt64(1), BlockID: eth.BlockID{Hash: common.HexToHash("0xdead"), Number: 50}, Timestamp: 99},
+		transition := PendingTransition{
+			Decision: DecisionRewind,
+			Rewind: &RewindPlan{
+				RewindAtOrAfter: 99,
+			},
 		}
-		require.NoError(t, vdb.SetPendingInvalidations(invalidations))
+		require.NoError(t, vdb.SetPendingTransition(transition))
 		require.NoError(t, vdb.Close())
 
 		// Reopen and verify
@@ -388,11 +399,11 @@ func TestVerifiedDB_PendingInvalidations(t *testing.T) {
 		require.NoError(t, err)
 		defer vdb2.Close()
 
-		got, err := vdb2.GetPendingInvalidations()
+		got, err := vdb2.GetPendingTransition()
 		require.NoError(t, err)
-		require.Len(t, got, 1)
-		require.Equal(t, invalidations[0].ChainID, got[0].ChainID)
-		require.Equal(t, invalidations[0].BlockID, got[0].BlockID)
-		require.Equal(t, invalidations[0].Timestamp, got[0].Timestamp)
+		require.NotNil(t, got)
+		require.Equal(t, transition.Decision, got.Decision)
+		require.NotNil(t, got.Rewind)
+		require.Equal(t, transition.Rewind.RewindAtOrAfter, got.Rewind.RewindAtOrAfter)
 	})
 }
