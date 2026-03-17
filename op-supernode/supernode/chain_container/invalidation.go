@@ -3,6 +3,7 @@ package chain_container
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,11 @@ var denyListBucketName = []byte("denied_blocks")
 type DenyList struct {
 	db *bolt.DB
 	mu sync.RWMutex
+}
+
+type DenyRecord struct {
+	PayloadHash       common.Hash `json:"payloadHash"`
+	DecisionTimestamp uint64      `json:"decisionTimestamp"`
 }
 
 // OpenDenyList opens or creates a DenyList at the given data directory.
@@ -60,7 +66,7 @@ func heightToKey(height uint64) []byte {
 
 // Add adds a payload hash to the deny list at the given block height.
 // Multiple hashes can be denied at the same height.
-func (d *DenyList) Add(height uint64, payloadHash common.Hash) error {
+func (d *DenyList) Add(height uint64, payloadHash common.Hash, decisionTimestamp uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -68,25 +74,24 @@ func (d *DenyList) Add(height uint64, payloadHash common.Hash) error {
 
 	return d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-
-		// Get existing hashes at this height
-		existing := b.Get(key)
-		var hashes []byte
-		if existing != nil {
-			// Check if hash already exists
-			for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-				if common.BytesToHash(existing[i:i+common.HashLength]) == payloadHash {
-					// Already denied
-					return nil
-				}
-			}
-			hashes = make([]byte, len(existing), len(existing)+common.HashLength)
-			copy(hashes, existing)
+		records, err := decodeDenyRecords(b.Get(key))
+		if err != nil {
+			return err
 		}
-
-		// Append the new hash
-		hashes = append(hashes, payloadHash.Bytes()...)
-		return b.Put(key, hashes)
+		for _, record := range records {
+			if record.PayloadHash == payloadHash {
+				return nil
+			}
+		}
+		records = append(records, DenyRecord{
+			PayloadHash:       payloadHash,
+			DecisionTimestamp: decisionTimestamp,
+		})
+		encoded, err := encodeDenyRecords(records)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, encoded)
 	})
 }
 
@@ -100,14 +105,15 @@ func (d *DenyList) Contains(height uint64, payloadHash common.Hash) (bool, error
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-		existing := b.Get(key)
-		if existing == nil {
+		records, err := decodeDenyRecords(b.Get(key))
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
 			return nil
 		}
-
-		// Search for the hash in the list
-		for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-			if common.BytesToHash(existing[i:i+common.HashLength]) == payloadHash {
+		for _, record := range records {
+			if record.PayloadHash == payloadHash {
 				found = true
 				return nil
 			}
@@ -128,18 +134,199 @@ func (d *DenyList) GetDeniedHashes(height uint64) ([]common.Hash, error) {
 
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(denyListBucketName)
-		existing := b.Get(key)
-		if existing == nil {
+		records, err := decodeDenyRecords(b.Get(key))
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
 			return nil
 		}
-
-		for i := 0; i+common.HashLength <= len(existing); i += common.HashLength {
-			hashes = append(hashes, common.BytesToHash(existing[i:i+common.HashLength]))
+		for _, record := range records {
+			hashes = append(hashes, record.PayloadHash)
 		}
 		return nil
 	})
 
 	return hashes, err
+}
+
+// GetDeniedRecords returns all denied records at the given block height.
+func (d *DenyList) GetDeniedRecords(height uint64) ([]DenyRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	key := heightToKey(height)
+	var records []DenyRecord
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		decoded, err := decodeDenyRecords(b.Get(key))
+		if err != nil {
+			return err
+		}
+		records = decoded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// PruneAfterTimestamp removes deny records with decision timestamp greater than the given timestamp.
+// Returns the removed payload hashes grouped by block height.
+func (d *DenyList) PruneAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	removed := make(map[uint64][]common.Hash)
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			height := binary.BigEndian.Uint64(k)
+			records, err := decodeDenyRecords(v)
+			if err != nil {
+				return err
+			}
+			kept := make([]DenyRecord, 0, len(records))
+			for _, record := range records {
+				if record.DecisionTimestamp > timestamp {
+					removed[height] = append(removed[height], record.PayloadHash)
+					continue
+				}
+				kept = append(kept, record)
+			}
+			if len(kept) == len(records) {
+				continue
+			}
+			if len(kept) == 0 {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				continue
+			}
+			encoded, err := encodeDenyRecords(kept)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// PruneAtTimestamp removes deny records with decision timestamp equal to the given timestamp.
+// Returns the removed payload hashes grouped by block height.
+func (d *DenyList) PruneAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	removed := make(map[uint64][]common.Hash)
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			height := binary.BigEndian.Uint64(k)
+			records, err := decodeDenyRecords(v)
+			if err != nil {
+				return err
+			}
+			kept := make([]DenyRecord, 0, len(records))
+			for _, record := range records {
+				if record.DecisionTimestamp == timestamp {
+					removed[height] = append(removed[height], record.PayloadHash)
+					continue
+				}
+				kept = append(kept, record)
+			}
+			if len(kept) == len(records) {
+				continue
+			}
+			if len(kept) == 0 {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				continue
+			}
+			encoded, err := encodeDenyRecords(kept)
+			if err != nil {
+				return err
+			}
+			if err := b.Put(k, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// Clear removes all deny records and returns the removed payload hashes grouped by height.
+func (d *DenyList) Clear() (map[uint64][]common.Hash, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	removed := make(map[uint64][]common.Hash)
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(denyListBucketName)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			height := binary.BigEndian.Uint64(k)
+			records, err := decodeDenyRecords(v)
+			if err != nil {
+				return err
+			}
+			for _, record := range records {
+				removed[height] = append(removed[height], record.PayloadHash)
+			}
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+func encodeDenyRecords(records []DenyRecord) ([]byte, error) {
+	return json.Marshal(records)
+}
+
+func decodeDenyRecords(raw []byte) ([]DenyRecord, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var records []DenyRecord
+	if err := json.Unmarshal(raw, &records); err == nil {
+		return records, nil
+	}
+
+	// Backward compatibility with the legacy concatenated-hash format.
+	if len(raw)%common.HashLength != 0 {
+		return nil, fmt.Errorf("invalid denylist record payload length %d", len(raw))
+	}
+	records = make([]DenyRecord, 0, len(raw)/common.HashLength)
+	for i := 0; i+common.HashLength <= len(raw); i += common.HashLength {
+		records = append(records, DenyRecord{
+			PayloadHash:       common.BytesToHash(raw[i : i+common.HashLength]),
+			DecisionTimestamp: 0,
+		})
+	}
+	return records, nil
 }
 
 // Close closes the database.
@@ -151,7 +338,7 @@ func (d *DenyList) Close() error {
 // currently uses that block at the specified height.
 // Returns true if a rewind was triggered, false otherwise.
 // Note: Genesis block (height=0) cannot be invalidated as there is no prior block to rewind to.
-func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
 	if c.denyList == nil {
 		return false, fmt.Errorf("deny list not initialized")
 	}
@@ -162,13 +349,14 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	}
 
 	// Add to deny list first
-	if err := c.denyList.Add(height, payloadHash); err != nil {
+	if err := c.denyList.Add(height, payloadHash, decisionTimestamp); err != nil {
 		return false, fmt.Errorf("failed to add block to deny list: %w", err)
 	}
 
 	c.log.Info("added block to deny list",
 		"height", height,
 		"payloadHash", payloadHash,
+		"decisionTimestamp", decisionTimestamp,
 	)
 
 	// Check if the current chain uses this block at this height
@@ -212,4 +400,25 @@ func (c *simpleChainContainer) InvalidateBlock(ctx context.Context, height uint6
 	)
 
 	return true, nil
+}
+
+func (c *simpleChainContainer) PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneAfterTimestamp(timestamp)
+}
+
+func (c *simpleChainContainer) PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.PruneAtTimestamp(timestamp)
+}
+
+func (c *simpleChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
+	if c.denyList == nil {
+		return nil, fmt.Errorf("deny list not initialized")
+	}
+	return c.denyList.Clear()
 }

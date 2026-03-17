@@ -11,6 +11,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	interopcontroller "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/controller"
+	interopengine "github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop/engine"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/db/logs"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/processors"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/reads"
@@ -95,6 +97,25 @@ var (
 // The previous timestamp MUST already be sealed in the database; if not, an error is returned.
 // For the activation timestamp (first timestamp), the logsDB must be empty.
 func (i *Interop) loadLogs(ts uint64) error {
+	blocksAtTimestamp, err := i.checkChainsReady(ts)
+	if err != nil {
+		return err
+	}
+	return i.loadLogsForBlocks(ts, blocksAtTimestamp)
+}
+
+func (i *Interop) loadLogsForBlocks(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID) error {
+	evidence, err := resolveRuntimeFrontierEvidence(i.ctx, i, interopengine.FrontierSnapshot{
+		Timestamp: ts,
+		L2Heads:   blocksAtTimestamp,
+	})
+	if err != nil {
+		return err
+	}
+	return i.loadLogsFromEvidence(ts, blocksAtTimestamp, evidence.Blocks)
+}
+
+func (i *Interop) loadLogsFromEvidence(ts uint64, blocksAtTimestamp map[eth.ChainID]eth.BlockID, evidence map[eth.ChainID]interopcontroller.BlockEvidence) error {
 	for chainID, chain := range i.chains {
 		db := i.logsDBs[chainID]
 
@@ -105,29 +126,35 @@ func (i *Interop) loadLogs(ts uint64) error {
 			return err
 		}
 
-		// Get the block at timestamp ts
-		block, err := chain.LocalSafeBlockAtTimestamp(i.ctx, ts)
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to get block at timestamp %d: %w", chainID, ts, err)
+		blockID, ok := blocksAtTimestamp[chainID]
+		if !ok {
+			return fmt.Errorf("chain %s: missing frontier block at timestamp %d", chainID, ts)
+		}
+		blockEvidence, ok := evidence[chainID]
+		if !ok {
+			return fmt.Errorf("chain %s: missing frontier evidence at timestamp %d", chainID, ts)
+		}
+		if blockEvidence.BlockInfo.Hash() != blockID.Hash || blockEvidence.BlockInfo.NumberU64() != blockID.Number {
+			return fmt.Errorf("chain %s: frontier evidence block %s does not match requested block %s",
+				chainID,
+				eth.BlockID{Hash: blockEvidence.BlockInfo.Hash(), Number: blockEvidence.BlockInfo.NumberU64()},
+				blockID)
 		}
 
-		// Fetch receipts for the block
-		blockInfo, receipts, err := chain.FetchReceipts(i.ctx, block.ID())
-		if err != nil {
-			return fmt.Errorf("chain %s: failed to fetch receipts for block %d: %w", chainID, block.Number, err)
-		}
+		blockInfo := blockEvidence.BlockInfo
+		receipts := blockEvidence.Receipts
 
 		// if the database has blocks, check if we can skip or need to verify continuity
 		if hasBlocks {
 			// if the latest block is the same or beyond the block we are loading, skip loading
-			if latestBlock.Number >= block.Number {
+			if latestBlock.Number >= blockID.Number {
 				continue
 			}
 
 			// Verify chain continuity: block's parent must match the last sealed block
 			if blockInfo.ParentHash() != latestBlock.Hash {
 				return fmt.Errorf("chain %s: block %d parent hash %s does not match logsDB last sealed block hash %s: %w",
-					chainID, block.Number, blockInfo.ParentHash(), latestBlock.Hash, ErrParentHashMismatch)
+					chainID, blockID.Number, blockInfo.ParentHash(), latestBlock.Hash, ErrParentHashMismatch)
 			}
 		}
 
@@ -135,16 +162,52 @@ func (i *Interop) loadLogs(ts uint64) error {
 		// If DB is empty (!hasBlocks), this is the first block - treat it as genesis for the logsDB
 		isFirstBlock := !hasBlocks
 		if err := i.processBlockLogs(db, blockInfo, receipts, isFirstBlock); err != nil {
-			return fmt.Errorf("chain %s: failed to process block logs for block %d: %w", chainID, block.Number, err)
+			return fmt.Errorf("chain %s: failed to process block logs for block %d: %w", chainID, blockID.Number, err)
 		}
 
 		i.log.Debug("loaded logs for chain",
 			"chain", chainID,
-			"block", block.Number,
+			"block", blockID.Number,
 			"timestamp", ts,
 		)
 	}
 
+	return nil
+}
+
+func (i *Interop) rewindLogsDBToHead(chainID eth.ChainID, db LogsDB, targetBlockID eth.BlockID) error {
+	if targetBlockID == (eth.BlockID{}) {
+		i.log.Info("clearing logsDB to empty head", "chainID", chainID)
+		if err := db.Clear(&noopInvalidator{}); err != nil {
+			return fmt.Errorf("clear logsDB for chain %s: %w", chainID, err)
+		}
+		return nil
+	}
+
+	firstBlock, err := db.FirstSealedBlock()
+	if err != nil {
+		i.log.Info("logsDB appears empty or errored during targeted rewind, clearing", "chainID", chainID, "err", err)
+		if clearErr := db.Clear(&noopInvalidator{}); clearErr != nil {
+			return fmt.Errorf("clear logsDB for chain %s after first block lookup failure: %w", chainID, clearErr)
+		}
+		return nil
+	}
+
+	if firstBlock.Number > targetBlockID.Number {
+		i.log.Info("clearing logsDB because target head predates first sealed block", "chainID", chainID, "firstBlock", firstBlock.Number, "targetBlock", targetBlockID.Number)
+		if err := db.Clear(&noopInvalidator{}); err != nil {
+			return fmt.Errorf("clear logsDB for chain %s: %w", chainID, err)
+		}
+		return nil
+	}
+
+	i.log.Info("rewinding logsDB to exact head", "chainID", chainID, "targetBlock", targetBlockID.Number)
+	if err := db.Rewind(&noopInvalidator{}, targetBlockID); err != nil {
+		i.log.Warn("exact logsDB rewind failed, clearing cache", "chainID", chainID, "targetBlock", targetBlockID, "err", err)
+		if clearErr := db.Clear(&noopInvalidator{}); clearErr != nil {
+			return fmt.Errorf("clear logsDB for chain %s after rewind conflict: %w", chainID, clearErr)
+		}
+	}
 	return nil
 }
 

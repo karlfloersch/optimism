@@ -537,7 +537,7 @@ func TestLoadLogs_ParentHashMismatch(t *testing.T) {
 	}
 
 	chains := map[eth.ChainID]cc.ChainContainer{chainID: mockChain}
-	interop := New(gethlog.New(), 1000, chains, dataDir)
+	interop := New(gethlog.New(), 1000, chains, dataDir, nil)
 	require.NotNil(t, interop)
 	interop.ctx = context.Background()
 	defer func() { _ = interop.Stop(context.Background()) }()
@@ -678,11 +678,20 @@ func (m *statefulMockChainContainer) BlockTime() uint64 { return 1 }
 func (m *statefulMockChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
 	return nil
 }
-func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash) (bool, error) {
+func (m *statefulMockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64) (bool, error) {
 	return false, nil
 }
 func (m *statefulMockChainContainer) IsDenied(height uint64, payloadHash common.Hash) (bool, error) {
 	return false, nil
+}
+func (m *statefulMockChainContainer) PruneDeniedAfterTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *statefulMockChainContainer) PruneDeniedAtTimestamp(timestamp uint64) (map[uint64][]common.Hash, error) {
+	return nil, nil
+}
+func (m *statefulMockChainContainer) ClearDenied() (map[uint64][]common.Hash, error) {
+	return nil, nil
 }
 func (m *statefulMockChainContainer) SetResetCallback(cb cc.ResetCallback) {}
 
