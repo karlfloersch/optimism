@@ -220,7 +220,9 @@ func TestInteropUpgrade(gt *testing.T) {
 }
 
 func VerifyContractsDeployedCorrectly(t helpers.Testing, chain *dsl.Chain, activationBlockTxs []*types.Transaction, activationBlockID eth.BlockID) {
-	require.Len(t, activationBlockTxs, 5) // 4 upgrade txs + 1 system deposit tx
+	expectedUpgradeTransactions, err := derive.InteropNetworkUpgradeTransactions()
+	require.NoError(t, err)
+	require.Len(t, activationBlockTxs, len(expectedUpgradeTransactions)+1) // +1 for the L1 info tx
 	upgradeTransactions := activationBlockTxs[1:]
 	upgradeTransactionBytes := make([]hexutil.Bytes, len(upgradeTransactions))
 	for i, tx := range upgradeTransactions {
@@ -229,13 +231,12 @@ func VerifyContractsDeployedCorrectly(t helpers.Testing, chain *dsl.Chain, activ
 		upgradeTransactionBytes[i] = txBytes
 	}
 
-	expectedUpgradeTransactions, err := derive.InteropNetworkUpgradeTransactions()
-	require.NoError(t, err)
-
 	require.Equal(t, upgradeTransactionBytes, expectedUpgradeTransactions)
 
 	RequireContractDeployedAndProxyUpdated(t, chain, derive.CrossL2InboxAddress, predeploys.CrossL2InboxAddr, new(big.Int).SetUint64(activationBlockID.Number))
 	RequireContractDeployedAndProxyUpdated(t, chain, derive.L2ToL2MessengerAddress, predeploys.L2toL2CrossDomainMessengerAddr, new(big.Int).SetUint64(activationBlockID.Number))
+	RequireContractDeployedAndProxyUpdated(t, chain, derive.SuperchainETHBridgeAddress, predeploys.SuperchainETHBridgeAddr, new(big.Int).SetUint64(activationBlockID.Number))
+	RequireContractDeployedAndProxyUpdated(t, chain, derive.ETHLiquidityAddress, predeploys.ETHLiquidityAddr, new(big.Int).SetUint64(activationBlockID.Number))
 }
 
 // Runs superchain fault proofs across entire superchain pseudo-blocks
