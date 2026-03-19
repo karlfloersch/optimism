@@ -295,6 +295,8 @@ contract L2Genesis is Script {
             // Both flags must be explicitly set in order to enable Interop
             setCrossL2Inbox(); // 22
             setL2ToL2CrossDomainMessenger(); // 23
+            setSuperchainETHBridge(); // 24
+            setETHLiquidity(); // 25
         }
         if (_input.useCustomGasToken) {
             setLiquidityController(_input); // 29
