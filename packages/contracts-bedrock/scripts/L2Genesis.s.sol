@@ -550,7 +550,7 @@ contract L2Genesis is Script {
     ///         This contract has no initializer.
     function setETHLiquidity() internal {
         _setImplementationCode(Predeploys.ETH_LIQUIDITY);
-        vm.deal(Predeploys.ETH_LIQUIDITY, type(uint248).max);
+        vm.deal(Predeploys.ETH_LIQUIDITY, type(uint128).max);
     }
 
     /// @notice This predeploy is following the safety invariant #1.

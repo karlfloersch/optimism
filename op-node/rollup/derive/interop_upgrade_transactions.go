@@ -44,9 +44,9 @@ var (
 
 // interopETHLiquidityFundingAmount returns the bootstrap liquidity minted into the
 // ETHLiquidity contract at interop activation. This is set to the maximum uint128
-// value (2^128 - 1) to provide ample liquidity for cross-chain ETH bridging without
-// risking overflow when combined with normal chain balances in uint256 accounting.
-func interopETHLiquidityFundingAmount() *big.Int {
+// value (2^128 - 1), which is the maximum value supported by the deposit tx mint
+// field, providing ample liquidity for cross-chain ETH bridging.
+func InteropETHLiquidityFundingAmount() *big.Int {
 	v, _ := new(big.Int).SetString("ffffffffffffffffffffffffffffffff", 16)
 	return v
 }
@@ -159,8 +159,8 @@ func InteropNetworkUpgradeTransactions() ([]hexutil.Bytes, error) {
 		SourceHash:          interopETHLiquidityFundingSource.SourceHash(),
 		From:                L1InfoDepositerAddress,
 		To:                  &predeploys.ETHLiquidityAddr,
-		Mint:                interopETHLiquidityFundingAmount(),
-		Value:               interopETHLiquidityFundingAmount(),
+		Mint:                InteropETHLiquidityFundingAmount(),
+		Value:               InteropETHLiquidityFundingAmount(),
 		Gas:                 50_000,
 		IsSystemTransaction: false,
 		Data:                interopETHLiquidityFundingCalldata,
