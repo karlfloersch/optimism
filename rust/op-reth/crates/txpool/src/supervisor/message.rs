@@ -19,10 +19,9 @@
 /// An [`ExecutingDescriptor`] is a part of the payload to `supervisor_checkAccessList`
 /// Spec: <https://github.com/ethereum-optimism/specs/blob/main/specs/interop/supervisor.md#executingdescriptor>
 #[derive(Default, Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ExecutingDescriptor {
     /// The chain ID of the executing chain.
-    #[serde(with = "alloy_serde::quantity")]
+    #[serde(rename = "chainID", with = "alloy_serde::quantity")]
     chain_id: u64,
     /// The timestamp used to enforce timestamp [invariant](https://github.com/ethereum-optimism/specs/blob/main/specs/interop/derivation.md#invariants)
     #[serde(with = "alloy_serde::quantity")]
