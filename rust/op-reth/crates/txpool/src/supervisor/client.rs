@@ -42,7 +42,10 @@ pub struct SupervisorClient {
 
 impl SupervisorClient {
     /// Returns a new [`SupervisorClientBuilder`].
-    pub fn builder(supervisor_endpoint: impl Into<String>, chain_id: u64) -> SupervisorClientBuilder {
+    pub fn builder(
+        supervisor_endpoint: impl Into<String>,
+        chain_id: u64,
+    ) -> SupervisorClientBuilder {
         SupervisorClientBuilder::new(supervisor_endpoint, chain_id)
     }
 
