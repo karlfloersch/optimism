@@ -30,7 +30,8 @@ type Backend struct {
 	manualFailsafe atomic.Bool
 
 	// Passthrough mode: all transactions pass without filtering
-	passthrough bool
+	passthrough  bool
+	senderPolicy *SenderPolicy
 
 	cancel context.CancelFunc
 }
@@ -42,6 +43,7 @@ type BackendParams struct {
 	Chains         map[eth.ChainID]ChainIngester
 	CrossValidator CrossValidator
 	Passthrough    bool
+	SenderPolicy   *SenderPolicy
 }
 
 // NewBackend creates a new Backend instance with the provided components.
@@ -54,6 +56,7 @@ func NewBackend(parentCtx context.Context, params BackendParams) *Backend {
 		chains:         params.Chains,
 		crossValidator: params.CrossValidator,
 		passthrough:    params.Passthrough,
+		senderPolicy:   params.SenderPolicy,
 		cancel:         cancel,
 	}
 }
@@ -136,7 +139,7 @@ func supportedSafetyLevel(level types.SafetyLevel) bool {
 
 // CheckAccessList validates the given access list entries.
 func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
+	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor, sender common.Address) error {
 
 	if b.passthrough {
 		b.metrics.RecordCheckAccessList(true)
@@ -162,6 +165,12 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	if _, ok := b.chains[execDescriptor.ChainID]; !ok {
 		b.metrics.RecordCheckAccessList(false)
 		return fmt.Errorf("executing chain %s: %w", execDescriptor.ChainID, types.ErrUnknownChain)
+	}
+
+	if !b.senderPolicy.Allows(sender) {
+		b.log.Debug("Rejecting interop tx from unauthorized sender", "sender", sender)
+		b.metrics.RecordCheckAccessList(false)
+		return fmt.Errorf("%w: %s", types.ErrUnauthorizedSender, sender)
 	}
 
 	remaining := inboxEntries

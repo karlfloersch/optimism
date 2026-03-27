@@ -101,7 +101,7 @@ func TestPreNoInbox(gt *testing.T) {
 		accessEntries := []stypes.Access{execTrigger.Msg.Access()}
 		accessList := stypes.EncodeAccessList(accessEntries)
 
-		err = sys.Supervisor.Escape().QueryAPI().CheckAccessList(ctx, accessList, stypes.CrossSafe, ed)
+		err = sys.Supervisor.Escape().QueryAPI().CheckAccessList(ctx, accessList, stypes.CrossSafe, ed, common.Address{})
 		require.ErrorContains(err, "conflicting data")
 	}
 

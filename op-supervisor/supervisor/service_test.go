@@ -72,7 +72,7 @@ func TestSupervisorService(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 		err = cl.CallContext(ctx, nil, "supervisor_checkAccessList",
 			[]common.Hash{}, types.CrossUnsafe, types.ExecutingDescriptor{
-				Timestamp: 1234568, ChainID: eth.ChainIDFromUInt64(123)})
+				Timestamp: 1234568, ChainID: eth.ChainIDFromUInt64(123)}, common.Address{})
 		cancel()
 		require.NoError(t, err)
 		cl.Close()

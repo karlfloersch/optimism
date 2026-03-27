@@ -237,13 +237,13 @@ func TestInterop_EmitLogs(t *testing.T) {
 		timestamp := uint64(time.Now().Unix())
 		ed := types.ExecutingDescriptor{Timestamp: timestamp, ChainID: eth.ChainIDFromBig(s2.ChainID(chainB))}
 		ctx = context.Background()
-		err = supervisor.CheckAccessList(ctx, accessList, types.CrossSafe, ed)
+		err = supervisor.CheckAccessList(ctx, accessList, types.CrossSafe, ed, common.Address{})
 		require.NoError(t, err, "logsA must all be cross-safe")
 
 		// a log should be invalid if the timestamp is incorrect
 		accessEntries[0].Timestamp = 333
 		accessList = types.EncodeAccessList(accessEntries)
-		err = supervisor.CheckAccessList(ctx, accessList, types.CrossSafe, ed)
+		err = supervisor.CheckAccessList(ctx, accessList, types.CrossSafe, ed, common.Address{})
 		require.ErrorContains(t, err, "conflict")
 	}
 	config := SuperSystemConfig{

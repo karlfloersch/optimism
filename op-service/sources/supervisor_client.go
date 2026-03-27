@@ -74,8 +74,8 @@ func (cl *SupervisorClient) GetFailsafeEnabled(ctx context.Context) (bool, error
 }
 
 func (cl *SupervisorClient) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor) error {
-	return cl.client.CallContext(ctx, nil, "supervisor_checkAccessList", inboxEntries, minSafety, executingDescriptor)
+	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor, sender common.Address) error {
+	return cl.client.CallContext(ctx, nil, "supervisor_checkAccessList", inboxEntries, minSafety, executingDescriptor, sender)
 }
 
 func (cl *SupervisorClient) CrossDerivedToSource(ctx context.Context, chainID eth.ChainID, derived eth.BlockID) (derivedFrom eth.BlockRef, err error) {

@@ -46,6 +46,8 @@ var (
 	ErrUninitialized = errors.New("uninitialized chain database")
 	// ErrFailsafeEnabled is when failsafe is enabled and the request is rejected
 	ErrFailsafeEnabled = errors.New("failsafe is enabled, rejecting all CheckAccessList requests")
+	// ErrUnauthorizedSender is when the sender is not permitted to submit interop transactions.
+	ErrUnauthorizedSender = errors.New("sender not allowed")
 )
 
 var genericInvalidParamsErr = -32602
@@ -68,6 +70,7 @@ var errorCodeMap = map[error]int{
 
 	ErrNoRPCSource:             genericInvalidParamsErr,
 	ErrFailsafeEnabled:         genericInvalidParamsErr,
+	ErrUnauthorizedSender:      genericInvalidParamsErr,
 	ErrInvalidatedRead:         genericInvalidParamsErr,
 	ErrAlreadyInvalidatingRead: genericInvalidParamsErr,
 	ErrRewindFailed:            genericInvalidParamsErr,

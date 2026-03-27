@@ -18,9 +18,9 @@ type QueryFrontend struct {
 
 // CheckAccessList validates interop executing messages
 func (f *QueryFrontend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor) error {
+	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor, sender common.Address) error {
 
-	err := f.backend.CheckAccessList(ctx, inboxEntries, minSafety, executingDescriptor)
+	err := f.backend.CheckAccessList(ctx, inboxEntries, minSafety, executingDescriptor, sender)
 	if err != nil {
 		return &rpc.JsonError{
 			Code:    types.GetErrorCode(err),
