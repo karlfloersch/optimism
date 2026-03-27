@@ -139,7 +139,7 @@ func supportedSafetyLevel(level types.SafetyLevel) bool {
 
 // CheckAccessList validates the given access list entries.
 func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor, sender common.Address) error {
+	minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor, sender *common.Address) error {
 
 	if b.passthrough {
 		b.metrics.RecordCheckAccessList(true)
@@ -167,8 +167,12 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 		return fmt.Errorf("executing chain %s: %w", execDescriptor.ChainID, types.ErrUnknownChain)
 	}
 
-	if !b.senderPolicy.Allows(sender) {
-		b.log.Debug("Rejecting interop tx from unauthorized sender", "sender", sender)
+	senderAddr := common.Address{}
+	if sender != nil {
+		senderAddr = *sender
+	}
+	if !b.senderPolicy.Allows(senderAddr) {
+		b.log.Debug("Rejecting interop tx from unauthorized sender", "sender", senderAddr)
 		b.metrics.RecordCheckAccessList(false)
 		return fmt.Errorf("%w: %s", types.ErrUnauthorizedSender, sender)
 	}

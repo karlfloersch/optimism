@@ -26,7 +26,7 @@ type SupervisorAdminAPI interface {
 
 type SupervisorQueryAPI interface {
 	CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-		minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor, sender common.Address) error
+		minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor, sender *common.Address) error
 	CrossDerivedToSource(ctx context.Context, chainID eth.ChainID, derived eth.BlockID) (derivedFrom eth.BlockRef, err error)
 	LocalUnsafe(ctx context.Context, chainID eth.ChainID) (eth.BlockID, error)
 	LocalSafe(ctx context.Context, chainID eth.ChainID) (result types.DerivedIDPair, err error)
