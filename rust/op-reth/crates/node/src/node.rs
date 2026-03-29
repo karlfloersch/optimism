@@ -985,37 +985,29 @@ where
     ) -> eyre::Result<Self::Pool> {
         let Self { pool_config_overrides, interop_allowed_senders, .. } = self;
 
-        // Parse interop allowed senders.
-        //   - Not set (empty vec) → Some(empty set) → all interop txs blocked (fail closed)
-        //   - ["*"]               → None            → any sender allowed (explicit wildcard)
-        //   - ["0xABC", "0xDEF"]  → Some({ABC,DEF}) → only those senders
-        let allowed_interop_senders = if interop_allowed_senders.len() == 1
-            && interop_allowed_senders[0] == "*"
-        {
-            info!(target: "reth::cli",
-                "Interop sender allow-list set to wildcard (*), any sender may submit cross-chain transactions"
-            );
-            None
-        } else {
-            let mut senders = std::collections::HashSet::new();
-            for s in &interop_allowed_senders {
-                let addr: alloy_primitives::Address = s.parse().map_err(|_| {
-                    eyre::eyre!("invalid interop allowed sender address: {s}")
-                })?;
-                senders.insert(addr);
-            }
-            if senders.is_empty() {
+        let interop_sender_policy = reth_optimism_txpool::InteropSenderPolicy::parse(
+            &interop_allowed_senders,
+        )
+        .map_err(|e| eyre::eyre!(e))?;
+
+        match &interop_sender_policy {
+            reth_optimism_txpool::InteropSenderPolicy::BlockAll => {
                 info!(target: "reth::cli",
                     "No --rollup.interop-allowed-senders configured, all interop transactions will be rejected"
                 );
-            } else {
+            }
+            reth_optimism_txpool::InteropSenderPolicy::AllowList(set) => {
                 info!(target: "reth::cli",
-                    count = senders.len(),
+                    count = set.len(),
                     "Interop sender allow-list configured, only allowed senders may submit cross-chain transactions"
                 );
             }
-            Some(senders)
-        };
+            reth_optimism_txpool::InteropSenderPolicy::AllowAll => {
+                info!(target: "reth::cli",
+                    "Interop sender allow-list set to wildcard (*), any sender may submit cross-chain transactions"
+                );
+            }
+        }
 
         // supervisor used for interop txpool validation
         let supervisor_client = if let Some(url) = self.supervisor_http.clone() {
@@ -1054,7 +1046,7 @@ where
                         // In --dev mode we can't require gas fees because we're unable to decode
                         // the L1 block info
                         .require_l1_data_gas_fee(!ctx.config().dev.dev)
-                        .with_allowed_interop_senders(allowed_interop_senders.clone());
+                        .with_interop_sender_policy(interop_sender_policy.clone());
                     if let Some(client) = supervisor_client.clone() {
                         v = v.with_supervisor(client);
                     }

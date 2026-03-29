@@ -240,6 +240,34 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_interop_allowed_senders() {
+        let args = CommandParser::<RollupArgs>::parse_from([
+            "reth",
+            "--rollup.interop-allowed-senders",
+            "0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222",
+        ])
+        .args;
+        assert_eq!(
+            args.interop_allowed_senders,
+            vec![
+                "0x1111111111111111111111111111111111111111",
+                "0x2222222222222222222222222222222222222222",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_interop_allowed_senders_wildcard() {
+        let args = CommandParser::<RollupArgs>::parse_from([
+            "reth",
+            "--rollup.interop-allowed-senders",
+            "*",
+        ])
+        .args;
+        assert_eq!(args.interop_allowed_senders, vec!["*"]);
+    }
+
+    #[test]
     fn test_parse_optimism_many_args() {
         let expected_args = RollupArgs {
             disable_txpool_gossip: true,

@@ -1,6 +1,6 @@
 use crate::{
     InvalidCrossTx, OpPooledTx,
-    supervisor::{SupervisorClient, parse_access_list_items_to_inbox_entries},
+    supervisor::{SupervisorClient, has_interop_inbox_entries},
 };
 use alloy_consensus::{BlockHeader, Transaction};
 use alloy_primitives::Address;
@@ -26,6 +26,49 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
+
+/// Policy for which senders are allowed to submit interop (cross-chain) transactions.
+#[derive(Debug, Clone)]
+pub enum InteropSenderPolicy {
+    /// All interop transactions are rejected (default, fail-closed).
+    BlockAll,
+    /// Only these senders may submit interop transactions.
+    AllowList(Arc<HashSet<Address>>),
+    /// Any sender may submit interop transactions (explicit wildcard).
+    AllowAll,
+}
+
+impl InteropSenderPolicy {
+    /// Returns `true` if the given sender is allowed to submit interop transactions.
+    pub fn allows(&self, sender: &Address) -> bool {
+        match self {
+            Self::BlockAll => false,
+            Self::AllowList(set) => set.contains(sender),
+            Self::AllowAll => true,
+        }
+    }
+
+    /// Parse from CLI flag values.
+    ///   - Empty vec → `BlockAll` (fail closed)
+    ///   - `["*"]` → `AllowAll` (explicit wildcard)
+    ///   - `["0xABC", "0xDEF"]` → `AllowList({ABC, DEF})`
+    pub fn parse(raw: &[String]) -> Result<Self, String> {
+        if raw.is_empty() {
+            return Ok(Self::BlockAll);
+        }
+        if raw.len() == 1 && raw[0] == "*" {
+            return Ok(Self::AllowAll);
+        }
+        let senders = raw
+            .iter()
+            .map(|s| {
+                s.parse::<Address>()
+                    .map_err(|_| format!("invalid interop allowed sender address: {s}"))
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+        Ok(Self::AllowList(Arc::new(senders)))
+    }
+}
 
 /// The interval for which we check transaction against supervisor, 1 hour.
 const TRANSACTION_VALIDITY_WINDOW_SECS: u64 = 3600;
@@ -61,10 +104,8 @@ pub struct OpTransactionValidator<Client, Tx, Evm> {
     supervisor_client: Option<SupervisorClient>,
     /// tracks activated forks relevant for transaction validation
     fork_tracker: Arc<OpForkTracker>,
-    /// Allowed sender addresses for interop transactions. If non-empty, only these senders
-    /// may submit interop (cross-chain) transactions. If empty, all interop transactions
-    /// are rejected.
-    allowed_interop_senders: Option<Arc<HashSet<Address>>>,
+    /// Policy for which senders may submit interop transactions.
+    interop_sender_policy: InteropSenderPolicy,
 }
 
 impl<Client, Tx, Evm> OpTransactionValidator<Client, Tx, Evm> {
@@ -135,7 +176,7 @@ where
             require_l1_data_gas_fee: true,
             supervisor_client: None,
             fork_tracker: Arc::new(OpForkTracker { interop: AtomicBool::from(false) }),
-            allowed_interop_senders: None,
+            interop_sender_policy: InteropSenderPolicy::BlockAll,
         }
     }
 
@@ -145,15 +186,9 @@ where
         self
     }
 
-    /// Set the allowed interop senders. When set, only these senders may submit interop
-    /// (cross-chain) transactions. When set to an empty set, all interop transactions are
-    /// rejected. When `None`, no sender filtering is applied (interop txs from any sender are
-    /// allowed through to supervisor validation).
-    pub fn with_allowed_interop_senders(
-        mut self,
-        allowed_senders: Option<HashSet<Address>>,
-    ) -> Self {
-        self.allowed_interop_senders = allowed_senders.map(Arc::new);
+    /// Set the interop sender policy.
+    pub fn with_interop_sender_policy(mut self, policy: InteropSenderPolicy) -> Self {
+        self.interop_sender_policy = policy;
         self
     }
 
@@ -214,17 +249,11 @@ where
             );
         }
 
-        // Interop sender allow-list check: if configured, only allowed senders may submit
-        // cross-chain transactions. This check runs locally before the supervisor RPC call.
-        if let Some(ref allowed_senders) = self.allowed_interop_senders {
-            let is_interop_tx = transaction
-                .access_list()
-                .is_some_and(|al| {
-                    parse_access_list_items_to_inbox_entries(al.iter())
-                        .next()
-                        .is_some()
-                });
-            if is_interop_tx && !allowed_senders.contains(transaction.sender_ref()) {
+        // Interop sender allow-list check: runs locally before the supervisor RPC call.
+        if let Some(access_list) = transaction.access_list() {
+            if has_interop_inbox_entries(access_list)
+                && !self.interop_sender_policy.allows(transaction.sender_ref())
+            {
                 let sender = *transaction.sender_ref();
                 return TransactionValidationOutcome::Invalid(
                     transaction,

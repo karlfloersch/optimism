@@ -16,8 +16,16 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 use crate::supervisor::CROSS_L2_INBOX_ADDRESS;
-use alloy_eips::eip2930::AccessListItem;
+use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::B256;
+
+/// Returns `true` if the access list contains any cross-L2 inbox entries,
+/// indicating this is an interop transaction.
+pub fn has_interop_inbox_entries(access_list: &AccessList) -> bool {
+    parse_access_list_items_to_inbox_entries(access_list.iter())
+        .next()
+        .is_some()
+}
 
 /// Parses [`AccessListItem`]s to inbox entries.
 ///
