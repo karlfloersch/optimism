@@ -1,5 +1,9 @@
-use crate::{InvalidCrossTx, OpPooledTx, supervisor::SupervisorClient};
+use crate::{
+    InvalidCrossTx, OpPooledTx,
+    supervisor::{SupervisorClient, parse_access_list_items_to_inbox_entries},
+};
 use alloy_consensus::{BlockHeader, Transaction};
+use alloy_primitives::Address;
 use op_revm::L1BlockInfo;
 use parking_lot::RwLock;
 use reth_chainspec::ChainSpecProvider;
@@ -15,9 +19,12 @@ use reth_transaction_pool::{
     EthPoolTransaction, EthTransactionValidator, TransactionOrigin, TransactionValidationOutcome,
     TransactionValidator, error::InvalidPoolTransactionError,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 /// The interval for which we check transaction against supervisor, 1 hour.
@@ -54,6 +61,10 @@ pub struct OpTransactionValidator<Client, Tx, Evm> {
     supervisor_client: Option<SupervisorClient>,
     /// tracks activated forks relevant for transaction validation
     fork_tracker: Arc<OpForkTracker>,
+    /// Allowed sender addresses for interop transactions. If non-empty, only these senders
+    /// may submit interop (cross-chain) transactions. If empty, all interop transactions
+    /// are rejected.
+    allowed_interop_senders: Option<Arc<HashSet<Address>>>,
 }
 
 impl<Client, Tx, Evm> OpTransactionValidator<Client, Tx, Evm> {
@@ -124,12 +135,25 @@ where
             require_l1_data_gas_fee: true,
             supervisor_client: None,
             fork_tracker: Arc::new(OpForkTracker { interop: AtomicBool::from(false) }),
+            allowed_interop_senders: None,
         }
     }
 
     /// Set the supervisor client and safety level
     pub fn with_supervisor(mut self, supervisor_client: SupervisorClient) -> Self {
         self.supervisor_client = Some(supervisor_client);
+        self
+    }
+
+    /// Set the allowed interop senders. When set, only these senders may submit interop
+    /// (cross-chain) transactions. When set to an empty set, all interop transactions are
+    /// rejected. When `None`, no sender filtering is applied (interop txs from any sender are
+    /// allowed through to supervisor validation).
+    pub fn with_allowed_interop_senders(
+        mut self,
+        allowed_senders: Option<HashSet<Address>>,
+    ) -> Self {
+        self.allowed_interop_senders = allowed_senders.map(Arc::new);
         self
     }
 
@@ -188,6 +212,27 @@ where
                 transaction,
                 InvalidTransactionError::TxTypeNotSupported.into(),
             );
+        }
+
+        // Interop sender allow-list check: if configured, only allowed senders may submit
+        // cross-chain transactions. This check runs locally before the supervisor RPC call.
+        if let Some(ref allowed_senders) = self.allowed_interop_senders {
+            let is_interop_tx = transaction
+                .access_list()
+                .is_some_and(|al| {
+                    parse_access_list_items_to_inbox_entries(al.iter())
+                        .next()
+                        .is_some()
+                });
+            if is_interop_tx && !allowed_senders.contains(transaction.sender_ref()) {
+                let sender = *transaction.sender_ref();
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidPoolTransactionError::Other(Box::new(
+                        InvalidCrossTx::SenderNotAllowed(sender),
+                    )),
+                );
+            }
         }
 
         // Interop cross tx validation

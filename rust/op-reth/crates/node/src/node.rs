@@ -169,7 +169,8 @@ impl OpNode {
                     .with_supervisor(
                         self.args.supervisor_http.clone(),
                         self.args.supervisor_safety_level,
-                    ),
+                    )
+                    .with_interop_allowed_senders(self.args.interop_allowed_senders.clone()),
             )
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
@@ -903,6 +904,8 @@ pub struct OpPoolBuilder<T = crate::txpool::OpPooledTransaction> {
     pub supervisor_http: Option<String>,
     /// Supervisor safety level
     pub supervisor_safety_level: SafetyLevel,
+    /// Allowed sender addresses for interop transactions (hex strings).
+    pub interop_allowed_senders: Vec<String>,
     /// Marker for the pooled transaction type.
     _pd: core::marker::PhantomData<T>,
 }
@@ -914,6 +917,7 @@ impl<T> Default for OpPoolBuilder<T> {
             enable_tx_conditional: false,
             supervisor_http: None,
             supervisor_safety_level: SafetyLevel::CrossUnsafe,
+            interop_allowed_senders: Vec::new(),
             _pd: Default::default(),
         }
     }
@@ -926,6 +930,7 @@ impl<T> Clone for OpPoolBuilder<T> {
             enable_tx_conditional: self.enable_tx_conditional,
             supervisor_http: self.supervisor_http.clone(),
             supervisor_safety_level: self.supervisor_safety_level,
+            interop_allowed_senders: self.interop_allowed_senders.clone(),
             _pd: core::marker::PhantomData,
         }
     }
@@ -957,6 +962,12 @@ impl<T> OpPoolBuilder<T> {
         self.supervisor_safety_level = supervisor_safety_level;
         self
     }
+
+    /// Sets the allowed sender addresses for interop transactions.
+    pub fn with_interop_allowed_senders(mut self, senders: Vec<String>) -> Self {
+        self.interop_allowed_senders = senders;
+        self
+    }
 }
 
 impl<Node, T, Evm> PoolBuilder<Node, Evm> for OpPoolBuilder<T>
@@ -972,7 +983,39 @@ where
         ctx: &BuilderContext<Node>,
         evm_config: Evm,
     ) -> eyre::Result<Self::Pool> {
-        let Self { pool_config_overrides, .. } = self;
+        let Self { pool_config_overrides, interop_allowed_senders, .. } = self;
+
+        // Parse interop allowed senders.
+        //   - Not set (empty vec) → Some(empty set) → all interop txs blocked (fail closed)
+        //   - ["*"]               → None            → any sender allowed (explicit wildcard)
+        //   - ["0xABC", "0xDEF"]  → Some({ABC,DEF}) → only those senders
+        let allowed_interop_senders = if interop_allowed_senders.len() == 1
+            && interop_allowed_senders[0] == "*"
+        {
+            info!(target: "reth::cli",
+                "Interop sender allow-list set to wildcard (*), any sender may submit cross-chain transactions"
+            );
+            None
+        } else {
+            let mut senders = std::collections::HashSet::new();
+            for s in &interop_allowed_senders {
+                let addr: alloy_primitives::Address = s.parse().map_err(|_| {
+                    eyre::eyre!("invalid interop allowed sender address: {s}")
+                })?;
+                senders.insert(addr);
+            }
+            if senders.is_empty() {
+                info!(target: "reth::cli",
+                    "No --rollup.interop-allowed-senders configured, all interop transactions will be rejected"
+                );
+            } else {
+                info!(target: "reth::cli",
+                    count = senders.len(),
+                    "Interop sender allow-list configured, only allowed senders may submit cross-chain transactions"
+                );
+            }
+            Some(senders)
+        };
 
         // supervisor used for interop txpool validation
         let supervisor_client = if let Some(url) = self.supervisor_http.clone() {
@@ -1007,15 +1050,15 @@ where
                 )
                 .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
                 .map(|validator| {
-                    let v = OpTransactionValidator::new(validator)
+                    let mut v = OpTransactionValidator::new(validator)
                         // In --dev mode we can't require gas fees because we're unable to decode
                         // the L1 block info
-                        .require_l1_data_gas_fee(!ctx.config().dev.dev);
+                        .require_l1_data_gas_fee(!ctx.config().dev.dev)
+                        .with_allowed_interop_senders(allowed_interop_senders.clone());
                     if let Some(client) = supervisor_client.clone() {
-                        v.with_supervisor(client)
-                    } else {
-                        v
+                        v = v.with_supervisor(client);
                     }
+                    v
                 });
 
         let final_pool_config = pool_config_overrides.apply(ctx.pool_config());

@@ -49,6 +49,13 @@ pub struct RollupArgs {
     )]
     pub supervisor_safety_level: SafetyLevel,
 
+    /// Comma-separated list of allowed sender addresses for interop (cross-chain) transactions.
+    /// When set, only transactions from these senders will be accepted as interop transactions;
+    /// interop transactions from any other sender are rejected. When not set, all interop
+    /// transactions are blocked by default.
+    #[arg(long = "rollup.interop-allowed-senders", value_delimiter = ',', value_name = "ADDRESSES")]
+    pub interop_allowed_senders: Vec<String>,
+
     /// Optional headers to use when connecting to the sequencer.
     #[arg(long = "rollup.sequencer-headers", requires = "sequencer")]
     pub sequencer_headers: Vec<String>,
@@ -151,6 +158,7 @@ impl Default for RollupArgs {
             enable_tx_conditional: false,
             supervisor_http: None,
             supervisor_safety_level: SafetyLevel::CrossUnsafe,
+            interop_allowed_senders: Vec::new(),
             sequencer_headers: Vec::new(),
             historical_rpc: None,
             min_suggested_priority_fee: 1_000_000,
