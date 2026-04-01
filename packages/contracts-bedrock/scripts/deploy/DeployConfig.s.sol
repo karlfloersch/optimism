@@ -404,6 +404,7 @@ contract DeployConfig is Script {
         useRevenueShare = false;
         chainFeesRecipient = 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc;
     }
+
     function latestGenesisFork() internal view returns (Fork) {
         if (l2GenesisKarstTimeOffset == 0) {
             return Fork.KARST;
