@@ -149,5 +149,8 @@ cat << EOL >> tmp_config.json
 }
 EOL
 
-# Write the final config file
-mv tmp_config.json "$CONTRACTS_BASE/deploy-config/getting-started.json"
+# Write the final config file outside of the deleted deploy-config/ directory.
+GETTING_STARTED_CONFIG_PATH="${GETTING_STARTED_CONFIG_PATH:-$CONTRACTS_BASE/getting-started.json}"
+mkdir -p "$(dirname "$GETTING_STARTED_CONFIG_PATH")"
+mv tmp_config.json "$GETTING_STARTED_CONFIG_PATH"
+echo "Wrote config to $GETTING_STARTED_CONFIG_PATH"

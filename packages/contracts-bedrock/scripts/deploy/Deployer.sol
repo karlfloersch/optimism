@@ -32,9 +32,17 @@ abstract contract Deployer is Script {
 
         DeployUtils.etchLabelAndAllowCheatcodes({ _etchTo: address(cfg), _cname: "DeployConfig" });
 
+        bool isKontrolContext = Config.isKontrolContext();
+        require(
+            !(isKontrolContext
+                    && (vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)
+                        || vm.isContext(VmSafe.ForgeContext.ScriptResume))),
+            "Deployer: KONTROL_CONTEXT cannot be used during broadcast/resume"
+        );
+
         // In test context or kontrol context, use hardcoded defaults by calling read() with empty path.
         // In non-test context, read from the config file.
-        if (vm.isContext(VmSafe.ForgeContext.TestGroup) || Config.isKontrolContext()) {
+        if (vm.isContext(VmSafe.ForgeContext.TestGroup) || isKontrolContext) {
             cfg.read("");
         } else {
             cfg.read(Config.deployConfigPath());
