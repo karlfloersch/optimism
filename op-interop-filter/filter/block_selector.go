@@ -64,8 +64,6 @@ func parseQuotedBlockNumber(input string) (uint64, error) {
 	switch input {
 	case "":
 		return 0, fmt.Errorf("empty block selector")
-	case "earliest", "pending", "safe", "finalized":
-		return 0, fmt.Errorf("unsupported block tag %q: only \"latest\" and block numbers are supported", input)
 	}
 
 	if strings.HasPrefix(input, "0x") || strings.HasPrefix(input, "0X") {

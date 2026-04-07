@@ -45,7 +45,6 @@ func TestBlockSelectorUnmarshalJSON(t *testing.T) {
 	t.Run("invalid", func(t *testing.T) {
 		var selector BlockSelector
 		require.Error(t, json.Unmarshal([]byte(`"safe"`), &selector))
-		require.ErrorContains(t, json.Unmarshal([]byte(`"safe"`), &selector), `unsupported block tag "safe"`)
 	})
 }
 
