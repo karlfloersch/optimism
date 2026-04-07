@@ -617,14 +617,26 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 		FinalizedBlockHash: e.FinalizedHead().Hash,
 	}
 	if e.syncStatus == syncStatusFinishedELButNotFinalized {
-		fc.SafeBlockHash = envelope.ExecutionPayload.BlockHash
-		fc.FinalizedBlockHash = envelope.ExecutionPayload.BlockHash
-		e.SetUnsafeHead(ref) // ensure that the unsafe head stays ahead of safe/finalized labels.
+		offsetRef := ref
+		if n := sync.DurationToBlocks(e.syncCfg.OffsetELSafe, e.rollupCfg.BlockTime); n > 0 && ref.Number > e.rollupCfg.Genesis.L2.Number {
+			span := ref.Number - e.rollupCfg.Genesis.L2.Number
+			if n > span {
+				n = span
+			}
+			d, err := e.engine.L2BlockRefByNumber(ctx, ref.Number-n)
+			if err != nil {
+				return derive.NewTemporaryError(fmt.Errorf("EL sync offset-derived head at block %d: %w", ref.Number-n, err))
+			}
+			offsetRef = d
+		}
+		fc.SafeBlockHash = offsetRef.Hash
+		fc.FinalizedBlockHash = offsetRef.Hash
+		e.SetUnsafeHead(ref)
 		e.emitter.Emit(ctx, UnsafeUpdateEvent{Ref: ref})
-		e.SetLocalSafeHead(ref)
-		e.SetSafeHead(ref)
-		e.onSafeUpdate(ctx, ref, ref)
-		e.SetFinalizedHead(ref)
+		e.SetLocalSafeHead(offsetRef)
+		e.SetSafeHead(offsetRef)
+		e.onSafeUpdate(ctx, offsetRef, offsetRef)
+		e.SetFinalizedHead(offsetRef)
 	}
 	logFn := e.logSyncProgressMaybe()
 	defer logFn()
@@ -655,7 +667,8 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 	e.emitter.Emit(ctx, UnsafeUpdateEvent{Ref: ref})
 
 	if e.syncStatus == syncStatusFinishedELButNotFinalized {
-		e.log.Info("Finished EL sync", "sync_duration", e.clock.Since(e.elStart), "finalized_block", ref.ID().String())
+		e.log.Info("Finished EL sync", "sync_duration", e.clock.Since(e.elStart),
+			"unsafe_block", ref.ID().String(), "safe_finalized_block", e.SafeL2Head().ID().String())
 		e.syncStatus = syncStatusFinishedEL
 	}
 

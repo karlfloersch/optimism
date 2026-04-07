@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -337,5 +338,115 @@ func TestFindSyncStart(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.Name, testCase.Run)
+	}
+}
+
+func TestDurationToBlocks(t *testing.T) {
+	tests := []struct {
+		name   string
+		offset time.Duration
+		bt     uint64
+		want   uint64
+	}{
+		{"zero offset", 0, 2, 0},
+		{"negative treated as zero", -time.Hour, 2, 0},
+		{"zero block time", time.Hour, 0, 0},
+		{"floor BT=2 offset=3s -> 1", 3 * time.Second, 2, 1},
+		{"floor BT=2 offset=4s -> 2", 4 * time.Second, 2, 2},
+		{"sub-second offset truncates", 500 * time.Millisecond, 1, 0},
+		{"12h with 2s blocks", 12 * time.Hour, 2, 21600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, DurationToBlocks(tt.offset, tt.bt))
+		})
+	}
+}
+
+type errTestFetch struct{}
+
+func (errTestFetch) Error() string { return "test fetch error" }
+
+var _ L2Chain = (*testutils.MockL2Client)(nil)
+
+func TestL2HeadsForELSyncWithOffset(t *testing.T) {
+	ctx := context.Background()
+	genesis := eth.BlockID{Hash: common.Hash{'g'}, Number: 0}
+	b0 := eth.L2BlockRef{Hash: genesis.Hash, Number: 0, ParentHash: common.Hash{}}
+	b1 := eth.L2BlockRef{Hash: common.Hash{'1'}, Number: 1, ParentHash: b0.Hash}
+	b3 := eth.L2BlockRef{Hash: common.Hash{'3'}, Number: 3, ParentHash: common.Hash{'2'}}
+	bt := uint64(2)
+
+	cfg := &rollup.Config{
+		Genesis:   rollup.Genesis{L2: genesis},
+		BlockTime: bt,
+	}
+
+	tests := []struct {
+		name     string
+		tip      eth.L2BlockRef
+		offset   time.Duration
+		stub     func(m *testutils.MockL2Client)
+		wantSafe eth.L2BlockRef
+		wantErr  bool
+	}{
+		{
+			name:     "zero offset returns tip as safe",
+			tip:      b3,
+			offset:   0,
+			stub:     func(m *testutils.MockL2Client) {},
+			wantSafe: b3,
+		},
+		{
+			name:     "tip at genesis returns tip",
+			tip:      b0,
+			offset:   100 * time.Hour,
+			stub:     func(m *testutils.MockL2Client) {},
+			wantSafe: b0,
+		},
+		{
+			name:   "retracts by floor(offset/bt)",
+			tip:    b3,
+			offset: 5 * time.Second,
+			stub: func(m *testutils.MockL2Client) {
+				m.ExpectL2BlockRefByNumber(1, b1, nil)
+			},
+			wantSafe: b1,
+		},
+		{
+			name:   "large offset clamps to genesis",
+			tip:    b1,
+			offset: 1000 * time.Hour,
+			stub: func(m *testutils.MockL2Client) {
+				m.ExpectL2BlockRefByNumber(0, b0, nil)
+			},
+			wantSafe: b0,
+		},
+		{
+			name:   "fetch error propagates",
+			tip:    b3,
+			offset: 5 * time.Second,
+			stub: func(m *testutils.MockL2Client) {
+				m.ExpectL2BlockRefByNumber(1, eth.L2BlockRef{}, errTestFetch{})
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &testutils.MockL2Client{}
+			tt.stub(m)
+			syncCfg := &Config{OffsetELSafe: tt.offset}
+			result, err := L2HeadsForELSyncWithOffset(ctx, cfg, m, syncCfg, tt.tip)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.tip, result.Unsafe, "unsafe head should always be the tip")
+			require.Equal(t, tt.wantSafe, result.Safe, "safe head")
+			require.Equal(t, tt.wantSafe, result.Finalized, "finalized head")
+		})
 	}
 }
