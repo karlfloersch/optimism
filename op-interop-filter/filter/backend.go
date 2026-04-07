@@ -185,29 +185,29 @@ func (b *Backend) CheckAccessList(ctx context.Context, inboxEntries []common.Has
 	return nil
 }
 
-// GetBlockByNumber returns the latest block or the block at a specific height for the given chain.
-func (b *Backend) GetBlockByNumber(chainID eth.ChainID, selector BlockSelector) (eth.BlockID, error) {
+// GetBlockHashByNumber returns the latest block hash or the block hash at a specific height for the given chain.
+func (b *Backend) GetBlockHashByNumber(chainID eth.ChainID, selector BlockSelector) (common.Hash, error) {
 	ingester, ok := b.chains[chainID]
 	if !ok {
-		return eth.BlockID{}, fmt.Errorf("chain %s: %w", chainID, types.ErrUnknownChain)
+		return common.Hash{}, fmt.Errorf("chain %s: %w", chainID, types.ErrUnknownChain)
 	}
 
 	if !b.Ready() {
-		return eth.BlockID{}, fmt.Errorf("block lookup unavailable for chain %s: %w", chainID, types.ErrUninitialized)
+		return common.Hash{}, fmt.Errorf("block hash lookup unavailable for chain %s: %w", chainID, types.ErrUninitialized)
 	}
 
 	if selector.Latest() {
 		block, ok := ingester.LatestBlock()
 		if !ok {
-			return eth.BlockID{}, fmt.Errorf("latest block for chain %s: %w", chainID, ethereum.NotFound)
+			return common.Hash{}, fmt.Errorf("latest block for chain %s: %w", chainID, ethereum.NotFound)
 		}
-		return block, nil
+		return block.Hash, nil
 	}
 
 	blockNum := selector.Number()
-	block, ok := ingester.BlockByNumber(blockNum)
+	blockHash, ok := ingester.BlockHashByNumber(blockNum)
 	if !ok {
-		return eth.BlockID{}, fmt.Errorf("block %d for chain %s: %w", blockNum, chainID, ethereum.NotFound)
+		return common.Hash{}, fmt.Errorf("block %d for chain %s: %w", blockNum, chainID, ethereum.NotFound)
 	}
-	return block, nil
+	return blockHash, nil
 }

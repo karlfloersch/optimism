@@ -151,13 +151,16 @@ func (m *mockChainIngester) LatestBlock() (eth.BlockID, bool) {
 	return m.latestBlock, true
 }
 
-// BlockByNumber implements ChainIngester.
-func (m *mockChainIngester) BlockByNumber(number uint64) (eth.BlockID, bool) {
+// BlockHashByNumber implements ChainIngester.
+func (m *mockChainIngester) BlockHashByNumber(number uint64) (common.Hash, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	block, ok := m.blocks[number]
-	return block, ok
+	if !ok {
+		return common.Hash{}, false
+	}
+	return block.Hash, true
 }
 
 // LatestTimestamp implements ChainIngester.

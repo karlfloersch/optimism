@@ -227,7 +227,7 @@ func TestBackend_CheckAccessList(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestBackend_GetBlockByNumber(t *testing.T) {
+func TestBackend_GetBlockHashByNumber(t *testing.T) {
 	backend, mock := newTestBackendWithMockChain(testChainA)
 	latest := eth.BlockID{Hash: common.HexToHash("0xaa"), Number: 200}
 	at100 := eth.BlockID{Hash: common.HexToHash("0xbb"), Number: 100}
@@ -235,31 +235,31 @@ func TestBackend_GetBlockByNumber(t *testing.T) {
 	mock.AddBlock(latest)
 
 	t.Run("latest", func(t *testing.T) {
-		block, err := backend.GetBlockByNumber(eth.ChainIDFromUInt64(testChainA), LatestBlockSelector())
+		hash, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), LatestBlockSelector())
 		require.NoError(t, err)
-		require.Equal(t, latest, block)
+		require.Equal(t, latest.Hash, hash)
 	})
 
 	t.Run("specific height", func(t *testing.T) {
-		block, err := backend.GetBlockByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(100))
+		hash, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(100))
 		require.NoError(t, err)
-		require.Equal(t, at100, block)
+		require.Equal(t, at100.Hash, hash)
 	})
 
 	t.Run("unknown chain", func(t *testing.T) {
-		_, err := backend.GetBlockByNumber(eth.ChainIDFromUInt64(999), BlockSelectorFromNumber(100))
+		_, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(999), BlockSelectorFromNumber(100))
 		require.ErrorIs(t, err, types.ErrUnknownChain)
 	})
 
 	t.Run("not ready", func(t *testing.T) {
 		mock.SetReady(false)
-		_, err := backend.GetBlockByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(100))
+		_, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(100))
 		require.ErrorIs(t, err, types.ErrUninitialized)
 		mock.SetReady(true)
 	})
 
 	t.Run("missing block", func(t *testing.T) {
-		_, err := backend.GetBlockByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(999))
+		_, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(999))
 		require.ErrorIs(t, err, ethereum.NotFound)
 	})
 }

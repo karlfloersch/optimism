@@ -230,15 +230,6 @@ func (c *LogsDBChainIngester) LatestBlock() (eth.BlockID, bool) {
 	return c.logsDB.LatestSealedBlock()
 }
 
-// BlockByNumber returns the sealed block at the given height.
-func (c *LogsDBChainIngester) BlockByNumber(blockNum uint64) (eth.BlockID, bool) {
-	hash, ok := c.BlockHashAt(blockNum)
-	if !ok {
-		return eth.BlockID{}, false
-	}
-	return eth.BlockID{Hash: hash, Number: blockNum}, true
-}
-
 // BlockHashAt returns the hash of the sealed block at the given height.
 func (c *LogsDBChainIngester) BlockHashAt(blockNum uint64) (common.Hash, bool) {
 	c.mu.RLock()
@@ -254,6 +245,11 @@ func (c *LogsDBChainIngester) BlockHashAt(blockNum uint64) (common.Hash, bool) {
 	}
 
 	return seal.Hash, true
+}
+
+// BlockHashByNumber returns the sealed block hash at the given height.
+func (c *LogsDBChainIngester) BlockHashByNumber(blockNum uint64) (common.Hash, bool) {
+	return c.BlockHashAt(blockNum)
 }
 
 // LatestTimestamp returns the timestamp of the latest sealed block

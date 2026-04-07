@@ -49,7 +49,7 @@ func TestBlockSelectorUnmarshalJSON(t *testing.T) {
 	})
 }
 
-func TestQueryFrontendGetBlockByNumberRPC(t *testing.T) {
+func TestQueryFrontendGetBlockHashByNumberRPC(t *testing.T) {
 	logger := testlog.Logger(t, log.LevelInfo)
 	mock := newMockChainIngester()
 	mock.AddBlock(eth.BlockID{Hash: common.HexToHash("0x01"), Number: 100})
@@ -83,23 +83,22 @@ func TestQueryFrontendGetBlockByNumberRPC(t *testing.T) {
 	t.Cleanup(client.Close)
 
 	t.Run("latest selector", func(t *testing.T) {
-		var result eth.BlockID
-		err := client.Call(&result, "supervisor_getBlockByNumber", eth.ChainIDFromUInt64(testChainA), "latest")
+		var result common.Hash
+		err := client.Call(&result, "supervisor_getBlockHashByNumber", eth.ChainIDFromUInt64(testChainA), "latest")
 		require.NoError(t, err)
-		require.Equal(t, uint64(200), result.Number)
-		require.Equal(t, common.HexToHash("0x02"), result.Hash)
+		require.Equal(t, common.HexToHash("0x02"), result)
 	})
 
 	t.Run("numeric selector", func(t *testing.T) {
-		var result eth.BlockID
-		err := client.Call(&result, "supervisor_getBlockByNumber", eth.ChainIDFromUInt64(testChainA), uint64(100))
+		var result common.Hash
+		err := client.Call(&result, "supervisor_getBlockHashByNumber", eth.ChainIDFromUInt64(testChainA), uint64(100))
 		require.NoError(t, err)
-		require.Equal(t, eth.BlockID{Hash: common.HexToHash("0x01"), Number: 100}, result)
+		require.Equal(t, common.HexToHash("0x01"), result)
 	})
 
 	t.Run("missing block", func(t *testing.T) {
-		var result eth.BlockID
-		err := client.Call(&result, "supervisor_getBlockByNumber", eth.ChainIDFromUInt64(testChainA), uint64(999))
+		var result common.Hash
+		err := client.Call(&result, "supervisor_getBlockHashByNumber", eth.ChainIDFromUInt64(testChainA), uint64(999))
 		require.ErrorContains(t, err, "not found")
 	})
 }
