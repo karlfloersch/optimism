@@ -30,6 +30,11 @@ func (f *QueryFrontend) CheckAccessList(ctx context.Context, inboxEntries []comm
 	return nil
 }
 
+// GetBlockByNumber returns the latest ingested block or the block at a specific height.
+func (f *QueryFrontend) GetBlockByNumber(ctx context.Context, chainID eth.ChainID, selector BlockSelector) (eth.BlockID, error) {
+	return f.backend.GetBlockByNumber(chainID, selector)
+}
+
 // PublicAdminFrontend exposes read-only admin methods on the public port.
 type PublicAdminFrontend struct {
 	backend *Backend

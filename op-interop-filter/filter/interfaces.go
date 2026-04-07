@@ -31,6 +31,9 @@ type ChainIngester interface {
 	// LatestBlock returns the latest ingested block.
 	LatestBlock() (eth.BlockID, bool)
 
+	// BlockByNumber returns the ingested block at the given height.
+	BlockByNumber(number uint64) (eth.BlockID, bool)
+
 	// LatestTimestamp returns the timestamp of the latest ingested block.
 	LatestTimestamp() (uint64, bool)
 
