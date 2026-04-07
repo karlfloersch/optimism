@@ -251,13 +251,6 @@ func TestBackend_GetBlockHashByNumber(t *testing.T) {
 		require.ErrorIs(t, err, types.ErrUnknownChain)
 	})
 
-	t.Run("not ready", func(t *testing.T) {
-		mock.SetReady(false)
-		_, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(100))
-		require.ErrorIs(t, err, types.ErrUninitialized)
-		mock.SetReady(true)
-	})
-
 	t.Run("missing block", func(t *testing.T) {
 		_, err := backend.GetBlockHashByNumber(eth.ChainIDFromUInt64(testChainA), BlockSelectorFromNumber(999))
 		require.ErrorIs(t, err, ethereum.NotFound)

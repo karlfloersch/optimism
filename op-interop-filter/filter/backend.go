@@ -192,10 +192,6 @@ func (b *Backend) GetBlockHashByNumber(chainID eth.ChainID, selector BlockSelect
 		return common.Hash{}, fmt.Errorf("chain %s: %w", chainID, types.ErrUnknownChain)
 	}
 
-	if !b.Ready() {
-		return common.Hash{}, fmt.Errorf("block hash lookup unavailable for chain %s: %w", chainID, types.ErrUninitialized)
-	}
-
 	if selector.Latest() {
 		block, ok := ingester.LatestBlock()
 		if !ok {
