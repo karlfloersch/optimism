@@ -351,14 +351,40 @@ func TestDurationToBlocks(t *testing.T) {
 		{"zero offset", 0, 2, 0},
 		{"negative treated as zero", -time.Hour, 2, 0},
 		{"zero block time", time.Hour, 0, 0},
-		{"floor BT=2 offset=3s -> 1", 3 * time.Second, 2, 1},
-		{"floor BT=2 offset=4s -> 2", 4 * time.Second, 2, 2},
+		{"ceil BT=2 offset=3s -> 2", 3 * time.Second, 2, 2},
+		{"exact BT=2 offset=4s -> 2", 4 * time.Second, 2, 2},
+		{"ceil BT=4 offset=15s -> 4", 15 * time.Second, 4, 4},
+		{"exact BT=4 offset=16s -> 4", 16 * time.Second, 4, 4},
 		{"sub-second offset truncates", 500 * time.Millisecond, 1, 0},
 		{"12h with 2s blocks", 12 * time.Hour, 2, 21600},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, DurationToBlocks(tt.offset, tt.bt))
+		})
+	}
+}
+
+func TestOffsetBlockNum(t *testing.T) {
+	tests := []struct {
+		name    string
+		offset  time.Duration
+		bt      uint64
+		head    uint64
+		genesis uint64
+		want    uint64
+	}{
+		{"zero offset returns head", 0, 2, 100, 0, 100},
+		{"head at genesis returns genesis", 10 * time.Second, 2, 0, 0, 0},
+		{"head below genesis returns head", 10 * time.Second, 2, 5, 10, 5},
+		{"normal retraction", 10 * time.Second, 2, 100, 0, 95},
+		{"clamps to genesis", 1000 * time.Hour, 2, 10, 0, 0},
+		{"non-zero genesis clamp", 10 * time.Second, 2, 15, 10, 10},
+		{"ceil retraction BT=4 offset=15s", 15 * time.Second, 4, 100, 0, 96},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, OffsetBlockNum(tt.offset, tt.bt, tt.head, tt.genesis))
 		})
 	}
 }
@@ -405,9 +431,9 @@ func TestL2HeadsForELSyncWithOffset(t *testing.T) {
 			wantSafe: b0,
 		},
 		{
-			name:   "retracts by floor(offset/bt)",
+			name:   "retracts by ceil(offset/bt)",
 			tip:    b3,
-			offset: 5 * time.Second,
+			offset: 4 * time.Second,
 			stub: func(m *testutils.MockL2Client) {
 				m.ExpectL2BlockRefByNumber(1, b1, nil)
 			},
@@ -425,7 +451,7 @@ func TestL2HeadsForELSyncWithOffset(t *testing.T) {
 		{
 			name:   "fetch error propagates",
 			tip:    b3,
-			offset: 5 * time.Second,
+			offset: 3 * time.Second,
 			stub: func(m *testutils.MockL2Client) {
 				m.ExpectL2BlockRefByNumber(1, eth.L2BlockRef{}, errTestFetch{})
 			},

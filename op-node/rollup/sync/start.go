@@ -102,27 +102,38 @@ func currentHeads(ctx context.Context, cfg *rollup.Config, l2 L2Chain) (*FindHea
 	}, nil
 }
 
-// DurationToBlocks returns floor(offset / blockTime) as a block count.
+// DurationToBlocks returns ceil(offset / blockTime) as a block count.
+// Ceiling is used so the retraction always covers the full requested duration.
 // A zero or negative offset yields 0; zero block time yields 0.
 func DurationToBlocks(offset time.Duration, blockTime uint64) uint64 {
 	if offset <= 0 || blockTime == 0 {
 		return 0
 	}
 	sec := uint64(offset / time.Second)
-	return sec / blockTime
+	return (sec + blockTime - 1) / blockTime
+}
+
+// OffsetBlockNum returns the block number that is `offset` behind `head`,
+// clamped so it never goes below `genesis`. Returns head unchanged when
+// offset is zero or head is already at genesis.
+func OffsetBlockNum(offset time.Duration, blockTime uint64, head uint64, genesis uint64) uint64 {
+	n := DurationToBlocks(offset, blockTime)
+	if n == 0 || head <= genesis {
+		return head
+	}
+	maxRetract := head - genesis
+	if n > maxRetract {
+		n = maxRetract
+	}
+	return head - n
 }
 
 // L2HeadsForELSyncWithOffset returns the heads for an EL-sync tip: unsafe stays at tip,
-// safe and finalized retract by floor(offset / blockTime) blocks (clamped at genesis).
+// safe and finalized retract by ceil(offset / blockTime) blocks (clamped at genesis).
 func L2HeadsForELSyncWithOffset(ctx context.Context, cfg *rollup.Config, l2 L2Chain, syncCfg *Config, tip eth.L2BlockRef) (*FindHeadsResult, error) {
-	n := DurationToBlocks(syncCfg.OffsetELSafe, cfg.BlockTime)
+	target := OffsetBlockNum(syncCfg.OffsetELSafe, cfg.BlockTime, tip.Number, cfg.Genesis.L2.Number)
 	derived := tip
-	if n > 0 && tip.Number > cfg.Genesis.L2.Number {
-		span := tip.Number - cfg.Genesis.L2.Number
-		if n > span {
-			n = span
-		}
-		target := tip.Number - n
+	if target < tip.Number {
 		ref, err := l2.L2BlockRefByNumber(ctx, target)
 		if err != nil {
 			return nil, fmt.Errorf("EL sync offset-derived head at block %d: %w", target, err)

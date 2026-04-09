@@ -618,14 +618,10 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 	}
 	if e.syncStatus == syncStatusFinishedELButNotFinalized {
 		offsetRef := ref
-		if n := sync.DurationToBlocks(e.syncCfg.OffsetELSafe, e.rollupCfg.BlockTime); n > 0 && ref.Number > e.rollupCfg.Genesis.L2.Number {
-			span := ref.Number - e.rollupCfg.Genesis.L2.Number
-			if n > span {
-				n = span
-			}
-			d, err := e.engine.L2BlockRefByNumber(ctx, ref.Number-n)
+		if target := sync.OffsetBlockNum(e.syncCfg.OffsetELSafe, e.rollupCfg.BlockTime, ref.Number, e.rollupCfg.Genesis.L2.Number); target < ref.Number {
+			d, err := e.engine.L2BlockRefByNumber(ctx, target)
 			if err != nil {
-				return derive.NewTemporaryError(fmt.Errorf("EL sync offset-derived head at block %d: %w", ref.Number-n, err))
+				return derive.NewTemporaryError(fmt.Errorf("EL sync offset-derived head at block %d: %w", target, err))
 			}
 			offsetRef = d
 		}
