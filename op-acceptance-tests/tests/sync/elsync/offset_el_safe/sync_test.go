@@ -69,4 +69,10 @@ func TestELSyncSafeRetractedByOffset(gt *testing.T) {
 	retraction := unsafeHead.Number - safeHead.Number
 	logger.Info("Observed retraction", "blocks", retraction)
 	require.Greater(retraction, uint64(0), "retraction must be nonzero")
+	// expected retraction is 5 blocks: 10s offset / 2s block time
+	expectedRetraction := uint64(5)
+	//observed retraction may not be exact if the verifier progressed derivation after EL sync completed.
+	if retraction != expectedRetraction {
+		t.Logger().Warn("Observed retraction does not match expected retraction", "observed", retraction, "expected", expectedRetraction)
+	}
 }
