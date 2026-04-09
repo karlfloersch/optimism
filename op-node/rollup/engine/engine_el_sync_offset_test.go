@@ -107,7 +107,7 @@ func buildELSyncTipChain(t *testing.T) (*rollup.Config, eth.L2BlockRef, eth.L2Bl
 }
 
 func TestInsertUnsafePayload_ELSync_offsetDerived(t *testing.T) {
-	cfg, refA0, refA1, _, refA3, payload := buildELSyncTipChain(t)
+	cfg, refA0, _, _, refA3, payload := buildELSyncTipChain(t)
 
 	tests := []struct {
 		name   string
@@ -130,17 +130,17 @@ func TestInsertUnsafePayload_ELSync_offsetDerived(t *testing.T) {
 			},
 		},
 		{
-			name:   "non-zero retracts safe and finalized by floor(offset/BlockTime)",
+			name:   "non-zero retracts safe and finalized by ceil(offset/BlockTime)",
 			offset: 5 * time.Second,
-			want:   refA1,
+			want:   refA0,
 			stub: func(eng *testutils.MockEngine) {
 				eng.ExpectL2BlockRefByLabel(eth.Finalized, refA0, nil)
 				eng.ExpectNewPayload(payload.ExecutionPayload, nil, &eth.PayloadStatusV1{Status: eth.ExecutionValid}, nil)
-				eng.ExpectL2BlockRefByNumber(1, refA1, nil)
+				eng.ExpectL2BlockRefByNumber(0, refA0, nil)
 				eng.ExpectForkchoiceUpdate(&eth.ForkchoiceState{
 					HeadBlockHash:      refA3.Hash,
-					SafeBlockHash:      refA1.Hash,
-					FinalizedBlockHash: refA1.Hash,
+					SafeBlockHash:      refA0.Hash,
+					FinalizedBlockHash: refA0.Hash,
 				}, nil, &eth.ForkchoiceUpdatedResult{PayloadStatus: eth.PayloadStatusV1{Status: eth.ExecutionValid}}, nil)
 			},
 		},
