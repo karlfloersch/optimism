@@ -28,8 +28,6 @@ const (
 	// We transition between the 4 EL states linearly. We spend the majority of the time in the second & fourth.
 	// We only want to EL sync if there is no finalized block & once we finish EL sync we need to mark the last block
 	// as finalized so we can switch to consolidation
-	// TODO(protocol-quest#91): We can restart EL sync & still consolidate if there finalized blocks on the execution client if the
-	// execution client is running in archive mode. In some cases we may want to switch back from CL to EL sync, but that is complicated.
 	syncStatusWillStartEL               // First if we are directed to EL sync, check that nothing has been finalized yet
 	syncStatusStartedEL                 // Perform our EL sync
 	syncStatusFinishedELButNotFinalized // EL sync is done, but we need to mark the final sync block as finalized
@@ -625,14 +623,25 @@ func (e *EngineController) insertUnsafePayload(ctx context.Context, envelope *et
 			}
 			offsetRef = d
 		}
-		fc.SafeBlockHash = offsetRef.Hash
-		fc.FinalizedBlockHash = offsetRef.Hash
+		// With SupportsPostFinalizationELSync, EL sync can start even when
+		// there is already a finalized head. Never retract finalized or safe
+		// behind their prior values.
+		finalizedRef := offsetRef
+		if finalizedRef.Number < e.FinalizedHead().Number {
+			finalizedRef = e.FinalizedHead()
+		}
+		safeRef := offsetRef
+		if safeRef.Number < e.SafeL2Head().Number {
+			safeRef = e.SafeL2Head()
+		}
+		fc.SafeBlockHash = safeRef.Hash
+		fc.FinalizedBlockHash = finalizedRef.Hash
 		e.SetUnsafeHead(ref)
 		e.emitter.Emit(ctx, UnsafeUpdateEvent{Ref: ref})
-		e.SetLocalSafeHead(offsetRef)
-		e.SetSafeHead(offsetRef)
-		e.onSafeUpdate(ctx, offsetRef, offsetRef)
-		e.SetFinalizedHead(offsetRef)
+		e.SetLocalSafeHead(safeRef)
+		e.SetSafeHead(safeRef)
+		e.onSafeUpdate(ctx, safeRef, safeRef)
+		e.SetFinalizedHead(finalizedRef)
 	}
 	logFn := e.logSyncProgressMaybe()
 	defer logFn()
