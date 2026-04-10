@@ -11,6 +11,9 @@ pub enum InvalidCrossTx {
     /// Error cause by cross chain tx during not active interop hardfork
     #[error("cross chain tx is invalid before interop")]
     CrossChainTxPreInterop,
+    /// Sender is not in the interop allowed senders list
+    #[error("interop tx sender not allowed: {0}")]
+    SenderNotAllowed(alloy_primitives::Address),
 }
 
 impl PoolTransactionError for InvalidCrossTx {
@@ -18,6 +21,7 @@ impl PoolTransactionError for InvalidCrossTx {
         match self {
             Self::ValidationError(_) => false,
             Self::CrossChainTxPreInterop => true,
+            Self::SenderNotAllowed(_) => true,
         }
     }
 
