@@ -41,8 +41,8 @@ func sortedChainIDs(chains map[eth.ChainID]cc.ChainContainer) []eth.ChainID {
 }
 
 // runLogBackfill seals logs for each chain from T_lo through LocalSafe and
-// records the minimum cross-safe timestamp as the ceiling for skip-verify.
-// Runs to completion before the main interop loop starts.
+// advances activationTimestamp past the backfilled range so the main loop
+// starts verification after the pre-ingested data.
 //
 // T_lo is computed from the minimum cross-safe (SafeL2) timestamp across all
 // chains, since that is the earliest point where cross-validation will resume.
@@ -118,10 +118,12 @@ func (i *Interop) runLogBackfill() error {
 		}
 	}
 
-	if !firstLocal {
-		i.backfillCeilingTimestamp = minLocalSafeTime
+	if !firstLocal && minLocalSafeTime+1 > i.activationTimestamp {
+		i.log.Info("advancing activation past backfilled range",
+			"oldActivation", i.activationTimestamp, "newActivation", minLocalSafeTime+1)
+		i.activationTimestamp = minLocalSafeTime + 1
 	}
-	i.log.Info("interop log backfill complete", "ceilingTimestamp", i.backfillCeilingTimestamp)
+	i.log.Info("interop log backfill complete", "activationTimestamp", i.activationTimestamp)
 	return nil
 }
 
@@ -146,23 +148,4 @@ func (i *Interop) backfillChain(ctx context.Context, cid eth.ChainID, chain cc.C
 		}
 	}
 	return nil
-}
-
-// shouldSkipVerification returns true when the timestamp is at or below the
-// cross-safe ceiling recorded after backfill — logs are already sealed and
-// verification is unnecessary.
-func (i *Interop) shouldSkipVerification(ts uint64) bool {
-	return i.backfillCeilingTimestamp > 0 && ts <= i.backfillCeilingTimestamp
-}
-
-func maxL1Inclusion(heads map[eth.ChainID]eth.BlockID) eth.BlockID {
-	var max eth.BlockID
-	first := true
-	for _, h := range heads {
-		if first || h.Number > max.Number {
-			max = h
-			first = false
-		}
-	}
-	return max
 }

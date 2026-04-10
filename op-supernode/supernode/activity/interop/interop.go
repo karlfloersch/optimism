@@ -112,9 +112,6 @@ type Interop struct {
 	frontierView *frontierVerificationView
 
 	logBackfillDepth time.Duration
-	// backfillCeilingTimestamp is the cross-safe timestamp when backfill completed.
-	// Rounds with nextTimestamp <= this value skip verification (logs already sealed).
-	backfillCeilingTimestamp uint64
 }
 
 func (i *Interop) Name() string {
@@ -332,16 +329,6 @@ func (i *Interop) progressInterop() (StepOutput, RoundObservation, error) {
 
 	if early := checkPreconditions(obs); early != nil {
 		return *early, obs, nil
-	}
-
-	if i.shouldSkipVerification(obs.NextTimestamp) {
-		skipResult := Result{
-			Timestamp:               obs.NextTimestamp,
-			L2Heads:                 obs.BlocksAtTS,
-			L1Inclusion:             maxL1Inclusion(obs.L1Heads),
-			SkipPersistFrontierLogs: true,
-		}
-		return decideVerifiedResult(obs, skipResult), obs, nil
 	}
 
 	result, err := i.verify(obs.NextTimestamp, obs.BlocksAtTS)
@@ -567,10 +554,8 @@ func (i *Interop) applyPendingTransition(pending PendingTransition) (bool, error
 			}
 			return false, nil
 		}
-		if !pending.Result.SkipPersistFrontierLogs {
-			if err := i.persistFrontierLogs(pending.Result.Timestamp, pending.Result.L2Heads); err != nil {
-				return false, fmt.Errorf("persist frontier logs: %w", err)
-			}
+		if err := i.persistFrontierLogs(pending.Result.Timestamp, pending.Result.L2Heads); err != nil {
+			return false, fmt.Errorf("persist frontier logs: %w", err)
 		}
 
 		if err := i.commitVerifiedResult(pending.Result.Timestamp, pending.Result.ToVerifiedResult()); err != nil {

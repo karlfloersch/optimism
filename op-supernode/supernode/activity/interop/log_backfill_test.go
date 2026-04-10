@@ -92,7 +92,7 @@ func TestLogBackfill_ResumesAfterInterruption(t *testing.T) {
 	}
 
 	require.NoError(t, h.interop.runLogBackfill())
-	require.Equal(t, uint64(110), h.interop.backfillCeilingTimestamp)
+	require.Equal(t, uint64(111), h.interop.activationTimestamp)
 
 	latest, has = h.interop.logsDBs[chain10.id].LatestSealedBlock()
 	require.True(t, has)
@@ -102,9 +102,9 @@ func TestLogBackfill_ResumesAfterInterruption(t *testing.T) {
 	require.Equal(t, int32(5), fetchCount.Load())
 }
 
-func TestLogBackfill_SealsAndSkipsVerifyUntilBeyondCeiling(t *testing.T) {
+func TestLogBackfill_AdvancesActivationAndStartsVerifyAfterCeiling(t *testing.T) {
 	const act = uint64(108)
-	depth := time.Second // crossSafe 110, depth 1s -> T_lo 109; seals 109..110; ceiling = LocalSafe.Time = 110
+	depth := time.Second // crossSafe 110, depth 1s -> T_lo 109; seals 109..110; activation advances to 111
 
 	h := newInteropTestHarness(t).
 		WithActivation(act).
@@ -121,8 +121,11 @@ func TestLogBackfill_SealsAndSkipsVerifyUntilBeyondCeiling(t *testing.T) {
 		Build()
 
 	var verifyCalls atomic.Int32
+	var firstVerifyTS atomic.Uint64
 	h.interop.verifyFn = func(ts uint64, blocks map[eth.ChainID]eth.BlockID) (Result, error) {
-		verifyCalls.Add(1)
+		if verifyCalls.Add(1) == 1 {
+			firstVerifyTS.Store(ts)
+		}
 		return Result{
 			Timestamp:   ts,
 			L1Inclusion: eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")},
@@ -131,9 +134,8 @@ func TestLogBackfill_SealsAndSkipsVerifyUntilBeyondCeiling(t *testing.T) {
 	}
 	h.interop.ctx = context.Background()
 
-	// Run backfill directly (in production this happens in Start before the main loop).
 	require.NoError(t, h.interop.runLogBackfill())
-	require.Equal(t, uint64(110), h.interop.backfillCeilingTimestamp)
+	require.Equal(t, uint64(111), h.interop.activationTimestamp)
 
 	chain10 := h.Mock(10)
 	latest, has := h.interop.logsDBs[chain10.id].LatestSealedBlock()
@@ -141,8 +143,8 @@ func TestLogBackfill_SealsAndSkipsVerifyUntilBeyondCeiling(t *testing.T) {
 	require.Equal(t, uint64(110), latest.Number)
 	require.Zero(t, verifyCalls.Load())
 
-	// Now progress the main loop — timestamps ≤ 110 should skip verify.
-	progressInteropUntil(t, h.interop, 40, func() bool {
+	// Progress the main loop — first verify should be at 111 (activation after backfill).
+	progressInteropUntil(t, h.interop, 10, func() bool {
 		lastTS, ok := h.interop.verifiedDB.LastTimestamp()
 		return ok && lastTS >= 111
 	})
@@ -150,4 +152,5 @@ func TestLogBackfill_SealsAndSkipsVerifyUntilBeyondCeiling(t *testing.T) {
 	require.True(t, ok)
 	require.GreaterOrEqual(t, lastTS, uint64(111))
 	require.Equal(t, int32(1), verifyCalls.Load())
+	require.Equal(t, uint64(111), firstVerifyTS.Load())
 }
