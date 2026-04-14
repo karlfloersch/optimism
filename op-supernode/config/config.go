@@ -41,8 +41,8 @@ func (c *CLIConfig) Check() error {
 	if c.L1NodeAddr == "" {
 		return errors.New("l1 node address is required")
 	}
-	if c.L1HTTPPollInterval <= 0 {
-		return errors.New("l1 http poll interval must be positive")
+	if c.L1HTTPPollInterval < 0 {
+		return errors.New("l1 http poll interval must not be negative")
 	}
 	return nil
 }
