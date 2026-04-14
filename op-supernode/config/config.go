@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -43,6 +44,9 @@ func (c *CLIConfig) Check() error {
 	}
 	if c.L1HTTPPollInterval < 0 {
 		return errors.New("l1 http poll interval must not be negative")
+	}
+	if c.L1HTTPPollInterval == 0 && (strings.HasPrefix(c.L1NodeAddr, "http://") || strings.HasPrefix(c.L1NodeAddr, "https://")) {
+		return errors.New("l1 http poll interval must be positive for HTTP L1 RPC endpoints")
 	}
 	return nil
 }

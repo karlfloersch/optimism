@@ -14,7 +14,10 @@ import (
 	oprpc "github.com/ethereum-optimism/optimism/op-service/rpc"
 )
 
-const EnvVarPrefix = "OP_SUPERNODE"
+const (
+	EnvVarPrefix              = "OP_SUPERNODE"
+	DefaultL1HTTPPollInterval = 12 * time.Second
+)
 
 func prefixEnvVars(name string) []string {
 	return opservice.PrefixEnvVar(EnvVarPrefix, name)
@@ -56,7 +59,7 @@ var (
 		Name:    "l1.http-poll-interval",
 		Usage:   "Polling interval for the shared L1 HTTP RPC subscription. This controls the supernode's own L1 client; virtual node l1.http-poll-interval flags are ignored.",
 		EnvVars: prefixEnvVars("L1_HTTP_POLL_INTERVAL"),
-		Value:   time.Second * 12,
+		Value:   DefaultL1HTTPPollInterval,
 	}
 	DisableP2P = &cli.BoolFlag{
 		Name:     "disable-p2p",
