@@ -133,11 +133,11 @@ func createVirtualNodeConfigs(cliCtx *cli.Context, cfg *config.CLIConfig, l log.
 		// supernode manages — per-VN values are silently ignored.
 		warnSupernodeOwnedFlags(vcli, chainID, l)
 
-		vnCfg, err := opnode.NewConfig(vcli, l)
+		cfg, err := opnode.NewConfig(vcli, l)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create virtual node config: %w", err)
 		}
-		vnCfgs[eth.ChainIDFromUInt64(chainID)] = vnCfg
+		vnCfgs[eth.ChainIDFromUInt64(chainID)] = cfg
 	}
 	return vnCfgs, nil
 }
