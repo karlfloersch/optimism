@@ -102,9 +102,9 @@ func init() {
 var Flags []cli.Flag
 
 // SupernodeOwnedFlags lists op-node flag names whose resources are owned by the
-// supernode (shared L1 client, safe-head DB, etc.) rather than individual virtual
-// nodes. Setting these at the vn.all.* or vn.<id>.* level has no effect because
-// the supernode injects pre-built resources via InitializationOverrides.
+// supernode (e.g. the shared L1 client) rather than individual virtual nodes.
+// Setting these at the vn.all.* or vn.<id>.* level has no effect because the
+// supernode injects pre-built resources via InitializationOverrides.
 //
 // Extend this list when new shared resources are added to the supernode.
 var SupernodeOwnedFlags = []string{

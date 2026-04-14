@@ -173,10 +173,3 @@ func (v *VirtualCLI) WithUintOverride(name string, value uint) *VirtualCLI {
 	v.uintOverrides[name] = value
 	return v
 }
-
-// IsExplicitlySet returns true if the user explicitly set the given op-node flag
-// at either the per-chain (vn.<id>.<name>) or global (vn.all.<name>) level.
-// Unlike IsSet, this ignores programmatic overrides — it only checks the CLI context.
-func (v *VirtualCLI) IsExplicitlySet(name string) bool {
-	return v.inner.IsSet(v.chainName(name)) || v.inner.IsSet(v.globalName(name))
-}

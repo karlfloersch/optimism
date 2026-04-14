@@ -128,8 +128,8 @@ func createVirtualNodeConfigs(cliCtx *cli.Context, cfg *config.CLIConfig, l log.
 		vcli.WithStringOverride(opnodeflags.L1NodeAddr.Name, cfg.L1NodeAddr)
 		vcli.WithStringOverride(opnodeflags.BeaconAddr.Name, cfg.L1BeaconAddr)
 
-		// Warn if the user explicitly set any supernode-owned flags at the VN level.
-		// These flags control shared resources (L1 client, safe DB, etc.) that the
+		// Warn if the user set any supernode-owned flags at the VN level.
+		// These flags control shared resources (e.g. L1 client) that the
 		// supernode manages — per-VN values are silently ignored.
 		warnSupernodeOwnedFlags(vcli, chainID, l)
 
@@ -143,11 +143,11 @@ func createVirtualNodeConfigs(cliCtx *cli.Context, cfg *config.CLIConfig, l log.
 }
 
 // warnSupernodeOwnedFlags logs a warning for each flag in SupernodeOwnedFlags
-// that the user explicitly set at the vn.all.* or vn.<id>.* level. These flags
-// have no effect because the supernode owns the underlying resource.
+// that was set at the vn.all.* or vn.<id>.* level. These flags have no effect
+// because the supernode owns the underlying resource.
 func warnSupernodeOwnedFlags(vcli *flags.VirtualCLI, chainID uint64, l log.Logger) {
 	for _, name := range flags.SupernodeOwnedFlags {
-		if vcli.IsExplicitlySet(name) {
+		if vcli.IsSet(name) {
 			l.Warn("virtual node flag is ignored — supernode owns this resource; use the supernode-level flag instead",
 				"flag", name, "chain", chainID)
 		}
