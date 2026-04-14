@@ -2,6 +2,7 @@ package flags
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -51,6 +52,12 @@ var (
 		Usage:   "Addresses of L1 Beacon-API compatible HTTP fallback endpoints. Used to fetch blob sidecars not available at the l1.beacon (e.g. expired blobs).",
 		EnvVars: append(prefixEnvVars("L1_BEACON_FALLBACKS"), prefixEnvVars("L1_BEACON_ARCHIVER")...),
 	}
+	L1HTTPPollInterval = &cli.DurationFlag{
+		Name:    "l1.http-poll-interval",
+		Usage:   "Polling interval for the shared L1 HTTP RPC subscription. This controls the supernode's own L1 client; virtual node l1.http-poll-interval flags are ignored.",
+		EnvVars: prefixEnvVars("L1_HTTP_POLL_INTERVAL"),
+		Value:   time.Second * 12,
+	}
 	DisableP2P = &cli.BoolFlag{
 		Name:     "disable-p2p",
 		Usage:    "Disable P2P for all chains. Affects configuration handed to virtual nodes.",
@@ -66,6 +73,7 @@ var requiredFlags = []cli.Flag{
 }
 
 var optionalFlags = []cli.Flag{
+	L1HTTPPollInterval,
 	DisableP2P,
 }
 
@@ -92,6 +100,16 @@ func init() {
 }
 
 var Flags []cli.Flag
+
+// SupernodeOwnedFlags lists op-node flag names whose resources are owned by the
+// supernode (shared L1 client, safe-head DB, etc.) rather than individual virtual
+// nodes. Setting these at the vn.all.* or vn.<id>.* level has no effect because
+// the supernode injects pre-built resources via InitializationOverrides.
+//
+// Extend this list when new shared resources are added to the supernode.
+var SupernodeOwnedFlags = []string{
+	opnodeflags.L1HTTPPollInterval.Name, // "l1.http-poll-interval"
+}
 
 func CheckRequired(ctx *cli.Context) error {
 	for _, f := range requiredFlags {
