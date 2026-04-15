@@ -88,6 +88,8 @@ type Interop struct {
 	activationTimestamp uint64
 	dataDir             string
 
+	messageExpiryWindow uint64
+
 	verifiedDB *VerifiedDB
 	logsDBs    map[eth.ChainID]LogsDB
 
@@ -124,6 +126,7 @@ func (i *Interop) Name() string {
 func New(
 	log log.Logger,
 	activationTimestamp uint64,
+	messageExpiryWindow uint64,
 	chains map[eth.ChainID]cc.ChainContainer,
 	dataDir string,
 	l1Source l1ByNumberSource,
@@ -151,6 +154,9 @@ func New(
 		logsDBs[chainID] = logsDB
 	}
 
+	if messageExpiryWindow == 0 {
+		messageExpiryWindow = defaultMessageExpiryWindow
+	}
 	i := &Interop{
 		log:                 log,
 		chains:              chains,
@@ -158,6 +164,7 @@ func New(
 		logsDBs:             logsDBs,
 		dataDir:             dataDir,
 		activationTimestamp: activationTimestamp,
+		messageExpiryWindow: messageExpiryWindow,
 		logBackfillDepth:    logBackfillDepth,
 	}
 	// default to using the verifyInteropMessages function
