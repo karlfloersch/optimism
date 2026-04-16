@@ -99,6 +99,12 @@ var (
 		EnvVars: prefixEnvVars("VALIDATION_INTERVAL"),
 		Value:   "500ms",
 	}
+	AllowedSendersFlag = &cli.StringFlag{
+		Name:    "allowed-senders",
+		Usage:   "Comma-separated allowed sender addresses, or '*' to accept any sender. Required unless dangerously-enable-passthrough is set.",
+		EnvVars: prefixEnvVars("ALLOWED_SENDERS"),
+		Value:   "",
+	}
 	DangerouslyEnablePassthroughFlag = &cli.BoolFlag{
 		Name:    "dangerously-enable-passthrough",
 		Usage:   "Allow all transactions through without interop filtering. DANGEROUS: disables all executing message validation.",
@@ -123,6 +129,7 @@ var optionalFlags = []cli.Flag{
 	RPCPortFlag,
 	PollIntervalFlag,
 	ValidationIntervalFlag,
+	AllowedSendersFlag,
 	DangerouslyEnablePassthroughFlag,
 }
 

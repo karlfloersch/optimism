@@ -47,7 +47,8 @@ func (m *MockBackend) AddL2RPC(ctx context.Context, rpc string, jwtSecret eth.By
 }
 
 func (m *MockBackend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor) error {
+	minSafety types.SafetyLevel, executingDescriptor types.ExecutingDescriptor, sender *common.Address) error {
+	_ = sender
 	return nil
 }
 

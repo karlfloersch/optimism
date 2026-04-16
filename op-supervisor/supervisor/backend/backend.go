@@ -567,7 +567,8 @@ func (su *SupervisorBackend) checkSafety(chainID eth.ChainID, blockID eth.BlockI
 }
 
 func (su *SupervisorBackend) CheckAccessList(ctx context.Context, inboxEntries []common.Hash,
-	minSafety types.SafetyLevel, execDescr types.ExecutingDescriptor) error {
+	minSafety types.SafetyLevel, execDescr types.ExecutingDescriptor, sender *common.Address) error {
+	_ = sender
 	// Check if failsafe is enabled
 	if su.isFailsafeEnabled() {
 		su.logger.Debug("Failsafe is enabled, rejecting access-list check")

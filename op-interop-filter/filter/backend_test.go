@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
 
@@ -20,6 +21,8 @@ const (
 	testChainA       = uint64(900)
 )
 
+var testAllowedSender = common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -30,6 +33,7 @@ func newTestBackend() *Backend {
 		Metrics:        metrics.NoopMetrics,
 		Chains:         make(map[eth.ChainID]ChainIngester),
 		CrossValidator: &mockCrossValidator{},
+		SenderPolicy:   AllowAnySenderPolicy(),
 	})
 }
 
@@ -44,6 +48,7 @@ func newTestBackendWithMockChain(chainID uint64) (*Backend, *mockChainIngester) 
 		Metrics:        metrics.NoopMetrics,
 		Chains:         chains,
 		CrossValidator: cv,
+		SenderPolicy:   AllowAnySenderPolicy(),
 	}), mock
 }
 
@@ -199,28 +204,59 @@ func TestBackend_CheckAccessList(t *testing.T) {
 	// Failsafe enabled returns error
 	backend, _ := newTestBackendWithMockChain(testChainA)
 	backend.SetFailsafeEnabled(true)
-	err := backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 100, 0))
+	err := backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 100, 0), &testAllowedSender)
 	require.ErrorIs(t, err, types.ErrFailsafeEnabled)
 
 	// Not ready returns error
 	backend = newTestBackend() // No chains = not ready
-	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 100, 0))
+	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 100, 0), &testAllowedSender)
 	require.ErrorIs(t, err, types.ErrUninitialized)
 
 	// Unsupported safety level returns error
 	backend, mock := newTestBackendWithMockChain(testChainA)
 	mock.SetReady(true)
-	err = backend.CheckAccessList(context.Background(), nil, types.Finalized, makeExecDescriptor(testChainA, 100, 0))
+	err = backend.CheckAccessList(context.Background(), nil, types.Finalized, makeExecDescriptor(testChainA, 100, 0), &testAllowedSender)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unsupported safety level")
 
 	// Unknown executing chain returns error
 	mock.SetLatestTimestamp(200)
 	unknownChainID := uint64(999)
-	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(unknownChainID, 150, 0))
+	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(unknownChainID, 150, 0), &testAllowedSender)
 	require.ErrorIs(t, err, types.ErrUnknownChain)
 
 	// LocalUnsafe with empty access list passes
-	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 150, 0))
+	err = backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 150, 0), &testAllowedSender)
+	require.NoError(t, err)
+}
+
+func TestBackend_CheckAccessList_RejectsUnauthorizedSender(t *testing.T) {
+	backend, mock := newTestBackendWithMockChain(testChainA)
+	mock.SetReady(true)
+	mock.SetLatestTimestamp(200)
+	backend.senderPolicy = mustParseTestSenderPolicy(t, common.HexToAddress("0x9999999999999999999999999999999999999999").Hex())
+
+	err := backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 150, 0), &testAllowedSender)
+	require.ErrorIs(t, err, types.ErrUnauthorizedSender)
+}
+
+func TestBackend_CheckAccessList_AllowsConfiguredSender(t *testing.T) {
+	backend, mock := newTestBackendWithMockChain(testChainA)
+	mock.SetReady(true)
+	mock.SetLatestTimestamp(200)
+	backend.senderPolicy = mustParseTestSenderPolicy(t, testAllowedSender.Hex())
+
+	err := backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 150, 0), &testAllowedSender)
+	require.NoError(t, err)
+}
+
+func TestBackend_CheckAccessList_AllowsWildcardSenderPolicy(t *testing.T) {
+	backend, mock := newTestBackendWithMockChain(testChainA)
+	mock.SetReady(true)
+	mock.SetLatestTimestamp(200)
+	backend.senderPolicy = mustParseTestSenderPolicy(t, "*")
+
+	anySender := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	err := backend.CheckAccessList(context.Background(), nil, types.LocalUnsafe, makeExecDescriptor(testChainA, 150, 0), &anySender)
 	require.NoError(t, err)
 }

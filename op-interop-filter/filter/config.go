@@ -37,6 +37,7 @@ type Config struct {
 	PollInterval                time.Duration // Interval for polling new blocks (default: 2s)
 	ValidationInterval          time.Duration // Interval for cross-chain validation (default: 500ms)
 	Passthrough                 bool          // If true, all transactions pass through without filtering
+	AllowedSenders              *SenderPolicy
 
 	LogConfig     oplog.CLIConfig
 	MetricsConfig opmetrics.CLIConfig
@@ -67,6 +68,9 @@ func (c *Config) Check() error {
 	}
 	if c.ValidationInterval <= 0 {
 		result = errors.Join(result, errors.New("validation-interval must be positive"))
+	}
+	if !c.Passthrough && c.AllowedSenders == nil {
+		result = errors.Join(result, errors.New("allowed-senders must be configured unless dangerously-enable-passthrough is enabled"))
 	}
 	result = errors.Join(result, c.MetricsConfig.Check())
 	result = errors.Join(result, c.PprofConfig.Check())
@@ -109,6 +113,15 @@ func NewConfig(ctx *cli.Context, version string) (*Config, error) {
 		return nil, fmt.Errorf("validation-interval must be positive, got %s", validationInterval)
 	}
 
+	passthrough := ctx.Bool(flags.DangerouslyEnablePassthroughFlag.Name)
+	var allowedSenders *SenderPolicy
+	if ctx.IsSet(flags.AllowedSendersFlag.Name) {
+		allowedSenders, err = ParseSenderPolicy(ctx.String(flags.AllowedSendersFlag.Name))
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed-senders: %w", err)
+		}
+	}
+
 	// Load rollup configs from --networks and --rollup-configs
 	rollupConfigs, err := loadRollupConfigs(
 		ctx.StringSlice(flags.NetworksFlag.Name),
@@ -133,7 +146,8 @@ func NewConfig(ctx *cli.Context, version string) (*Config, error) {
 		Version:                     version,
 		PollInterval:                pollInterval,
 		ValidationInterval:          validationInterval,
-		Passthrough:                 ctx.Bool(flags.DangerouslyEnablePassthroughFlag.Name),
+		Passthrough:                 passthrough,
+		AllowedSenders:              allowedSenders,
 		LogConfig:                   oplog.ReadCLIConfig(ctx),
 		MetricsConfig:               opmetrics.ReadCLIConfig(ctx),
 		PprofConfig:                 oppprof.ReadCLIConfig(ctx),

@@ -283,6 +283,7 @@ where
             .is_valid_cross_tx(
                 tx.access_list(),
                 tx.hash(),
+                tx.sender(),
                 self.block_info.timestamp.load(Ordering::Relaxed),
                 Some(TRANSACTION_VALIDITY_WINDOW_SECS),
                 self.fork_tracker.is_interop_activated(),

@@ -9,7 +9,7 @@ use crate::{
 };
 use alloy_consensus::Transaction;
 use alloy_eips::eip2930::AccessList;
-use alloy_primitives::{B256, TxHash};
+use alloy_primitives::{Address, B256, TxHash};
 use alloy_rpc_client::ReqwestClient;
 use futures_util::{
     Stream,
@@ -64,11 +64,13 @@ impl SupervisorClient {
         &self,
         inbox_entries: &'a [B256],
         executing_descriptor: ExecutingDescriptor,
+        sender: Address,
     ) -> CheckAccessListRequest<'a> {
         CheckAccessListRequest {
             client: self.inner.client.clone(),
             inbox_entries: Cow::Borrowed(inbox_entries),
             executing_descriptor,
+            sender,
             timeout: self.inner.timeout,
             safety: self.inner.safety,
             metrics: self.inner.metrics.clone(),
@@ -88,6 +90,7 @@ impl SupervisorClient {
         &self,
         access_list: Option<&AccessList>,
         hash: &TxHash,
+        sender: Address,
         timestamp: u64,
         timeout: Option<u64>,
         is_interop_active: bool,
@@ -112,6 +115,7 @@ impl SupervisorClient {
             .check_access_list(
                 inbox_entries.as_slice(),
                 ExecutingDescriptor::new(self.inner.chain_id, timestamp, timeout),
+                sender,
             )
             .await
         {
@@ -151,6 +155,7 @@ impl SupervisorClient {
                     .is_valid_cross_tx(
                         tx_item.access_list(),
                         tx_item.hash(),
+                        tx_item.sender(),
                         current_timestamp,
                         Some(revalidation_window),
                         true,
@@ -245,6 +250,7 @@ pub struct CheckAccessListRequest<'a> {
     client: ReqwestClient,
     inbox_entries: Cow<'a, [B256]>,
     executing_descriptor: ExecutingDescriptor,
+    sender: Address,
     timeout: Duration,
     safety: SafetyLevel,
     metrics: SupervisorMetrics,
@@ -269,7 +275,8 @@ impl<'a> IntoFuture for CheckAccessListRequest<'a> {
     type IntoFuture = BoxFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let Self { client, inbox_entries, executing_descriptor, timeout, safety, metrics } = self;
+        let Self { client, inbox_entries, executing_descriptor, sender, timeout, safety, metrics } =
+            self;
         Box::pin(async move {
             let start = Instant::now();
 
@@ -277,7 +284,7 @@ impl<'a> IntoFuture for CheckAccessListRequest<'a> {
                 timeout,
                 client.request(
                     "supervisor_checkAccessList",
-                    (inbox_entries, safety, executing_descriptor),
+                    (inbox_entries, safety, executing_descriptor, sender),
                 ),
             )
             .await;
