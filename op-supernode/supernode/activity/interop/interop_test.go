@@ -1315,7 +1315,8 @@ type mockChainContainer struct {
 	optimisticAtErr error
 
 	// If set, SyncStatus returns this instead of synthesizing from currentL1 only.
-	syncStatusFull *eth.SyncStatus
+	syncStatusFull     *eth.SyncStatus
+	syncStatusOverride func() (*eth.SyncStatus, error)
 
 	// PauseAndStopVN / Resume tracking
 	pauseAndStopVNCalls int
@@ -1446,6 +1447,9 @@ func (m *mockChainContainer) FetchReceipts(ctx context.Context, blockID eth.Bloc
 func (m *mockChainContainer) SyncStatus(ctx context.Context) (*eth.SyncStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.syncStatusOverride != nil {
+		return m.syncStatusOverride()
+	}
 	if m.currentL1Err != nil {
 		return nil, m.currentL1Err
 	}

@@ -3,7 +3,6 @@ package interop
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -31,15 +30,6 @@ func LogBackfillLowerBound(crossSafeTs, activationTimestampUnix uint64, logBackf
 	return raw
 }
 
-func sortedChainIDs(chains map[eth.ChainID]cc.ChainContainer) []eth.ChainID {
-	out := make([]eth.ChainID, 0, len(chains))
-	for id := range chains {
-		out = append(out, id)
-	}
-	sort.Slice(out, func(a, b int) bool { return out[a].Cmp(out[b]) < 0 })
-	return out
-}
-
 // runLogBackfill seals logs for each chain from T_lo through LocalSafe and
 // advances activationTimestamp past the backfilled range so the main loop
 // starts verification after the pre-ingested data.
@@ -50,9 +40,11 @@ func (i *Interop) runLogBackfill() error {
 	if i.logBackfillDepth <= 0 {
 		return nil
 	}
+	if len(i.chains) == 0 {
+		return nil
+	}
 
 	ctx := i.ctx
-	sortedIDs := sortedChainIDs(i.chains)
 
 	// First pass: gather the minimum cross-safe timestamp across all chains.
 	// SafeL2 is the cross-safe head post-interop.
@@ -61,11 +53,11 @@ func (i *Interop) runLogBackfill() error {
 		localSafeNum  uint64
 		localSafeTime uint64
 	}
-	info := make(map[eth.ChainID]chainInfo, len(sortedIDs))
+	info := make(map[eth.ChainID]chainInfo, len(i.chains))
 	var minCrossSafeTime uint64
 	first := true
-	for _, cid := range sortedIDs {
-		ss, err := i.chains[cid].SyncStatus(ctx)
+	for cid, chain := range i.chains {
+		ss, err := chain.SyncStatus(ctx)
 		if err != nil {
 			return fmt.Errorf("chain %s: sync status: %w", cid, err)
 		}
@@ -80,9 +72,6 @@ func (i *Interop) runLogBackfill() error {
 			first = false
 		}
 	}
-	if first {
-		return nil
-	}
 
 	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.activationTimestamp, i.logBackfillDepth)
 	i.log.Info("log backfill: computed lower bound",
@@ -91,9 +80,8 @@ func (i *Interop) runLogBackfill() error {
 	// Second pass: backfill each chain from T_lo to its LocalSafe.
 	var minLocalSafeTime uint64
 	firstLocal := true
-	for _, cid := range sortedIDs {
+	for cid, chain := range i.chains {
 		ci := info[cid]
-		chain := i.chains[cid]
 
 		if firstLocal || ci.localSafeTime < minLocalSafeTime {
 			minLocalSafeTime = ci.localSafeTime

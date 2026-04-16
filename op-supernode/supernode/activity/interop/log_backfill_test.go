@@ -2,6 +2,7 @@ package interop
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync/atomic"
 	"testing"
@@ -100,6 +101,99 @@ func TestLogBackfill_ResumesAfterInterruption(t *testing.T) {
 
 	// Should have fetched only blocks 106..110 (5 blocks), not 100..110 (11 blocks).
 	require.Equal(t, int32(5), fetchCount.Load())
+}
+
+func TestLogBackfill_RetriesWhenVirtualNodesNotReady(t *testing.T) {
+	const act = uint64(100)
+	depth := 10 * time.Second
+
+	// Track SyncStatus call count so we can make the first N calls fail.
+	var syncStatusCalls atomic.Int32
+	failUntil := int32(3) // first 3 calls return error, then succeed
+
+	h := newInteropTestHarness(t).
+		WithActivation(act).
+		WithLogBackfillDepth(depth).
+		WithChain(10, func(m *mockChainContainer) {
+			m.currentL1 = eth.BlockRef{Number: 1, Hash: common.HexToHash("0xL1")}
+			m.syncStatusFull = &eth.SyncStatus{
+				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
+				UnsafeL2:    eth.L2BlockRef{Number: 110, Time: 110},
+				SafeL2:      eth.L2BlockRef{Number: 110, Time: 110},
+				LocalSafeL2: eth.L2BlockRef{Number: 110, Time: 110},
+			}
+			m.currentL1Err = errors.New("virtual node not ready")
+			m.syncStatusOverride = func() (*eth.SyncStatus, error) {
+				n := syncStatusCalls.Add(1)
+				if n <= failUntil {
+					return nil, errors.New("virtual node not ready")
+				}
+				return &eth.SyncStatus{
+					CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
+					UnsafeL2:    eth.L2BlockRef{Number: 110, Time: 110},
+					SafeL2:      eth.L2BlockRef{Number: 110, Time: 110},
+					LocalSafeL2: eth.L2BlockRef{Number: 110, Time: 110},
+				}, nil
+			}
+		}).
+		Build()
+
+	// Use a shorter backoff for tests.
+	origBackoff := errorBackoffPeriod
+	errorBackoffPeriod = 10 * time.Millisecond
+	t.Cleanup(func() { errorBackoffPeriod = origBackoff })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- h.interop.Start(ctx) }()
+
+	// Wait for backfill to complete: activation should advance past 110.
+	require.Eventually(t, func() bool {
+		return h.interop.activationTimestamp > act
+	}, 5*time.Second, 20*time.Millisecond, "backfill should eventually succeed after retries")
+
+	require.GreaterOrEqual(t, syncStatusCalls.Load(), failUntil,
+		"SyncStatus should have been called at least %d times (the failing ones)", failUntil)
+	require.Equal(t, uint64(111), h.interop.activationTimestamp)
+
+	cancel()
+	<-done
+}
+
+func TestLogBackfill_RetriesStopOnContextCancel(t *testing.T) {
+	const act = uint64(100)
+	depth := 10 * time.Second
+
+	h := newInteropTestHarness(t).
+		WithActivation(act).
+		WithLogBackfillDepth(depth).
+		WithChain(10, func(m *mockChainContainer) {
+			// SyncStatus always fails — backfill will retry forever.
+			m.currentL1Err = errors.New("virtual node not ready")
+		}).
+		Build()
+
+	origBackoff := errorBackoffPeriod
+	errorBackoffPeriod = 10 * time.Millisecond
+	t.Cleanup(func() { errorBackoffPeriod = origBackoff })
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- h.interop.Start(ctx) }()
+
+	// Let it retry a few times, then cancel.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after context cancellation")
+	}
 }
 
 func TestLogBackfill_AdvancesActivationAndStartsVerifyAfterCeiling(t *testing.T) {

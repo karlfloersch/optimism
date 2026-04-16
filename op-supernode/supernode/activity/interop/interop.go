@@ -189,8 +189,17 @@ func (i *Interop) Start(ctx context.Context) error {
 
 	if i.logBackfillDepth > 0 {
 		i.log.Info("interop log backfill depth configured", "duration", i.logBackfillDepth.String())
-		if err := i.runLogBackfill(); err != nil {
-			return fmt.Errorf("log backfill failed: %w", err)
+		for {
+			err := i.runLogBackfill()
+			if err == nil {
+				break
+			}
+			i.log.Warn("log backfill failed, retrying (virtual nodes may not be ready yet)", "err", err)
+			select {
+			case <-i.ctx.Done():
+				return fmt.Errorf("log backfill interrupted: %w", i.ctx.Err())
+			case <-time.After(errorBackoffPeriod):
+			}
 		}
 	}
 
