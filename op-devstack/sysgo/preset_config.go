@@ -25,6 +25,7 @@ type PresetConfig struct {
 	MaxSequencingWindow        *uint64
 	RequireInteropNotAtGen     bool
 	MessageExpiryWindow        *uint64
+	UseInteropFilter           bool
 	// InteropLogBackfillDepth, if non-zero, configures the supernode to backfill
 	// initiating-message logs backward from the tip by this duration at startup.
 	InteropLogBackfillDepth time.Duration

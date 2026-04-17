@@ -17,6 +17,7 @@ type CLIConfig struct {
 	Chains                     []uint64
 	DataDir                    string
 	L1NodeAddr                 string
+	L1HTTPPollInterval         time.Duration
 	L1BeaconAddr               string
 	L1BeaconFallbackAddrs      []string
 	RPCConfig                  oprpc.CLIConfig
@@ -43,6 +44,9 @@ func (c *CLIConfig) Check() error {
 	if c.L1NodeAddr == "" {
 		return errors.New("l1 node address is required")
 	}
+	if c.L1HTTPPollInterval < 0 {
+		return errors.New("l1 http poll interval must not be negative")
+	}
 	if c.InteropLogBackfillDepth < 0 {
 		return errors.New("interop.log-backfill-depth must be >= 0")
 	}
@@ -57,6 +61,7 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		Chains:                  ctx.Uint64Slice(flags.ChainsFlag.Name),
 		DataDir:                 ctx.String(flags.DataDirFlag.Name),
 		L1NodeAddr:              ctx.String(flags.L1NodeAddr.Name),
+		L1HTTPPollInterval:      ctx.Duration(flags.L1HTTPPollInterval.Name),
 		L1BeaconAddr:            ctx.String(flags.L1BeaconAddr.Name),
 		L1BeaconFallbackAddrs:   ctx.StringSlice(flags.L1BeaconFallbackAddrs.Name),
 		RPCConfig:               oprpc.ReadCLIConfig(ctx),
