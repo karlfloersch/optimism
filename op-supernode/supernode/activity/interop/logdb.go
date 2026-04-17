@@ -169,12 +169,17 @@ func (i *Interop) sealBlockDataIntoLogsDB(chainID eth.ChainID, blockID eth.Block
 func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint64, blockTime uint64, isBackfill bool) (eth.BlockID, bool, error) {
 	latestBlock, hasBlocks := db.LatestSealedBlock()
 
-	// If no blocks in DB:
-	// - At activation timestamp: OK, proceed to load the first block
-	// - During log backfill: allow first seal at any ts >= activation
-	// - Otherwise: ERROR, we're missing data
 	if !hasBlocks {
-		if ts == i.activationTimestamp || (isBackfill && ts >= i.activationTimestamp) {
+		// The main loop starts at runtimeActivationTimestamp (which may have been
+		// advanced past the protocol activation by backfill). If the DB is empty,
+		// this is the only timestamp the main loop would legitimately seal first.
+		if ts == i.runtimeActivationTimestamp {
+			return eth.BlockID{}, hasBlocks, nil
+		}
+		// Backfill can seal its first block at any timestamp at or after the
+		// protocol activation. T_lo is already clamped to >= activationTimestamp,
+		// so this allows the full backfill range without depending on runtime state.
+		if isBackfill && ts >= i.activationTimestamp {
 			return eth.BlockID{}, hasBlocks, nil
 		}
 		return eth.BlockID{}, hasBlocks, fmt.Errorf("chain %s: logsDB is empty but expected blocks before timestamp %d: %w",

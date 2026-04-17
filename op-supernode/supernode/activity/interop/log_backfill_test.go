@@ -93,7 +93,8 @@ func TestLogBackfill_ResumesAfterInterruption(t *testing.T) {
 	}
 
 	require.NoError(t, h.interop.runLogBackfill())
-	require.Equal(t, uint64(111), h.interop.activationTimestamp)
+	require.Equal(t, uint64(111), h.interop.runtimeActivationTimestamp)
+	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
 
 	latest, has = h.interop.logsDBs[chain10.id].LatestSealedBlock()
 	require.True(t, has)
@@ -149,14 +150,15 @@ func TestLogBackfill_RetriesWhenVirtualNodesNotReady(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- h.interop.Start(ctx) }()
 
-	// Wait for backfill to complete: activation should advance past 110.
+	// Wait for backfill to complete: runtime activation should advance past 110.
 	require.Eventually(t, func() bool {
-		return h.interop.activationTimestamp > act
+		return h.interop.runtimeActivationTimestamp > act
 	}, 5*time.Second, 20*time.Millisecond, "backfill should eventually succeed after retries")
 
 	require.GreaterOrEqual(t, syncStatusCalls.Load(), failUntil,
 		"SyncStatus should have been called at least %d times (the failing ones)", failUntil)
-	require.Equal(t, uint64(111), h.interop.activationTimestamp)
+	require.Equal(t, uint64(111), h.interop.runtimeActivationTimestamp)
+	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
 
 	cancel()
 	<-done
@@ -229,7 +231,8 @@ func TestLogBackfill_AdvancesActivationAndStartsVerifyAfterCeiling(t *testing.T)
 	h.interop.ctx = context.Background()
 
 	require.NoError(t, h.interop.runLogBackfill())
-	require.Equal(t, uint64(111), h.interop.activationTimestamp)
+	require.Equal(t, uint64(111), h.interop.runtimeActivationTimestamp)
+	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
 
 	chain10 := h.Mock(10)
 	latest, has := h.interop.logsDBs[chain10.id].LatestSealedBlock()

@@ -85,8 +85,16 @@ type StepOutput struct {
 type Interop struct {
 	log                 log.Logger
 	chains              map[eth.ChainID]cc.ChainContainer
-	activationTimestamp uint64
-	dataDir             string
+	activationTimestamp uint64 // immutable protocol activation timestamp
+
+	// runtimeActivationTimestamp is the effective activation timestamp used
+	// by the main loop and backfill. It starts equal to activationTimestamp
+	// and is advanced past the backfilled range after log backfill completes.
+	// Protocol-facing queries (VerifiedAtTimestamp, VerifiedBlockAtL1, etc.)
+	// always use the original activationTimestamp.
+	runtimeActivationTimestamp uint64
+
+	dataDir string
 
 	messageExpiryWindow uint64
 
@@ -158,14 +166,15 @@ func New(
 		messageExpiryWindow = defaultMessageExpiryWindow
 	}
 	i := &Interop{
-		log:                 log,
-		chains:              chains,
-		verifiedDB:          verifiedDB,
-		logsDBs:             logsDBs,
-		dataDir:             dataDir,
-		activationTimestamp: activationTimestamp,
-		messageExpiryWindow: messageExpiryWindow,
-		logBackfillDepth:    logBackfillDepth,
+		log:                        log,
+		chains:                     chains,
+		verifiedDB:                 verifiedDB,
+		logsDBs:                    logsDBs,
+		dataDir:                    dataDir,
+		activationTimestamp:        activationTimestamp,
+		runtimeActivationTimestamp: activationTimestamp,
+		messageExpiryWindow:        messageExpiryWindow,
+		logBackfillDepth:           logBackfillDepth,
 	}
 	// default to using the verifyInteropMessages function
 	// (can be overridden by tests)
@@ -373,7 +382,7 @@ func (i *Interop) observeRound() (RoundObservation, error) {
 		obs.LastVerified = &result
 		obs.NextTimestamp = lastTS + 1
 	} else {
-		obs.NextTimestamp = i.activationTimestamp
+		obs.NextTimestamp = i.runtimeActivationTimestamp
 	}
 
 	if pauseTS := i.pauseAtTimestamp.Load(); pauseTS != 0 && obs.NextTimestamp >= pauseTS {
@@ -609,7 +618,7 @@ func (i *Interop) buildRewindPlan(lastTS uint64) (RewindPlan, error) {
 		RewindAtOrAfter: lastTS,
 	}
 
-	if lastTS <= i.activationTimestamp {
+	if lastTS <= i.runtimeActivationTimestamp {
 		return plan, nil
 	}
 

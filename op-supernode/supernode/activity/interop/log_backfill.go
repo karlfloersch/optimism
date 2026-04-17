@@ -73,7 +73,7 @@ func (i *Interop) runLogBackfill() error {
 		}
 	}
 
-	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.activationTimestamp, i.logBackfillDepth)
+	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.runtimeActivationTimestamp, i.logBackfillDepth)
 	i.log.Info("log backfill: computed lower bound",
 		"minCrossSafeTime", minCrossSafeTime, "T_lo", Tlo, "depth", i.logBackfillDepth)
 
@@ -90,7 +90,7 @@ func (i *Interop) runLogBackfill() error {
 
 		startNum, err := chain.TimestampToBlockNumber(ctx, Tlo)
 		if err != nil {
-			startNum = 0
+			return fmt.Errorf("chain %s: timestamp to block number for T_lo %d: %w", cid, Tlo, err)
 		}
 		if startNum > ci.localSafeNum {
 			i.log.Info("log backfill: chain already past lower bound, skipping",
@@ -106,12 +106,12 @@ func (i *Interop) runLogBackfill() error {
 		}
 	}
 
-	if !firstLocal && minLocalSafeTime+1 > i.activationTimestamp {
-		i.log.Info("advancing activation past backfilled range",
-			"oldActivation", i.activationTimestamp, "newActivation", minLocalSafeTime+1)
-		i.activationTimestamp = minLocalSafeTime + 1
+	if !firstLocal && minLocalSafeTime+1 > i.runtimeActivationTimestamp {
+		i.log.Info("advancing runtime activation past backfilled range",
+			"oldActivation", i.runtimeActivationTimestamp, "newActivation", minLocalSafeTime+1)
+		i.runtimeActivationTimestamp = minLocalSafeTime + 1
 	}
-	i.log.Info("interop log backfill complete", "activationTimestamp", i.activationTimestamp)
+	i.log.Info("interop log backfill complete", "runtimeActivationTimestamp", i.runtimeActivationTimestamp)
 	return nil
 }
 
