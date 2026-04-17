@@ -42,5 +42,7 @@ func TestSupernodeLogBackfill_RetriesUntilSuccess(gt *testing.T) {
 		"retry loop should have run at least %d attempts, got %d",
 		injectedFailures+1, sys.Supernode.BackfillAttempts())
 
-	backfillutil.AssertBackfillCovered(t, sys)
+	sys.Supernode.AssertBackfillCovers(backfillutil.BackfillDepth,
+		sys.L2A.Escape().RollupConfig().BlockTime,
+		sys.L2A.ChainID(), sys.L2B.ChainID())
 }

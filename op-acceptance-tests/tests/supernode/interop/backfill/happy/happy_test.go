@@ -35,5 +35,7 @@ func TestSupernodeLogBackfill_HappyPath(gt *testing.T) {
 	t.Require().GreaterOrEqual(sys.Supernode.BackfillAttempts(), int32(1),
 		"post-restart backfill should run at least once")
 
-	backfillutil.AssertBackfillCovered(t, sys)
+	sys.Supernode.AssertBackfillCovers(backfillutil.BackfillDepth,
+		sys.L2A.Escape().RollupConfig().BlockTime,
+		sys.L2A.ChainID(), sys.L2B.ChainID())
 }

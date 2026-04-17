@@ -51,12 +51,3 @@ func AwaitHistoryAtLeast(t devtest.T, sys *presets.TwoL2SupernodeInterop, age ti
 		"both chains must accumulate local+cross safe history of at least %s", age)
 }
 
-// AssertBackfillCovered is a thin wrapper around the DSL assertion that
-// verifies, for both L2 chains, that the interop logs DB actually contains
-// blocks spanning [T_lo, localSafe] after backfill finishes.
-func AssertBackfillCovered(t devtest.T, sys *presets.TwoL2SupernodeInterop) {
-	t.Helper()
-	blockTime := sys.L2A.Escape().RollupConfig().BlockTime
-	sys.Supernode.AssertBackfillCovers(BackfillDepth, blockTime,
-		sys.L2A.ChainID(), sys.L2B.ChainID())
-}
