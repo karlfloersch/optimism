@@ -84,25 +84,38 @@ func (i *Interop) runLogBackfill() error {
 	i.log.Debug("log backfill: computed lower bound",
 		"minCrossSafeTime", minCrossSafeTime, "T_lo", Tlo, "depth", i.logBackfillDepth)
 
-	// Second pass: backfill each chain from T_lo to its LocalSafe.
+	// Second pass: backfill each chain from T_lo to its LocalSafe. Fold
+	// localSafeTime into minLocalSafeTime as we go so runtimeActivation is
+	// clamped to the earliest backfilled head — any chain that can't satisfy
+	// the round aborts before contributing, so minLocalSafeTime always
+	// reflects the set of chains whose logs DB is now populated up to T_lo.
 	var minLocalSafeTime uint64
 	firstLocal := true
 	for cid, chain := range i.chains {
 		ci := info[cid]
-
-		if firstLocal || ci.localSafeTime < minLocalSafeTime {
-			minLocalSafeTime = ci.localSafeTime
-			firstLocal = false
-		}
 
 		startNum, err := chain.TimestampToBlockNumber(ctx, Tlo)
 		if err != nil {
 			return fmt.Errorf("chain %s: timestamp to block number for T_lo %d: %w", cid, Tlo, err)
 		}
 		if startNum > ci.localSafeNum {
-			i.log.Info("log backfill: chain already past lower bound, skipping",
-				"chain", cid, "startNum", startNum, "localSafeNum", ci.localSafeNum)
-			continue
+			// Chain's local-safe is behind T_lo in block space. The invariant
+			// minCrossSafeTime <= this chain's localSafeTime should make this
+			// unreachable in steady state; hitting it means SyncStatus and
+			// TimestampToBlockNumber were inconsistent (new chain warming up,
+			// derivation indexing lag, etc.). Silently skipping this chain
+			// would strand its [T_lo, minLocalSafeTime] logs unsealed while
+			// the main loop advances past them, and any future executing
+			// message referencing an initiating message in that range would
+			// be unverifiable. Fail the round and let the retry loop
+			// re-query once the chain catches up.
+			return fmt.Errorf("chain %s: local-safe block %d is behind T_lo block %d (ts=%d); retrying until chain catches up",
+				cid, ci.localSafeNum, startNum, Tlo)
+		}
+
+		if firstLocal || ci.localSafeTime < minLocalSafeTime {
+			minLocalSafeTime = ci.localSafeTime
+			firstLocal = false
 		}
 
 		i.log.Info("log backfill: sealing logs",

@@ -199,27 +199,23 @@ func TestLogBackfill_RetriesStopOnContextCancel(t *testing.T) {
 }
 
 // TestLogBackfill_AsymmetricMultiChain exercises the two cross-chain minima
-// that runLogBackfill computes:
+// that runLogBackfill computes when every chain is caught up past T_lo:
 //
 //   - T_lo is derived from min(SafeL2.Time) across chains (cross-safe).
-//   - runtimeActivationTimestamp is derived from min(LocalSafeL2.Time) across
-//     chains and must advance to that minimum + 1.
+//   - runtimeActivationTimestamp advances to min(LocalSafeL2.Time) + 1
+//     across chains.
 //
-// It also covers the "chain already past lower bound" skip branch: one chain
-// is configured so that TimestampToBlockNumber(T_lo) > LocalSafeL2.Number,
-// which must NOT stop the other chains from backfilling and must NOT prevent
-// the runtime activation advancement.
+// Three chains are configured with asymmetric cross-safe and local-safe
+// positions. All are past T_lo, so none are skipped and the whole backfill
+// round succeeds.
 func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 	const act = uint64(50)
-	depth := 10 * time.Second // crossSafe 100 -> T_lo 90
+	depth := 10 * time.Second // min cross-safe 100 -> T_lo 90
 
-	// Chain 10: backfill range 90..120.
-	// Chain 20: backfill range 90..130 (wider LocalSafe).
-	// Chain 30: cross-safe is far ahead (500) so it contributes nothing to
-	// minCrossSafeTime, but its LocalSafe tip is 95 — above T_lo. We force
-	// TimestampToBlockNumber(T_lo) to return 200, so startNum > localSafeNum
-	// and this chain is skipped. Its LocalSafeL2.Time (95) still participates
-	// in minLocalSafeTime, so runtime activation advances to 96.
+	// Chain 10: cross-safe 100, local-safe 120 -> backfill 90..120.
+	// Chain 20: cross-safe 110, local-safe 130 -> backfill 90..130.
+	// Chain 30: cross-safe 140, local-safe 150 -> backfill 90..150.
+	// Min local-safe time is 120 on chain 10, so runtime activation -> 121.
 	h := newInteropTestHarness(t).
 		WithActivation(act).
 		WithLogBackfillDepth(depth).
@@ -235,26 +231,21 @@ func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 			m.syncStatusFull = &eth.SyncStatus{
 				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
 				UnsafeL2:    eth.L2BlockRef{Number: 130, Time: 130},
-				SafeL2:      eth.L2BlockRef{Number: 200, Time: 200},
+				SafeL2:      eth.L2BlockRef{Number: 110, Time: 110},
 				LocalSafeL2: eth.L2BlockRef{Number: 130, Time: 130},
 			}
 		}).
 		WithChain(30, func(m *mockChainContainer) {
 			m.syncStatusFull = &eth.SyncStatus{
 				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
-				UnsafeL2:    eth.L2BlockRef{Number: 95, Time: 95},
-				SafeL2:      eth.L2BlockRef{Number: 500, Time: 500},
-				LocalSafeL2: eth.L2BlockRef{Number: 95, Time: 95},
-			}
-			m.timestampToBlockNumberOverride = func(ctx context.Context, ts uint64) (uint64, error) {
-				return 200, nil
+				UnsafeL2:    eth.L2BlockRef{Number: 150, Time: 150},
+				SafeL2:      eth.L2BlockRef{Number: 140, Time: 140},
+				LocalSafeL2: eth.L2BlockRef{Number: 150, Time: 150},
 			}
 		}).
 		Build()
 	h.interop.ctx = context.Background()
 
-	// Track per-chain fetches so we can assert the skip branch was taken
-	// for chain 30 and the backfill ranges for the others.
 	fetchCount := make(map[eth.ChainID]*atomic.Int32, 3)
 	for _, id := range []uint64{10, 20, 30} {
 		c := h.Mock(id)
@@ -272,8 +263,8 @@ func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 
 	require.NoError(t, h.interop.runLogBackfill())
 	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
-	require.Equal(t, uint64(96), h.interop.runtimeActivationTimestamp,
-		"runtime activation must advance to min(localSafe)+1, not min over non-skipped chains")
+	require.Equal(t, uint64(121), h.interop.runtimeActivationTimestamp,
+		"runtime activation must advance to min(localSafe)+1 across all chains")
 
 	chain10 := h.Mock(10)
 	chain20 := h.Mock(20)
@@ -283,8 +274,8 @@ func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 		"chain 10 should backfill blocks 90..120 (31 blocks)")
 	require.Equal(t, int32(41), fetchCount[chain20.id].Load(),
 		"chain 20 should backfill blocks 90..130 (41 blocks)")
-	require.Zero(t, fetchCount[chain30.id].Load(),
-		"chain 30 should be skipped (startNum > localSafeNum)")
+	require.Equal(t, int32(61), fetchCount[chain30.id].Load(),
+		"chain 30 should backfill blocks 90..150 (61 blocks)")
 
 	latest10, has10 := h.interop.logsDBs[chain10.id].LatestSealedBlock()
 	require.True(t, has10)
@@ -294,8 +285,57 @@ func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 	require.True(t, has20)
 	require.Equal(t, uint64(130), latest20.Number)
 
-	_, has30 := h.interop.logsDBs[chain30.id].LatestSealedBlock()
-	require.False(t, has30, "chain 30 logsDB should be empty since backfill skipped it")
+	latest30, has30 := h.interop.logsDBs[chain30.id].LatestSealedBlock()
+	require.True(t, has30)
+	require.Equal(t, uint64(150), latest30.Number)
+}
+
+// TestLogBackfill_FailsWhenChainBehindTLo covers the safety property that a
+// chain whose local-safe sits behind T_lo in block space must abort the whole
+// backfill round rather than be silently skipped. Silent skipping would leave
+// that chain's [T_lo, minLocalSafeTime] logs unsealed while the main loop
+// advances past them, making later executing messages that reference
+// initiating messages in that range unverifiable.
+func TestLogBackfill_FailsWhenChainBehindTLo(t *testing.T) {
+	const act = uint64(50)
+	depth := 10 * time.Second // min cross-safe 100 -> T_lo 90
+
+	// Chain 10: healthy, would backfill 90..120.
+	// Chain 30: TimestampToBlockNumber(T_lo=90) returns 200, but local-safe
+	// block is 95. startNum > localSafeNum must abort the round.
+	h := newInteropTestHarness(t).
+		WithActivation(act).
+		WithLogBackfillDepth(depth).
+		WithChain(10, func(m *mockChainContainer) {
+			m.syncStatusFull = &eth.SyncStatus{
+				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
+				UnsafeL2:    eth.L2BlockRef{Number: 120, Time: 120},
+				SafeL2:      eth.L2BlockRef{Number: 100, Time: 100},
+				LocalSafeL2: eth.L2BlockRef{Number: 120, Time: 120},
+			}
+		}).
+		WithChain(30, func(m *mockChainContainer) {
+			m.syncStatusFull = &eth.SyncStatus{
+				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
+				UnsafeL2:    eth.L2BlockRef{Number: 95, Time: 95},
+				SafeL2:      eth.L2BlockRef{Number: 95, Time: 95},
+				LocalSafeL2: eth.L2BlockRef{Number: 95, Time: 95},
+			}
+			m.timestampToBlockNumberOverride = func(ctx context.Context, ts uint64) (uint64, error) {
+				return 200, nil
+			}
+		}).
+		Build()
+	h.interop.ctx = context.Background()
+
+	err := h.interop.runLogBackfill()
+	require.Error(t, err, "backfill must fail when a chain is behind T_lo")
+	require.Contains(t, err.Error(), "behind T_lo",
+		"error message should identify the invariant violation")
+
+	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
+	require.Equal(t, act, h.interop.runtimeActivationTimestamp,
+		"runtime activation must NOT advance when backfill aborts mid-round")
 }
 
 func TestLogBackfill_AdvancesActivationAndStartsVerifyAfterCeiling(t *testing.T) {
