@@ -1328,8 +1328,9 @@ type mockChainContainer struct {
 	outputV0Override func(ctx context.Context, l2BlockNum uint64) (*eth.OutputV0, error)
 
 	// timestampToBlockNumberOverride lets tests decouple TimestampToBlockNumber
-	// from the default ts==blockNum identity, which is needed to exercise the
-	// "chain already past lower bound" branch in runLogBackfill.
+	// from the default ts==blockNum identity. Used by
+	// TestLogBackfill_FailsWhenChainBehindLowerBound to simulate the
+	// inconsistent-SyncStatus case that runLogBackfill must reject.
 	timestampToBlockNumberOverride func(ctx context.Context, ts uint64) (uint64, error)
 }
 

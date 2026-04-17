@@ -2,12 +2,26 @@ package interop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	cc "github.com/ethereum-optimism/optimism/op-supernode/supernode/chain_container"
 )
+
+// ErrChainBehindBackfillLowerBound is returned when a chain's LocalSafeL2
+// block number is earlier than the block that TimestampToBlockNumber maps
+// T_lo to. Under a consistent SyncStatus we should always have
+// LocalSafeL2.Time >= minCrossSafeTime >= T_lo, so this indicates the
+// chain container is reporting inconsistent state (e.g. mid-rewind, a
+// fresh VN whose LocalSafe hasn't caught up to cross-safe, or a bad
+// TimestampToBlockNumber implementation). Silently skipping such a
+// chain would cause the main loop to wedge on ErrStaleLogsDB once it
+// hands off below the first sealed block of chains that did backfill,
+// so we fail the whole attempt instead. Operator remediation is to
+// clear the logs DBs and restart.
+var ErrChainBehindBackfillLowerBound = errors.New("chain localSafe is behind backfill lower bound; clear data dir")
 
 // LogBackfillLowerBound returns T_lo = max(T_act, crossSafeTs - D_log) in unix seconds (L2).
 // crossSafeTs is the minimum cross-safe timestamp across all chains — the
@@ -85,10 +99,11 @@ func (i *Interop) runLogBackfill() error {
 		"minCrossSafeTime", minCrossSafeTime, "T_lo", Tlo, "depth", i.logBackfillDepth)
 
 	// Second pass: backfill each chain from T_lo to its LocalSafe. Fold
-	// localSafeTime into minLocalSafeTime as we go so runtimeActivation is
-	// clamped to the earliest backfilled head — any chain that can't satisfy
-	// the round aborts before contributing, so minLocalSafeTime always
-	// reflects the set of chains whose logs DB is now populated up to T_lo.
+	// localSafeTime into minLocalSafeTime only after the consistency check
+	// passes, so runtimeActivation is clamped to the earliest backfilled
+	// head — any chain that can't satisfy the round aborts before
+	// contributing, which keeps minLocalSafeTime reflective of the set of
+	// chains whose logs DB is populated up to T_lo.
 	var minLocalSafeTime uint64
 	firstLocal := true
 	for cid, chain := range i.chains {
@@ -98,19 +113,16 @@ func (i *Interop) runLogBackfill() error {
 		if err != nil {
 			return fmt.Errorf("chain %s: timestamp to block number for T_lo %d: %w", cid, Tlo, err)
 		}
+		// Under a consistent SyncStatus this is unreachable: T_lo is clamped
+		// to min(crossSafe) across chains, and localSafe >= crossSafe on every
+		// chain, so localSafeNum >= TimestampToBlockNumber(T_lo). If it fires,
+		// the chain container is reporting inconsistent state and continuing
+		// would leave this chain's logs DB empty while other chains seal from
+		// T_lo forward, which wedges the main loop's first seal attempt on
+		// ErrStaleLogsDB.
 		if startNum > ci.localSafeNum {
-			// Chain's local-safe is behind T_lo in block space. The invariant
-			// minCrossSafeTime <= this chain's localSafeTime should make this
-			// unreachable in steady state; hitting it means SyncStatus and
-			// TimestampToBlockNumber were inconsistent (new chain warming up,
-			// derivation indexing lag, etc.). Silently skipping this chain
-			// would strand its [T_lo, minLocalSafeTime] logs unsealed while
-			// the main loop advances past them, and any future executing
-			// message referencing an initiating message in that range would
-			// be unverifiable. Fail the round and let the retry loop
-			// re-query once the chain catches up.
-			return fmt.Errorf("chain %s: local-safe block %d is behind T_lo block %d (ts=%d); retrying until chain catches up",
-				cid, ci.localSafeNum, startNum, Tlo)
+			return fmt.Errorf("chain %s: startNum %d > localSafeNum %d at T_lo %d (localSafeTime %d, minCrossSafeTime %d): %w",
+				cid, startNum, ci.localSafeNum, Tlo, ci.localSafeTime, minCrossSafeTime, ErrChainBehindBackfillLowerBound)
 		}
 
 		if firstLocal || ci.localSafeTime < minLocalSafeTime {
