@@ -50,9 +50,12 @@ func (c *CLIConfig) Check() error {
 	if c.InteropLogBackfillDepth < 0 {
 		return errors.New("interop.log-backfill-depth must be >= 0")
 	}
-	if c.InteropLogBackfillDepth > 0 && c.InteropActivationTimestamp == nil {
-		return errors.New("interop.log-backfill-depth requires interop.activation-timestamp")
-	}
+	// Note: InteropLogBackfillDepth > 0 also requires a resolved interop
+	// activation timestamp, but that can be satisfied either by the CLI
+	// override (InteropActivationTimestamp) or by rollup configs loaded
+	// later during supernode construction. The pairing check runs after
+	// resolution, in supernode.New, so that rollup-derived activation
+	// counts as configured.
 	return nil
 }
 

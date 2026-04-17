@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCLIConfig_Check_logBackfillRequiresActivation(t *testing.T) {
+func TestCLIConfig_Check_interopLogBackfill(t *testing.T) {
 	ptr := func(u uint64) *uint64 { return &u }
 	tests := []struct {
 		name    string
@@ -19,9 +19,11 @@ func TestCLIConfig_Check_logBackfillRequiresActivation(t *testing.T) {
 			cfg:  &CLIConfig{L1NodeAddr: "http://x", InteropActivationTimestamp: ptr(1), InteropLogBackfillDepth: time.Hour},
 		},
 		{
-			name:    "backfill without activation",
-			cfg:     &CLIConfig{L1NodeAddr: "http://x", InteropLogBackfillDepth: time.Hour},
-			wantErr: "interop.log-backfill-depth requires interop.activation-timestamp",
+			// No CLI activation here is fine at the Check() layer; the
+			// rollup-derived path is a valid activation source, and the
+			// pairing is re-checked in supernode.New after resolution.
+			name: "depth without CLI activation is allowed at Check; resolved later",
+			cfg:  &CLIConfig{L1NodeAddr: "http://x", InteropLogBackfillDepth: time.Hour},
 		},
 		{
 			name:    "negative depth",
