@@ -1,9 +1,8 @@
 package supernode
 
-// This file collects Supernode methods that forward to the interop activity
-// and are intended for integration tests and debugging tooling only. They
-// must not be called by production code paths. Keeping them in one file
-// makes the test-only surface easy to audit alongside
+// This file collects Supernode methods that expose test-only access to the
+// interop activity. They must not be called by production code paths. Keeping
+// them in one file makes the test-only surface easy to audit alongside
 // interop/interop_test_access.go.
 
 import (
@@ -13,16 +12,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop"
-	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
 var errNoInteropActivity = errors.New("supernode: no interop activity")
 
-// findInteropActivity returns the single interop activity, if present.
-func (s *Supernode) findInteropActivity() *interop.Interop {
+// InteropActivity returns the single interop activity registered with the
+// supernode, or nil if interop is not configured or has not started yet.
+// Callers must not cache the returned pointer across RestartInteropActivity;
+// that path swaps the underlying activity for a fresh instance.
+func (s *Supernode) InteropActivity() *interop.Interop {
+	s.activitiesMu.RLock()
+	defer s.activitiesMu.RUnlock()
 	for _, a := range s.activities {
 		if ia, ok := a.(*interop.Interop); ok {
 			return ia
@@ -30,112 +32,6 @@ func (s *Supernode) findInteropActivity() *interop.Interop {
 	}
 	return nil
 }
-
-// ---------------------------------------------------------------------------
-// Pause / Resume
-// ---------------------------------------------------------------------------
-
-// PauseInteropActivity pauses the interop activity at the given timestamp.
-// When the interop activity attempts to process this timestamp, it returns
-// early without processing.
-func (s *Supernode) PauseInteropActivity(ts uint64) {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		s.log.Warn("PauseInterop called but no interop activity found")
-		return
-	}
-	ia.PauseAt(ts)
-}
-
-// ResumeInteropActivity clears any pause on the interop activity, allowing
-// normal processing to continue.
-func (s *Supernode) ResumeInteropActivity() {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		s.log.Warn("ResumeInterop called but no interop activity found")
-		return
-	}
-	ia.Resume()
-}
-
-// ---------------------------------------------------------------------------
-// Backfill observability & injection
-// ---------------------------------------------------------------------------
-
-// InteropBackfillAttempts returns the number of log-backfill attempts the
-// interop activity has made since its most recent Start. Returns 0 if there
-// is no interop activity.
-func (s *Supernode) InteropBackfillAttempts() int32 {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return 0
-	}
-	return ia.BackfillAttempts()
-}
-
-// InteropBackfillCompleted reports whether the interop activity has finished
-// its log backfill phase. Returns false if there is no interop activity.
-func (s *Supernode) InteropBackfillCompleted() bool {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return false
-	}
-	return ia.BackfillCompleted()
-}
-
-// ---------------------------------------------------------------------------
-// Activation-timestamp inspection
-// ---------------------------------------------------------------------------
-
-// InteropActivationTimestamp returns the immutable protocol activation
-// timestamp of the interop activity. Returns 0 if there is no interop activity.
-func (s *Supernode) InteropActivationTimestamp() uint64 {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return 0
-	}
-	return ia.ActivationTimestamp()
-}
-
-// InteropRuntimeActivationTimestamp returns the (possibly-advanced-by-backfill)
-// runtime activation timestamp of the interop activity. Returns 0 if there is
-// no interop activity.
-func (s *Supernode) InteropRuntimeActivationTimestamp() uint64 {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return 0
-	}
-	return ia.RuntimeActivationTimestamp()
-}
-
-// ---------------------------------------------------------------------------
-// LogsDB inspection
-// ---------------------------------------------------------------------------
-
-// InteropFirstSealedBlock returns the earliest block sealed in the interop
-// logs DB for the given chain. Returns an error if there is no interop
-// activity, the chain is unknown, or the DB is empty.
-func (s *Supernode) InteropFirstSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, error) {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return suptypes.BlockSeal{}, errNoInteropActivity
-	}
-	return ia.FirstSealedBlock(chainID)
-}
-
-// InteropLatestSealedBlock returns the most recent block sealed in the interop
-// logs DB for the given chain.
-func (s *Supernode) InteropLatestSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, bool, error) {
-	ia := s.findInteropActivity()
-	if ia == nil {
-		return suptypes.BlockSeal{}, false, errNoInteropActivity
-	}
-	return ia.LatestSealedBlock(chainID)
-}
-
-// ---------------------------------------------------------------------------
-// Interop-activity hot restart
-// ---------------------------------------------------------------------------
 
 // verifierReplacer is the subset of simpleChainContainer we depend on in
 // RestartInteropActivity to swap a verifier registration without touching
@@ -165,8 +61,13 @@ func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 	if s.interopActivationTs == nil {
 		return fmt.Errorf("supernode: RestartInteropActivity called but interop was never configured")
 	}
+	// Validate the DataDir precondition up front so a misconfigured call fails
+	// before we tear down the old activity and lose its in-memory state.
+	if wipeLogsDBs && (s.cfg == nil || s.cfg.DataDir == "") {
+		return fmt.Errorf("supernode: cannot wipe logs DBs without a configured DataDir")
+	}
 
-	old := s.findInteropActivity()
+	old := s.InteropActivity()
 	if old == nil {
 		return errNoInteropActivity
 	}
@@ -177,9 +78,6 @@ func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 	_ = old.Stop(context.Background())
 
 	if wipeLogsDBs {
-		if s.cfg == nil || s.cfg.DataDir == "" {
-			return fmt.Errorf("supernode: cannot wipe logs DBs without a configured DataDir")
-		}
 		for chainID := range s.chains {
 			chainDir := filepath.Join(s.cfg.DataDir, fmt.Sprintf("chain-%s", chainID))
 			if err := os.RemoveAll(chainDir); err != nil {
@@ -207,8 +105,11 @@ func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 	}
 
 	// Replace in s.activities so Reset-callback fan-out and test-only accessors
-	// find the new instance.
+	// find the new instance. Locked because onChainReset and InteropActivity
+	// iterate this slice from concurrent goroutines (chain containers are still
+	// running across the restart).
 	replaced := false
+	s.activitiesMu.Lock()
 	for i, a := range s.activities {
 		if a == old {
 			s.activities[i] = newIA
@@ -216,6 +117,7 @@ func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 			break
 		}
 	}
+	s.activitiesMu.Unlock()
 	if !replaced {
 		return fmt.Errorf("supernode: old interop activity not found in activities slice")
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -116,8 +117,14 @@ type simpleChainContainer struct {
 	appVersion         string
 	virtualNodeFactory virtualNodeFactory    // Factory function to create virtual node (for testing)
 	rollupClient       *sources.RollupClient // In-proc rollup RPC client bound to rpcHandler
-	verifiers          []activity.VerificationActivity
-	onReset            ResetCallback // Called when chain resets to notify activities
+
+	// verifiersMu guards writes and reads of the verifiers slice. Concurrent
+	// readers (VerifiedAt, VerifierCurrentL1s) can race with the test-only
+	// ReplaceVerifier path used by RestartInteropActivity, which swaps a
+	// verifier while the chain container is still running.
+	verifiersMu sync.RWMutex
+	verifiers   []activity.VerificationActivity
+	onReset     ResetCallback // Called when chain resets to notify activities
 }
 
 // Interface conformance assertions
@@ -184,6 +191,8 @@ func (c *simpleChainContainer) ID() eth.ChainID {
 // RegisterVerifier adds a verification activity to this chain container.
 // This allows late binding when activities and chains have circular dependencies.
 func (c *simpleChainContainer) RegisterVerifier(v activity.VerificationActivity) {
+	c.verifiersMu.Lock()
+	defer c.verifiersMu.Unlock()
 	c.verifiers = append(c.verifiers, v)
 }
 
@@ -193,6 +202,8 @@ func (c *simpleChainContainer) RegisterVerifier(v activity.VerificationActivity)
 // chain container keeps running. Not part of the ChainContainer interface
 // because production code has no reason to replace verifiers.
 func (c *simpleChainContainer) ReplaceVerifier(old, new activity.VerificationActivity) bool {
+	c.verifiersMu.Lock()
+	defer c.verifiersMu.Unlock()
 	for i, v := range c.verifiers {
 		if v == old {
 			c.verifiers[i] = new
@@ -203,6 +214,8 @@ func (c *simpleChainContainer) ReplaceVerifier(old, new activity.VerificationAct
 }
 
 func (c *simpleChainContainer) VerifierCurrentL1s() []eth.BlockID {
+	c.verifiersMu.RLock()
+	defer c.verifiersMu.RUnlock()
 	result := make([]eth.BlockID, len(c.verifiers))
 	for i, v := range c.verifiers {
 		result[i] = v.CurrentL1()
@@ -445,7 +458,10 @@ func (c *simpleChainContainer) VerifiedAt(ctx context.Context, ts uint64) (l2, l
 		return eth.BlockID{}, eth.BlockID{}, err
 	}
 
-	for _, verifier := range c.verifiers {
+	c.verifiersMu.RLock()
+	verifiers := append([]activity.VerificationActivity(nil), c.verifiers...)
+	c.verifiersMu.RUnlock()
+	for _, verifier := range verifiers {
 		verified, err := verifier.VerifiedAtTimestamp(ts)
 		if err != nil {
 			c.log.Error("error checking if data could be verified at this L1", "error", err)

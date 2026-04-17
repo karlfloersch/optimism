@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	snconfig "github.com/ethereum-optimism/optimism/op-supernode/config"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode"
-	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
+	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity/interop"
 )
 
 var errSupernodeNotRunning = errors.New("sysgo: supernode is not running")
@@ -89,24 +89,17 @@ func (n *SuperNode) Stop() {
 	n.sn = nil
 }
 
-// PauseInteropActivity pauses the interop activity at the given timestamp.
-// This function is for integration test control only.
-func (n *SuperNode) PauseInteropActivity(ts uint64) {
+// InteropActivity returns the interop activity running inside the supernode,
+// or nil if the supernode is stopped or has no interop activity. Callers must
+// not cache the returned pointer across RestartInteropActivity, which swaps
+// the activity for a fresh instance. For integration test control only.
+func (n *SuperNode) InteropActivity() *interop.Interop {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.sn != nil {
-		n.sn.PauseInteropActivity(ts)
+	if n.sn == nil {
+		return nil
 	}
-}
-
-// ResumeInteropActivity clears any pause on the interop activity.
-// This function is for integration test control only.
-func (n *SuperNode) ResumeInteropActivity() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn != nil {
-		n.sn.ResumeInteropActivity()
-	}
+	return n.sn.InteropActivity()
 }
 
 // RestartInteropActivity stops the running interop activity, optionally
@@ -119,76 +112,6 @@ func (n *SuperNode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 		return errSupernodeNotRunning
 	}
 	return n.sn.RestartInteropActivity(wipeLogsDBs, preInjectBackfillFailures)
-}
-
-// InteropBackfillAttempts returns the number of log-backfill attempts the
-// running interop activity has made since its most recent (re)start.
-// For integration test control only.
-func (n *SuperNode) InteropBackfillAttempts() int32 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return 0
-	}
-	return n.sn.InteropBackfillAttempts()
-}
-
-// InteropBackfillCompleted reports whether the running interop activity has
-// finished its log backfill phase for the current Start.
-// For integration test control only.
-func (n *SuperNode) InteropBackfillCompleted() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return false
-	}
-	return n.sn.InteropBackfillCompleted()
-}
-
-// InteropActivationTimestamp returns the immutable protocol activation
-// timestamp of the running interop activity, or 0 if the supernode is stopped.
-// For integration test control only.
-func (n *SuperNode) InteropActivationTimestamp() uint64 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return 0
-	}
-	return n.sn.InteropActivationTimestamp()
-}
-
-// InteropRuntimeActivationTimestamp returns the runtime activation timestamp
-// of the running interop activity, or 0 if the supernode is stopped.
-// For integration test control only.
-func (n *SuperNode) InteropRuntimeActivationTimestamp() uint64 {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return 0
-	}
-	return n.sn.InteropRuntimeActivationTimestamp()
-}
-
-// InteropFirstSealedBlock returns the earliest block sealed in the interop
-// logs DB for the given chain. For integration test control only.
-func (n *SuperNode) InteropFirstSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return suptypes.BlockSeal{}, errSupernodeNotRunning
-	}
-	return n.sn.InteropFirstSealedBlock(chainID)
-}
-
-// InteropLatestSealedBlock returns the most recent block sealed in the interop
-// logs DB for the given chain. For integration test control only.
-func (n *SuperNode) InteropLatestSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, bool, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.sn == nil {
-		return suptypes.BlockSeal{}, false, errSupernodeNotRunning
-	}
-	return n.sn.InteropLatestSealedBlock(chainID)
 }
 
 // SuperNodeProxy is a thin wrapper that points to a shared supernode instance.

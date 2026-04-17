@@ -36,6 +36,11 @@ type Supernode struct {
 	stopped         bool
 	cfg             *config.CLIConfig
 	chains          map[eth.ChainID]cc.ChainContainer
+	// activitiesMu guards reads and writes of the activities slice. Concurrent
+	// readers (onChainReset, InteropActivity, Stop) can race with the
+	// test-only RestartInteropActivity path that swaps the interop activity
+	// while other activities and chain containers are still running.
+	activitiesMu    sync.RWMutex
 	activities      []activity.Activity
 	rootRPC         *oprpc.Handler
 	wg              sync.WaitGroup
@@ -309,8 +314,10 @@ func (s *Supernode) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Stop runnable activities
-	for _, a := range s.activities {
+	s.activitiesMu.RLock()
+	activities := append([]activity.Activity(nil), s.activities...)
+	s.activitiesMu.RUnlock()
+	for _, a := range activities {
 		activityName := a.Name()
 		if run, ok := a.(activity.RunnableActivity); ok {
 			if err := run.Stop(ctx); err != nil {
@@ -358,7 +365,10 @@ func (s *Supernode) onChainReset(chainID eth.ChainID, timestamp uint64, invalida
 		"timestamp", timestamp,
 		"invalidatedBlock", invalidatedBlock,
 	)
-	for _, a := range s.activities {
+	s.activitiesMu.RLock()
+	activities := append([]activity.Activity(nil), s.activities...)
+	s.activitiesMu.RUnlock()
+	for _, a := range activities {
 		a.Reset(chainID, timestamp, invalidatedBlock)
 	}
 }

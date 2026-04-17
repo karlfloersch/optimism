@@ -78,7 +78,10 @@ func (i *Interop) runLogBackfill() error {
 	}
 
 	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.runtimeActivationTimestamp, i.logBackfillDepth)
-	i.log.Info("log backfill: computed lower bound",
+	// Debug-level because this fires on every retry while VNs are coming up.
+	// The summary "interop log backfill complete" line at the end is the
+	// user-visible signal that backfill finished.
+	i.log.Debug("log backfill: computed lower bound",
 		"minCrossSafeTime", minCrossSafeTime, "T_lo", Tlo, "depth", i.logBackfillDepth)
 
 	// Second pass: backfill each chain from T_lo to its LocalSafe.

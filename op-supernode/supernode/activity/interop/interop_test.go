@@ -1326,6 +1326,11 @@ type mockChainContainer struct {
 	callLog             *callLog // shared ordered call log across mocks
 
 	outputV0Override func(ctx context.Context, l2BlockNum uint64) (*eth.OutputV0, error)
+
+	// timestampToBlockNumberOverride lets tests decouple TimestampToBlockNumber
+	// from the default ts==blockNum identity, which is needed to exercise the
+	// "chain already past lower bound" branch in runLogBackfill.
+	timestampToBlockNumberOverride func(ctx context.Context, ts uint64) (uint64, error)
 }
 
 type invalidateBlockCall struct {
@@ -1459,6 +1464,9 @@ func (m *mockChainContainer) SyncStatus(ctx context.Context) (*eth.SyncStatus, e
 	return &eth.SyncStatus{CurrentL1: m.currentL1}, nil
 }
 func (m *mockChainContainer) TimestampToBlockNumber(ctx context.Context, ts uint64) (uint64, error) {
+	if m.timestampToBlockNumberOverride != nil {
+		return m.timestampToBlockNumberOverride(ctx, ts)
+	}
 	return ts, nil
 }
 func (m *mockChainContainer) RewindEngine(ctx context.Context, timestamp uint64, invalidatedBlock eth.BlockRef) error {
