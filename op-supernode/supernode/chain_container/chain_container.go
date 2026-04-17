@@ -187,6 +187,21 @@ func (c *simpleChainContainer) RegisterVerifier(v activity.VerificationActivity)
 	c.verifiers = append(c.verifiers, v)
 }
 
+// ReplaceVerifier swaps a previously-registered verifier for a new one by
+// pointer identity. Returns true if a replacement occurred. Intended for
+// integration-test orchestration that restarts a single activity while the
+// chain container keeps running. Not part of the ChainContainer interface
+// because production code has no reason to replace verifiers.
+func (c *simpleChainContainer) ReplaceVerifier(old, new activity.VerificationActivity) bool {
+	for i, v := range c.verifiers {
+		if v == old {
+			c.verifiers[i] = new
+			return true
+		}
+	}
+	return false
+}
+
 func (c *simpleChainContainer) VerifierCurrentL1s() []eth.BlockID {
 	result := make([]eth.BlockID, len(c.verifiers))
 	for i, v := range c.verifiers {

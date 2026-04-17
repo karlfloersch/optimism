@@ -49,6 +49,15 @@ type Supernode struct {
 	metricsFanIn *resources.MetricsFanIn
 	// cached address when available
 	rpcAddr string
+
+	// Cached parameters needed to reconstruct the interop activity in
+	// RestartInteropActivity (test-only). See supernode_test_access.go.
+	interopActivationTs    *uint64
+	interopMsgExpiryWindow uint64
+	// lifecycleCtx is the parent context for all activity goroutines, captured
+	// from Start(). RestartInteropActivity uses it to re-launch the interop
+	// activity without disturbing other activities.
+	lifecycleCtx context.Context
 }
 
 func New(ctx context.Context, log gethlog.Logger, version string, requestStop context.CancelCauseFunc, cfg *config.CLIConfig, vnCfgs map[eth.ChainID]*opnodecfg.Config) (*Supernode, error) {
@@ -117,6 +126,8 @@ func New(ctx context.Context, log gethlog.Logger, version string, requestStop co
 		for _, chain := range s.chains {
 			chain.RegisterVerifier(interopActivity)
 		}
+		s.interopActivationTs = interopActivationTimestamp
+		s.interopMsgExpiryWindow = msgExpiryWindow
 	}
 
 	// Set up reset callbacks on all chain containers
@@ -190,6 +201,7 @@ func (s *Supernode) Start(ctx context.Context) error {
 	// found cancel == nil) before Start() had a chance to initialize.
 	var lifecycleCtx context.Context
 	lifecycleCtx, s.lifecycleCancel = context.WithCancel(ctx)
+	s.lifecycleCtx = lifecycleCtx
 
 	if s.httpServer != nil {
 		s.wg.Add(1)
@@ -349,68 +361,6 @@ func (s *Supernode) onChainReset(chainID eth.ChainID, timestamp uint64, invalida
 	for _, a := range s.activities {
 		a.Reset(chainID, timestamp, invalidatedBlock)
 	}
-}
-
-// PauseInteropActivity pauses the interop activity at the given timestamp.
-// When the interop activity attempts to process this timestamp, it returns early.
-// This function is for integration test control only.
-func (s *Supernode) PauseInteropActivity(ts uint64) {
-	for _, a := range s.activities {
-		if ia, ok := a.(*interop.Interop); ok {
-			ia.PauseAt(ts)
-			return
-		}
-	}
-	s.log.Warn("PauseInterop called but no interop activity found")
-}
-
-// ResumeInteropActivity clears any pause on the interop activity, allowing normal processing.
-// This function is for integration test control only.
-func (s *Supernode) ResumeInteropActivity() {
-	for _, a := range s.activities {
-		if ia, ok := a.(*interop.Interop); ok {
-			ia.Resume()
-			return
-		}
-	}
-	s.log.Warn("ResumeInterop called but no interop activity found")
-}
-
-// InteropBackfillAttempts returns the number of times the interop activity has
-// attempted log backfill since its most recent Start. Returns 0 if there is no
-// interop activity. Integration test control only.
-func (s *Supernode) InteropBackfillAttempts() int32 {
-	for _, a := range s.activities {
-		if ia, ok := a.(*interop.Interop); ok {
-			return ia.BackfillAttempts()
-		}
-	}
-	return 0
-}
-
-// InteropBackfillCompleted reports whether the interop activity has finished
-// its log backfill phase. Returns false if there is no interop activity.
-// Integration test control only.
-func (s *Supernode) InteropBackfillCompleted() bool {
-	for _, a := range s.activities {
-		if ia, ok := a.(*interop.Interop); ok {
-			return ia.BackfillCompleted()
-		}
-	}
-	return false
-}
-
-// InjectInteropBackfillFailures queues n synthetic backfill failures on the
-// interop activity, forcing the retry loop to back off that many times before
-// backfill succeeds. Integration test control only.
-func (s *Supernode) InjectInteropBackfillFailures(n int32) {
-	for _, a := range s.activities {
-		if ia, ok := a.(*interop.Interop); ok {
-			ia.InjectBackfillFailures(n)
-			return
-		}
-	}
-	s.log.Warn("InjectInteropBackfillFailures called but no interop activity found")
 }
 
 func (s *Supernode) Stopped() bool { return s.stopped }

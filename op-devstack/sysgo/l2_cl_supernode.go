@@ -2,11 +2,7 @@ package sysgo
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"strconv"
+	"errors"
 	"sync"
 	"time"
 
@@ -17,7 +13,10 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	snconfig "github.com/ethereum-optimism/optimism/op-supernode/config"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode"
+	suptypes "github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
+
+var errSupernodeNotRunning = errors.New("sysgo: supernode is not running")
 
 type SuperNode struct {
 	mu               sync.Mutex
@@ -32,15 +31,9 @@ type SuperNode struct {
 	l1UserRPC        string
 	l1BeaconAddr     string
 
-	// Configs stored for Start()/restart.
+	// Configs stored for Start().
 	snCfg  *snconfig.CLIConfig
 	vnCfgs map[eth.ChainID]*config.Config
-
-	// pendingBackfillFailures is queued via InjectInteropBackfillFailures while
-	// the supernode is stopped. It is applied to the interop activity on the next
-	// Start(), before the activity's goroutines begin, so injection is deterministic
-	// across restarts.
-	pendingBackfillFailures int32
 }
 
 var _ L2CLNode = (*SuperNode)(nil)
@@ -70,31 +63,13 @@ func (n *SuperNode) Start() {
 	n.sn = sn
 	n.cancel = cancel
 
-	if n.pendingBackfillFailures > 0 {
-		n.sn.InjectInteropBackfillFailures(n.pendingBackfillFailures)
-		n.pendingBackfillFailures = 0
-	}
-
 	n.p.Require().NoError(n.sn.Start(ctx))
 
-	// Wait for the RPC addr and save userRPC/interop endpoints.
 	addr, err := n.sn.WaitRPCAddr(ctx)
 	n.p.Require().NoError(err, "supernode failed to bind RPC address")
 	base := "http://" + addr
 	n.userRPC = base
 	n.interopEndpoint = base
-
-	// Pin the kernel-assigned RPC port into snCfg so subsequent Starts
-	// (e.g. after a test-driven Restart) reuse the same address. Otherwise
-	// any DSL clients constructed against the original URL would point at
-	// a dead port after the next restart.
-	if n.snCfg.RPCConfig.ListenPort == 0 {
-		if _, portStr, splitErr := net.SplitHostPort(addr); splitErr == nil {
-			if port, parseErr := strconv.Atoi(portStr); parseErr == nil {
-				n.snCfg.RPCConfig.ListenPort = port
-			}
-		}
-	}
 }
 
 func (n *SuperNode) Stop() {
@@ -134,31 +109,20 @@ func (n *SuperNode) ResumeInteropActivity() {
 	}
 }
 
-// WipeLogsDBs deletes on-disk logs DB files for every configured chain so the
-// next Start must reconstruct them via backfill from the virtual nodes.
-// The supernode must be stopped when this is called.
-// For integration test control only.
-func (n *SuperNode) WipeLogsDBs() error {
+// RestartInteropActivity stops the running interop activity, optionally
+// wipes its on-disk logs DBs, and launches a fresh instance against the
+// still-running supernode. For integration test control only.
+func (n *SuperNode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFailures int32) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.sn != nil {
-		return fmt.Errorf("WipeLogsDBs: supernode must be stopped before wiping logs DBs")
+	if n.sn == nil {
+		return errSupernodeNotRunning
 	}
-	if n.snCfg == nil || n.snCfg.DataDir == "" {
-		return fmt.Errorf("WipeLogsDBs: supernode CLI config or data dir not set")
-	}
-	for _, cid := range n.chains {
-		chainDir := filepath.Join(n.snCfg.DataDir, fmt.Sprintf("chain-%s", cid))
-		if err := os.RemoveAll(chainDir); err != nil {
-			return fmt.Errorf("WipeLogsDBs: remove %s: %w", chainDir, err)
-		}
-		n.logger.Info("wiped supernode chain data dir", "chain", cid, "path", chainDir)
-	}
-	return nil
+	return n.sn.RestartInteropActivity(wipeLogsDBs, preInjectBackfillFailures)
 }
 
 // InteropBackfillAttempts returns the number of log-backfill attempts the
-// running interop activity has made since its most recent Start.
+// running interop activity has made since its most recent (re)start.
 // For integration test control only.
 func (n *SuperNode) InteropBackfillAttempts() int32 {
 	n.mu.Lock()
@@ -181,20 +145,50 @@ func (n *SuperNode) InteropBackfillCompleted() bool {
 	return n.sn.InteropBackfillCompleted()
 }
 
-// InjectInteropBackfillFailures queues n synthetic backfill failures. If the
-// supernode is currently running, the injection takes effect on the running
-// interop activity. If the supernode is stopped, the count is queued and
-// applied on the next Start() before the interop activity's goroutines run
-// (so the very first runLogBackfill call will see the injection).
+// InteropActivationTimestamp returns the immutable protocol activation
+// timestamp of the running interop activity, or 0 if the supernode is stopped.
 // For integration test control only.
-func (n *SuperNode) InjectInteropBackfillFailures(count int32) {
+func (n *SuperNode) InteropActivationTimestamp() uint64 {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.sn != nil {
-		n.sn.InjectInteropBackfillFailures(count)
-		return
+	if n.sn == nil {
+		return 0
 	}
-	n.pendingBackfillFailures = count
+	return n.sn.InteropActivationTimestamp()
+}
+
+// InteropRuntimeActivationTimestamp returns the runtime activation timestamp
+// of the running interop activity, or 0 if the supernode is stopped.
+// For integration test control only.
+func (n *SuperNode) InteropRuntimeActivationTimestamp() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sn == nil {
+		return 0
+	}
+	return n.sn.InteropRuntimeActivationTimestamp()
+}
+
+// InteropFirstSealedBlock returns the earliest block sealed in the interop
+// logs DB for the given chain. For integration test control only.
+func (n *SuperNode) InteropFirstSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sn == nil {
+		return suptypes.BlockSeal{}, errSupernodeNotRunning
+	}
+	return n.sn.InteropFirstSealedBlock(chainID)
+}
+
+// InteropLatestSealedBlock returns the most recent block sealed in the interop
+// logs DB for the given chain. For integration test control only.
+func (n *SuperNode) InteropLatestSealedBlock(chainID eth.ChainID) (suptypes.BlockSeal, bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sn == nil {
+		return suptypes.BlockSeal{}, false, errSupernodeNotRunning
+	}
+	return n.sn.InteropLatestSealedBlock(chainID)
 }
 
 // SuperNodeProxy is a thin wrapper that points to a shared supernode instance.

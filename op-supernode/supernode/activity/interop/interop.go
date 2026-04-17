@@ -265,44 +265,6 @@ func (i *Interop) Stop(ctx context.Context) error {
 	return nil
 }
 
-// PauseAt sets a timestamp at which the interop activity should pause.
-// When progressInterop encounters this timestamp or any later timestamp, it returns early without processing.
-// Uses >= check so that if the activity is already beyond the pause point, it will still stop.
-// This function is for integration test control only.
-// Pass 0 to clear the pause (equivalent to calling Resume).
-func (i *Interop) PauseAt(ts uint64) {
-	i.pauseAtTimestamp.Store(ts)
-	i.log.Info("interop pause set", "pauseAtTimestamp", ts)
-}
-
-// Resume clears any pause timestamp, allowing normal processing to continue.
-// This function is for integration test control only.
-func (i *Interop) Resume() {
-	i.pauseAtTimestamp.Store(0)
-	i.log.Info("interop pause cleared")
-}
-
-// BackfillAttempts returns the number of times runLogBackfill has been invoked
-// since Start. Integration tests use it to confirm the retry loop has engaged.
-func (i *Interop) BackfillAttempts() int32 {
-	return i.backfillAttempts.Load()
-}
-
-// BackfillCompleted reports whether the log backfill phase has finished.
-// Integration tests use it to wait for backfill before asserting downstream state.
-func (i *Interop) BackfillCompleted() bool {
-	return i.backfillCompleted.Load()
-}
-
-// InjectBackfillFailures queues n synthetic backfill failures. Each subsequent
-// runLogBackfill invocation consumes one failure and returns an error, causing
-// the outer retry loop to back off and try again. Intended for integration
-// tests that want to exercise the retry path deterministically.
-func (i *Interop) InjectBackfillFailures(n int32) {
-	i.backfillFailuresToInject.Store(n)
-	i.log.Info("backfill failure injection configured", "count", n)
-}
-
 // checkPreconditions determines whether observation alone already implies an
 // action, before running verification. It returns nil when verification should
 // proceed.

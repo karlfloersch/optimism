@@ -102,64 +102,29 @@ func (s *Supernode) ResumeInterop() {
 	s.testControl.ResumeInteropActivity()
 }
 
-// Stop stops the underlying supernode process. Used with Start to restart the
-// supernode between test phases (e.g. to exercise cold-start log backfill).
+// RestartInterop stops the running interop activity, optionally wipes its
+// on-disk logs DBs, and launches a fresh instance against the still-running
+// supernode. The HTTP server, chain containers, virtual nodes, and all other
+// activities keep running across the restart. Setting wipeLogsDBs=true forces
+// the fresh activity to reconstruct its database via log backfill from the
+// virtual nodes, making this the primary primitive for exercising backfill
+// in tests. preInjectBackfillFailures, if positive, queues that many synthetic
+// backfill failures on the replacement activity before its goroutine runs,
+// enabling deterministic tests of the retry loop.
 // Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) Stop() {
-	s.require.NotNil(s.testControl, "Stop requires test control; use NewSupernodeWithTestControl")
-	s.log.Info("stopping supernode")
-	s.testControl.Stop()
-}
-
-// Start starts the underlying supernode process after a prior Stop.
-// Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) Start() {
-	s.require.NotNil(s.testControl, "Start requires test control; use NewSupernodeWithTestControl")
-	s.log.Info("starting supernode")
-	s.testControl.Start()
-}
-
-// Restart stops and then restarts the supernode, preserving its data dir.
-// Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) Restart() {
-	s.Stop()
-	s.Start()
-}
-
-// WipeLogsDBs deletes on-disk logs DB files so the next Start must rebuild
-// them via backfill. The supernode must be Stopped when this is called.
-// Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) WipeLogsDBs() {
-	s.require.NotNil(s.testControl, "WipeLogsDBs requires test control; use NewSupernodeWithTestControl")
-	err := s.testControl.WipeLogsDBs()
-	s.require.NoError(err, "failed to wipe supernode logs DBs")
+func (s *Supernode) RestartInterop(wipeLogsDBs bool, preInjectBackfillFailures int32) {
+	s.require.NotNil(s.testControl, "RestartInterop requires test control; use NewSupernodeWithTestControl")
+	s.log.Info("restarting interop activity", "wipeLogsDBs", wipeLogsDBs, "preInjectFailures", preInjectBackfillFailures)
+	err := s.testControl.RestartInteropActivity(wipeLogsDBs, preInjectBackfillFailures)
+	s.require.NoError(err, "failed to restart interop activity")
 }
 
 // BackfillAttempts returns the number of log-backfill attempts since the
-// supernode's most recent Start. Useful for asserting that the retry loop
-// has engaged after an injected failure.
+// running interop activity's most recent (re)start.
 // Requires the Supernode to be created with NewSupernodeWithTestControl.
 func (s *Supernode) BackfillAttempts() int32 {
 	s.require.NotNil(s.testControl, "BackfillAttempts requires test control; use NewSupernodeWithTestControl")
 	return s.testControl.InteropBackfillAttempts()
-}
-
-// BackfillCompleted reports whether the interop activity has finished its
-// log backfill phase for the current Start.
-// Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) BackfillCompleted() bool {
-	s.require.NotNil(s.testControl, "BackfillCompleted requires test control; use NewSupernodeWithTestControl")
-	return s.testControl.InteropBackfillCompleted()
-}
-
-// InjectBackfillFailures queues n synthetic backfill failures on the running
-// interop activity. Each subsequent runLogBackfill invocation consumes one
-// failure and returns an error, forcing the retry loop to back off that many
-// times before backfill can succeed.
-// Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) InjectBackfillFailures(n int32) {
-	s.require.NotNil(s.testControl, "InjectBackfillFailures requires test control; use NewSupernodeWithTestControl")
-	s.testControl.InjectInteropBackfillFailures(n)
 }
 
 // AwaitBackfillAttempts blocks until BackfillAttempts() >= minAttempts or the
@@ -176,8 +141,8 @@ func (s *Supernode) AwaitBackfillAttempts(minAttempts int32) {
 		minAttempts, s.testControl.InteropBackfillAttempts())
 }
 
-// AwaitBackfillCompleted blocks until BackfillCompleted() returns true or the
-// timeout elapses. Fails the test on timeout.
+// AwaitBackfillCompleted blocks until the interop activity finishes its
+// log backfill phase, or the timeout elapses. Fails the test on timeout.
 // Requires the Supernode to be created with NewSupernodeWithTestControl.
 func (s *Supernode) AwaitBackfillCompleted() {
 	s.require.NotNil(s.testControl, "AwaitBackfillCompleted requires test control; use NewSupernodeWithTestControl")
@@ -187,6 +152,65 @@ func (s *Supernode) AwaitBackfillCompleted() {
 		return s.testControl.InteropBackfillCompleted(), nil
 	})
 	s.require.NoError(err, "backfill did not complete in time")
+}
+
+// AssertBackfillCovers verifies, for each supplied chain, that the interop
+// logs DB contains blocks spanning from a first-seal at or near the expected
+// T_lo all the way to a latest-seal at or near the safe tip. Specifically it
+// asserts the three invariants log backfill must preserve:
+//
+//  1. firstSealed.Timestamp >= ActivationTimestamp  (never seal pre-activation)
+//  2. firstSealed.Timestamp <  RuntimeActivationTimestamp
+//     (the main loop's handoff happens strictly after the backfilled range)
+//  3. firstSealed.Timestamp <= max(ActivationTimestamp, latestSealed.Timestamp - depth)
+//     + blockTime                         (backfill reached ~depth back,
+//     or all the way to activation if the chain is younger than depth)
+//
+// This is the strongest test-side evidence that backfill actually populated
+// the DB, rather than the supernode simply resuming off of existing disk state.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) AssertBackfillCovers(depth time.Duration, blockTime uint64, chains ...eth.ChainID) {
+	s.require.NotNil(s.testControl, "AssertBackfillCovers requires test control; use NewSupernodeWithTestControl")
+	s.require.Positive(len(chains), "AssertBackfillCovers requires at least one chain")
+
+	activation := s.testControl.InteropActivationTimestamp()
+	runtimeActivation := s.testControl.InteropRuntimeActivationTimestamp()
+	depthSec := uint64(depth / time.Second)
+
+	for _, chainID := range chains {
+		first, err := s.testControl.InteropFirstSealedBlock(chainID)
+		s.require.NoErrorf(err, "chain %s: first sealed block must be readable", chainID)
+		latest, hasLatest, err := s.testControl.InteropLatestSealedBlock(chainID)
+		s.require.NoErrorf(err, "chain %s: latest sealed block must be readable", chainID)
+		s.require.Truef(hasLatest, "chain %s: logs DB must contain at least one sealed block after backfill", chainID)
+
+		s.require.GreaterOrEqualf(first.Timestamp, activation,
+			"chain %s: first seal ts %d must be >= activation ts %d",
+			chainID, first.Timestamp, activation)
+
+		s.require.Lessf(first.Timestamp, runtimeActivation,
+			"chain %s: first seal ts %d must be < runtime activation ts %d (backfill must hand off strictly before main loop)",
+			chainID, first.Timestamp, runtimeActivation)
+
+		expectedLowerBound := activation
+		if latest.Timestamp > activation+depthSec {
+			expectedLowerBound = latest.Timestamp - depthSec
+		}
+		s.require.LessOrEqualf(first.Timestamp, expectedLowerBound+blockTime,
+			"chain %s: first seal ts %d should be within one block of expected lower bound %d (latest ts %d, depth %s)",
+			chainID, first.Timestamp, expectedLowerBound, latest.Timestamp, depth)
+
+		s.require.Greaterf(latest.Number, first.Number,
+			"chain %s: backfill should produce multiple sealed blocks (first=%d, latest=%d)",
+			chainID, first.Number, latest.Number)
+
+		s.log.Info("backfill coverage verified",
+			"chain", chainID,
+			"first_num", first.Number, "first_ts", first.Timestamp,
+			"latest_num", latest.Number, "latest_ts", latest.Timestamp,
+			"activation", activation, "runtime_activation", runtimeActivation,
+			"depth_sec", depthSec)
+	}
 }
 
 // EnsureInteropPaused pauses the interop activity and verifies it has stopped.
