@@ -30,12 +30,12 @@ import (
 )
 
 type Supernode struct {
-	log             gethlog.Logger
-	version         string
-	requestStop     context.CancelCauseFunc
-	stopped         bool
-	cfg             *config.CLIConfig
-	chains          map[eth.ChainID]cc.ChainContainer
+	log         gethlog.Logger
+	version     string
+	requestStop context.CancelCauseFunc
+	stopped     bool
+	cfg         *config.CLIConfig
+	chains      map[eth.ChainID]cc.ChainContainer
 	// activitiesMu guards reads and writes of the activities slice. Concurrent
 	// readers (onChainReset, InteropActivity, Stop) can race with the
 	// test-only RestartInteropActivity path that swaps the interop activity
