@@ -43,6 +43,10 @@ func (i *Interop) runLogBackfill() error {
 	if len(i.chains) == 0 {
 		return nil
 	}
+	if remaining := i.backfillFailuresToInject.Load(); remaining > 0 {
+		i.backfillFailuresToInject.Add(-1)
+		return fmt.Errorf("injected backfill failure (remaining=%d)", remaining-1)
+	}
 
 	ctx := i.ctx
 

@@ -102,6 +102,93 @@ func (s *Supernode) ResumeInterop() {
 	s.testControl.ResumeInteropActivity()
 }
 
+// Stop stops the underlying supernode process. Used with Start to restart the
+// supernode between test phases (e.g. to exercise cold-start log backfill).
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) Stop() {
+	s.require.NotNil(s.testControl, "Stop requires test control; use NewSupernodeWithTestControl")
+	s.log.Info("stopping supernode")
+	s.testControl.Stop()
+}
+
+// Start starts the underlying supernode process after a prior Stop.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) Start() {
+	s.require.NotNil(s.testControl, "Start requires test control; use NewSupernodeWithTestControl")
+	s.log.Info("starting supernode")
+	s.testControl.Start()
+}
+
+// Restart stops and then restarts the supernode, preserving its data dir.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) Restart() {
+	s.Stop()
+	s.Start()
+}
+
+// WipeLogsDBs deletes on-disk logs DB files so the next Start must rebuild
+// them via backfill. The supernode must be Stopped when this is called.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) WipeLogsDBs() {
+	s.require.NotNil(s.testControl, "WipeLogsDBs requires test control; use NewSupernodeWithTestControl")
+	err := s.testControl.WipeLogsDBs()
+	s.require.NoError(err, "failed to wipe supernode logs DBs")
+}
+
+// BackfillAttempts returns the number of log-backfill attempts since the
+// supernode's most recent Start. Useful for asserting that the retry loop
+// has engaged after an injected failure.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) BackfillAttempts() int32 {
+	s.require.NotNil(s.testControl, "BackfillAttempts requires test control; use NewSupernodeWithTestControl")
+	return s.testControl.InteropBackfillAttempts()
+}
+
+// BackfillCompleted reports whether the interop activity has finished its
+// log backfill phase for the current Start.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) BackfillCompleted() bool {
+	s.require.NotNil(s.testControl, "BackfillCompleted requires test control; use NewSupernodeWithTestControl")
+	return s.testControl.InteropBackfillCompleted()
+}
+
+// InjectBackfillFailures queues n synthetic backfill failures on the running
+// interop activity. Each subsequent runLogBackfill invocation consumes one
+// failure and returns an error, forcing the retry loop to back off that many
+// times before backfill can succeed.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) InjectBackfillFailures(n int32) {
+	s.require.NotNil(s.testControl, "InjectBackfillFailures requires test control; use NewSupernodeWithTestControl")
+	s.testControl.InjectInteropBackfillFailures(n)
+}
+
+// AwaitBackfillAttempts blocks until BackfillAttempts() >= minAttempts or the
+// timeout elapses. Fails the test on timeout.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) AwaitBackfillAttempts(minAttempts int32) {
+	s.require.NotNil(s.testControl, "AwaitBackfillAttempts requires test control; use NewSupernodeWithTestControl")
+	ctx, cancel := context.WithTimeout(s.ctx, 3*DefaultTimeout)
+	defer cancel()
+	err := wait.For(ctx, 500*time.Millisecond, func() (bool, error) {
+		return s.testControl.InteropBackfillAttempts() >= minAttempts, nil
+	})
+	s.require.NoErrorf(err, "backfill did not reach %d attempts in time (got %d)",
+		minAttempts, s.testControl.InteropBackfillAttempts())
+}
+
+// AwaitBackfillCompleted blocks until BackfillCompleted() returns true or the
+// timeout elapses. Fails the test on timeout.
+// Requires the Supernode to be created with NewSupernodeWithTestControl.
+func (s *Supernode) AwaitBackfillCompleted() {
+	s.require.NotNil(s.testControl, "AwaitBackfillCompleted requires test control; use NewSupernodeWithTestControl")
+	ctx, cancel := context.WithTimeout(s.ctx, 3*DefaultTimeout)
+	defer cancel()
+	err := wait.For(ctx, 500*time.Millisecond, func() (bool, error) {
+		return s.testControl.InteropBackfillCompleted(), nil
+	})
+	s.require.NoError(err, "backfill did not complete in time")
+}
+
 // EnsureInteropPaused pauses the interop activity and verifies it has stopped.
 // It takes the local safe timestamps from two CL nodes, uses the maximum, then:
 // 1. Pauses interop at localSafeTimestamp + pauseOffset

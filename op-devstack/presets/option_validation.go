@@ -27,6 +27,7 @@ const (
 	optionKindAfterBuild
 	optionKindProofValidation
 	optionKindMessageExpiryWindow
+	optionKindInteropLogBackfill
 )
 
 const allOptionKinds = optionKindDeployer |
@@ -44,7 +45,8 @@ const allOptionKinds = optionKindDeployer |
 	optionKindRequireInteropNotAtGen |
 	optionKindAfterBuild |
 	optionKindProofValidation |
-	optionKindMessageExpiryWindow
+	optionKindMessageExpiryWindow |
+	optionKindInteropLogBackfill
 
 var optionKindLabels = []struct {
 	kind  optionKinds
@@ -66,6 +68,7 @@ var optionKindLabels = []struct {
 	{kind: optionKindAfterBuild, label: "after-build hooks"},
 	{kind: optionKindProofValidation, label: "proof-validation hooks"},
 	{kind: optionKindMessageExpiryWindow, label: "message expiry window"},
+	{kind: optionKindInteropLogBackfill, label: "interop log backfill depth"},
 }
 
 func (k optionKinds) String() string {
@@ -161,7 +164,8 @@ const twoL2SupernodePresetSupportedOptionKinds = optionKindDeployer |
 
 const twoL2SupernodeInteropPresetSupportedOptionKinds = optionKindDeployer |
 	optionKindTimeTravel |
-	optionKindL1EL
+	optionKindL1EL |
+	optionKindInteropLogBackfill
 
 const singleChainWithFlashblocksPresetSupportedOptionKinds = optionKindDeployer |
 	optionKindOPRBuilder

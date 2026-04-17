@@ -120,6 +120,17 @@ type Interop struct {
 	// if the next timestamp to process is >= this value.
 	pauseAtTimestamp atomic.Uint64
 
+	// backfillAttempts counts the number of times runLogBackfill was invoked
+	// since Start. Read by integration tests to confirm the retry loop is engaged.
+	backfillAttempts atomic.Int32
+	// backfillCompleted is set to true once runLogBackfill returns nil (or was skipped
+	// because logBackfillDepth <= 0). Read by integration tests to gate on backfill finishing.
+	backfillCompleted atomic.Bool
+	// backfillFailuresToInject is decremented on each runLogBackfill call; while
+	// positive the call returns a synthetic error so the outer retry loop engages.
+	// Integration test control only.
+	backfillFailuresToInject atomic.Int32
+
 	l1Checker    *byNumberConsistencyChecker
 	frontierView *frontierVerificationView
 
@@ -199,6 +210,7 @@ func (i *Interop) Start(ctx context.Context) error {
 	if i.logBackfillDepth > 0 {
 		i.log.Info("interop log backfill depth configured", "duration", i.logBackfillDepth.String())
 		for {
+			i.backfillAttempts.Add(1)
 			err := i.runLogBackfill()
 			if err == nil {
 				break
@@ -211,6 +223,7 @@ func (i *Interop) Start(ctx context.Context) error {
 			}
 		}
 	}
+	i.backfillCompleted.Store(true)
 
 	for {
 		select {
@@ -267,6 +280,27 @@ func (i *Interop) PauseAt(ts uint64) {
 func (i *Interop) Resume() {
 	i.pauseAtTimestamp.Store(0)
 	i.log.Info("interop pause cleared")
+}
+
+// BackfillAttempts returns the number of times runLogBackfill has been invoked
+// since Start. Integration tests use it to confirm the retry loop has engaged.
+func (i *Interop) BackfillAttempts() int32 {
+	return i.backfillAttempts.Load()
+}
+
+// BackfillCompleted reports whether the log backfill phase has finished.
+// Integration tests use it to wait for backfill before asserting downstream state.
+func (i *Interop) BackfillCompleted() bool {
+	return i.backfillCompleted.Load()
+}
+
+// InjectBackfillFailures queues n synthetic backfill failures. Each subsequent
+// runLogBackfill invocation consumes one failure and returns an error, causing
+// the outer retry loop to back off and try again. Intended for integration
+// tests that want to exercise the retry path deterministically.
+func (i *Interop) InjectBackfillFailures(n int32) {
+	i.backfillFailuresToInject.Store(n)
+	i.log.Info("backfill failure injection configured", "count", n)
 }
 
 // checkPreconditions determines whether observation alone already implies an

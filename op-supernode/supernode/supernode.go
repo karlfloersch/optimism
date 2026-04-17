@@ -376,6 +376,43 @@ func (s *Supernode) ResumeInteropActivity() {
 	s.log.Warn("ResumeInterop called but no interop activity found")
 }
 
+// InteropBackfillAttempts returns the number of times the interop activity has
+// attempted log backfill since its most recent Start. Returns 0 if there is no
+// interop activity. Integration test control only.
+func (s *Supernode) InteropBackfillAttempts() int32 {
+	for _, a := range s.activities {
+		if ia, ok := a.(*interop.Interop); ok {
+			return ia.BackfillAttempts()
+		}
+	}
+	return 0
+}
+
+// InteropBackfillCompleted reports whether the interop activity has finished
+// its log backfill phase. Returns false if there is no interop activity.
+// Integration test control only.
+func (s *Supernode) InteropBackfillCompleted() bool {
+	for _, a := range s.activities {
+		if ia, ok := a.(*interop.Interop); ok {
+			return ia.BackfillCompleted()
+		}
+	}
+	return false
+}
+
+// InjectInteropBackfillFailures queues n synthetic backfill failures on the
+// interop activity, forcing the retry loop to back off that many times before
+// backfill succeeds. Integration test control only.
+func (s *Supernode) InjectInteropBackfillFailures(n int32) {
+	for _, a := range s.activities {
+		if ia, ok := a.(*interop.Interop); ok {
+			ia.InjectBackfillFailures(n)
+			return
+		}
+	}
+	s.log.Warn("InjectInteropBackfillFailures called but no interop activity found")
+}
+
 func (s *Supernode) Stopped() bool { return s.stopped }
 
 // RPCAddr returns the bound RPC address (host:port) if the server is listening.
