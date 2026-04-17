@@ -6,7 +6,7 @@ package retry
 import (
 	"testing"
 
-	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/supernode/interop/backfill/backfillutil"
+	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/supernode/interop/backfill"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 )
 
@@ -23,10 +23,10 @@ import (
 //     that the final DB coverage is the same as the happy path.
 func TestSupernodeLogBackfill_RetriesUntilSuccess(gt *testing.T) {
 	t := devtest.SerialT(gt)
-	sys := backfillutil.NewSystem(t)
+	sys := backfill.NewTestSystem(t)
 
 	sys.Supernode.AwaitBackfillCompleted()
-	backfillutil.AwaitHistoryAtLeast(t, sys, backfillutil.MinHistoryBeforeRestart)
+	backfill.AwaitHistoryAtLeast(t, sys, backfill.MinHistoryBeforeRestart)
 
 	// Atomically: stop the old activity, wipe logs DBs, queue N synthetic
 	// failures on the replacement, then launch it. This guarantees the
@@ -42,7 +42,7 @@ func TestSupernodeLogBackfill_RetriesUntilSuccess(gt *testing.T) {
 		"retry loop should have run at least %d attempts, got %d",
 		injectedFailures+1, sys.Supernode.BackfillAttempts())
 
-	sys.Supernode.AssertBackfillCovers(backfillutil.BackfillDepth,
+	sys.Supernode.AssertBackfillCovers(backfill.BackfillDepth,
 		sys.L2A.Escape().RollupConfig().BlockTime,
 		sys.L2A.ChainID(), sys.L2B.ChainID())
 }

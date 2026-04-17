@@ -2,7 +2,7 @@
 // acceptance tests. The individual test cases live in sibling packages
 // (backfill/happy, backfill/retry) so that each runs in its own test binary
 // and shares no in-process state.
-package backfillutil
+package backfill
 
 import (
 	"time"
@@ -22,10 +22,10 @@ const BackfillDepth = 60 * time.Second
 // reingest — otherwise the coverage assertion is vacuous.
 const MinHistoryBeforeRestart = BackfillDepth + 30*time.Second
 
-// NewSystem builds a two-L2 interop system with interop active at genesis,
+// NewTestSystem builds a two-L2 interop system with interop active at genesis,
 // time-travel enabled, and the supernode configured to run log backfill
 // with BackfillDepth on every (re)start of its interop activity.
-func NewSystem(t devtest.T) *presets.TwoL2SupernodeInterop {
+func NewTestSystem(t devtest.T) *presets.TwoL2SupernodeInterop {
 	return presets.NewTwoL2SupernodeInterop(t, 0,
 		presets.WithTimeTravelEnabled(),
 		presets.WithInteropLogBackfillDepth(BackfillDepth),
@@ -50,4 +50,3 @@ func AwaitHistoryAtLeast(t devtest.T, sys *presets.TwoL2SupernodeInterop, age ti
 	}, 5*time.Minute, 2*time.Second,
 		"both chains must accumulate local+cross safe history of at least %s", age)
 }
-

@@ -6,7 +6,7 @@ package happy
 import (
 	"testing"
 
-	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/supernode/interop/backfill/backfillutil"
+	"github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/supernode/interop/backfill"
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 )
 
@@ -24,10 +24,10 @@ import (
 //     block in the DB was sealed by backfill, because the disk was empty.
 func TestSupernodeLogBackfill_HappyPath(gt *testing.T) {
 	t := devtest.SerialT(gt)
-	sys := backfillutil.NewSystem(t)
+	sys := backfill.NewTestSystem(t)
 
 	sys.Supernode.AwaitBackfillCompleted()
-	backfillutil.AwaitHistoryAtLeast(t, sys, backfillutil.MinHistoryBeforeRestart)
+	backfill.AwaitHistoryAtLeast(t, sys, backfill.MinHistoryBeforeRestart)
 
 	sys.Supernode.RestartInterop(true, 0)
 	sys.Supernode.AwaitBackfillCompleted()
@@ -35,7 +35,7 @@ func TestSupernodeLogBackfill_HappyPath(gt *testing.T) {
 	t.Require().GreaterOrEqual(sys.Supernode.BackfillAttempts(), int32(1),
 		"post-restart backfill should run at least once")
 
-	sys.Supernode.AssertBackfillCovers(backfillutil.BackfillDepth,
+	sys.Supernode.AssertBackfillCovers(backfill.BackfillDepth,
 		sys.L2A.Escape().RollupConfig().BlockTime,
 		sys.L2A.ChainID(), sys.L2B.ChainID())
 }
