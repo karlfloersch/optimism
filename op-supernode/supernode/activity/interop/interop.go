@@ -10,6 +10,7 @@ import (
 	"time"
 
 	opservice "github.com/ethereum-optimism/optimism/op-service"
+	"github.com/ethereum-optimism/optimism/op-service/clock"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supernode/flags"
 	"github.com/ethereum-optimism/optimism/op-supernode/supernode/activity"
@@ -216,10 +217,8 @@ func (i *Interop) Start(ctx context.Context) error {
 				break
 			}
 			i.log.Warn("log backfill failed, retrying (virtual nodes may not be ready yet)", "err", err)
-			select {
-			case <-i.ctx.Done():
-				return fmt.Errorf("log backfill interrupted: %w", i.ctx.Err())
-			case <-time.After(errorBackoffPeriod):
+			if err := clock.SystemClock.SleepCtx(i.ctx, errorBackoffPeriod); err != nil {
+				return fmt.Errorf("log backfill interrupted: %w", err)
 			}
 		}
 	}
@@ -232,14 +231,16 @@ func (i *Interop) Start(ctx context.Context) error {
 		default:
 			madeProgress, err := i.progressAndRecord()
 			if err != nil {
-				// Error: back off before next attempt
 				i.log.Error("failed to progress and record interop", "err", err)
-				time.Sleep(errorBackoffPeriod)
+				if sleepErr := clock.SystemClock.SleepCtx(i.ctx, errorBackoffPeriod); sleepErr != nil {
+					return sleepErr
+				}
 				continue
 			}
 			if !madeProgress {
-				// Chains not ready, back off before next attempt
-				time.Sleep(backoffPeriod)
+				if sleepErr := clock.SystemClock.SleepCtx(i.ctx, backoffPeriod); sleepErr != nil {
+					return sleepErr
+				}
 			}
 			// Otherwise: immediately ready for next iteration (aggressive catch-up)
 		}
