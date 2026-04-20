@@ -183,8 +183,12 @@ func TestLogBackfill_RetriesStopOnContextCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- h.interop.Start(ctx) }()
 
-	// Let it retry a few times, then cancel.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for at least two attempts so we're actually exercising the retry
+	// path before cancelling — previously a raw time.Sleep(100ms) was flaky
+	// on loaded CI and the test could pass without the retry loop running.
+	require.Eventually(t, func() bool {
+		return h.interop.backfillAttempts.Load() >= 2
+	}, 5*time.Second, 5*time.Millisecond, "backfill should attempt at least twice before cancel")
 	cancel()
 
 	select {

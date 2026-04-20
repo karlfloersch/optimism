@@ -260,6 +260,75 @@ func TestVerifyPreviousTimestampSealed(t *testing.T) {
 	}
 }
 
+// TestVerifyCanAddTimestamp_RuntimeVsProtocolActivation pins the two semantic
+// splits that were added with log backfill but not exercised in the original
+// table-driven test: (1) main-loop empty-DB seals must match
+// runtimeActivationTimestamp (not activationTimestamp), and (2) backfill
+// empty-DB seals may sit within one blockTime before activationTimestamp
+// (the pre-activation pairing anchor).
+//
+// Without these cases the existing test accepts both ts == activation and
+// ts == runtimeActivation interchangeably because every row initialises
+// them to the same value, so a regression that swapped the two fields
+// would silently pass.
+func TestVerifyCanAddTimestamp_RuntimeVsProtocolActivation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		protocolAct uint64 = 1000
+		runtimeAct  uint64 = 1200 // advanced past backfilled range
+		blockTime   uint64 = 3
+	)
+	chainID := eth.ChainIDFromUInt64(10)
+
+	newInterop := func() *Interop {
+		i := &Interop{log: gethlog.New(), activationTimestamp: protocolAct}
+		i.runtimeActivationTimestamp.Store(runtimeAct)
+		return i
+	}
+	emptyDB := func() *mockLogsDB { return &mockLogsDB{hasBlocks: false} }
+
+	t.Run("main-loop empty DB at runtimeActivation succeeds", func(t *testing.T) {
+		t.Parallel()
+		_, has, err := newInterop().verifyCanAddTimestamp(chainID, emptyDB(), runtimeAct, blockTime, false)
+		require.NoError(t, err)
+		require.False(t, has)
+	})
+
+	t.Run("main-loop empty DB at protocolActivation errors (not runtimeActivation)", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := newInterop().verifyCanAddTimestamp(chainID, emptyDB(), protocolAct, blockTime, false)
+		require.ErrorIs(t, err, ErrPreviousTimestampNotSealed,
+			"main loop must compare to runtimeActivationTimestamp; a regression that used activationTimestamp would wrongly accept %d here", protocolAct)
+	})
+
+	t.Run("backfill empty DB at anchor (activation - blockTime + 1) succeeds", func(t *testing.T) {
+		t.Parallel()
+		// TargetBlockNumber(activation) floors to a block up to blockTime-1
+		// earlier than activation; accepting that block is the whole point
+		// of the backfill branch.
+		ts := protocolAct - blockTime + 1
+		_, _, err := newInterop().verifyCanAddTimestamp(chainID, emptyDB(), ts, blockTime, true)
+		require.NoError(t, err, "ts=%d should be accepted as the pre-activation pairing anchor", ts)
+	})
+
+	t.Run("backfill empty DB at activation succeeds", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := newInterop().verifyCanAddTimestamp(chainID, emptyDB(), protocolAct, blockTime, true)
+		require.NoError(t, err)
+	})
+
+	t.Run("backfill empty DB strictly more than one blockTime before activation errors", func(t *testing.T) {
+		t.Parallel()
+		// ts + blockTime == activation is the boundary: the check is
+		// strict >, so this must fail. Prevents the anchor window from
+		// silently widening if the operator is wrong.
+		ts := protocolAct - blockTime
+		_, _, err := newInterop().verifyCanAddTimestamp(chainID, emptyDB(), ts, blockTime, true)
+		require.ErrorIs(t, err, ErrPreviousTimestampNotSealed)
+	})
+}
+
 // =============================================================================
 // TestProcessBlockLogs
 // =============================================================================
