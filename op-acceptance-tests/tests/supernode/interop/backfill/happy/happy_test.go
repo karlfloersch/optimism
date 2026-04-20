@@ -1,6 +1,6 @@
 // Package happy contains the happy-path acceptance test for interop log
-// backfill. It lives in its own package (rather than a single file) so it
-// runs in its own test binary, isolated from the retry-path test.
+// backfill. It lives in its own package so it runs in its own test binary,
+// isolated from any other acceptance packages that share global preset state.
 package happy
 
 import (

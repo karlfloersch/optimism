@@ -146,6 +146,23 @@ func (i *Interop) runLogBackfill() error {
 func (i *Interop) backfillChain(ctx context.Context, cid eth.ChainID, chain cc.ChainContainer, startNum, endNum uint64) error {
 	db := i.logsDBs[cid]
 	if latest, has := db.LatestSealedBlock(); has {
+		// Detect a coverage gap at the front of the DB. processBlockLogs
+		// seals a virtual parent at startNum-1 before the real first block,
+		// so after a clean backfill FirstSealedBlock is the requested
+		// startNum-1. If it is higher than that, the existing DB was
+		// populated by an earlier run whose T_lo was larger — e.g. operator
+		// increased logBackfillDepth across restarts. logs.DB is append-only
+		// so we cannot retroactively fill [requestedStart, existingFirst)
+		// without clearing; warn loudly so the gap is visible instead of
+		// silent.
+		if first, err := db.FirstSealedBlock(); err == nil && startNum > 0 && first.Number > startNum {
+			i.log.Warn("log backfill: logsDB starts above requested T_lo; coverage gap will remain",
+				"chain", cid,
+				"firstSealed", first.Number,
+				"requestedStart", startNum,
+				"gapBlocks", first.Number-startNum,
+				"hint", "clear the supernode data directory to get full coverage for the new depth")
+		}
 		startNum = latest.Number + 1
 	}
 	for num := startNum; num <= endNum; num++ {

@@ -123,7 +123,10 @@ func (i *Interop) sealFetchedBlockIntoLogsDB(chainID eth.ChainID, blockID eth.Bl
 }
 
 // sealBlockDataIntoLogsDB seals logs for an already-fetched block using ts for verifyCanAddTimestamp.
-// isBackfill relaxes the first-seal check to allow any ts >= activation (not just ts == activation).
+// isBackfill relaxes the empty-DB first-seal check: instead of requiring
+// ts == runtimeActivationTimestamp, the anchor block may sit up to one
+// blockTime before activation (the "pre-activation pairing anchor" branch
+// in verifyCanAddTimestamp).
 func (i *Interop) sealBlockDataIntoLogsDB(chainID eth.ChainID, blockID eth.BlockID, blockInfo eth.BlockInfo, receipts gethTypes.Receipts, ts uint64, isBackfill bool) error {
 	chain, ok := i.chains[chainID]
 	if !ok {
@@ -233,9 +236,11 @@ func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint6
 }
 
 // processBlockLogs processes the receipts for a block and stores the logs in the database.
-// If isFirstBlock is true, this is the first block being added to the logsDB (at activation timestamp),
-// and we first seal a "virtual parent" block so that logs have a sealed block to reference.
-// This allows the logsDB to start at any block number, not just genesis.
+// If isFirstBlock is true, this is the first block being added to the logsDB
+// (at runtimeActivationTimestamp for the main loop, or within one blockTime
+// of activationTimestamp for backfill), and we first seal a "virtual parent"
+// block so logs have a sealed block to reference. This allows the logsDB
+// to start at any block number, not just genesis.
 func (i *Interop) processBlockLogs(db LogsDB, blockInfo eth.BlockInfo, receipts gethTypes.Receipts, isFirstBlock bool) error {
 	blockNum := blockInfo.NumberU64()
 	blockID := eth.BlockID{Hash: blockInfo.Hash(), Number: blockNum}

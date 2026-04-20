@@ -50,6 +50,15 @@ func (c *CLIConfig) Check() error {
 	if c.InteropLogBackfillDepth < 0 {
 		return errors.New("interop.log-backfill-depth must be >= 0")
 	}
+	// Reject sub-second positive durations: LogBackfillLowerBound divides by
+	// time.Second (floor) to derive the seconds offset for T_lo. Anything
+	// less than a second truncates to 0 — the depth silently becomes a no-op
+	// even though the > 0 checks downstream think backfill is enabled.
+	// Fail loud at config time so operators see it instead of wondering why
+	// backfill didn't run.
+	if c.InteropLogBackfillDepth > 0 && c.InteropLogBackfillDepth < time.Second {
+		return errors.New("interop.log-backfill-depth must be >= 1s when non-zero (sub-second values truncate to 0 and silently disable backfill)")
+	}
 	// Note: InteropLogBackfillDepth > 0 also requires a resolved interop
 	// activation timestamp, but that can be satisfied either by the CLI
 	// override (InteropActivationTimestamp) or by rollup configs loaded
