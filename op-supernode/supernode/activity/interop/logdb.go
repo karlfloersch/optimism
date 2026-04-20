@@ -176,10 +176,19 @@ func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint6
 		if ts == i.runtimeActivationTimestamp {
 			return eth.BlockID{}, hasBlocks, nil
 		}
-		// Backfill can seal its first block at any timestamp at or after the
-		// protocol activation. T_lo is already clamped to >= activationTimestamp,
-		// so this allows the full backfill range without depending on runtime state.
-		if isBackfill && ts >= i.activationTimestamp {
+		// Backfill's first block is TargetBlockNumber(T_lo), which floors the
+		// T_lo->blockNumber mapping. When T_lo clamps to activationTimestamp and
+		// activation is not aligned to (genesis + k*blockTime), the floored block
+		// has Time() < activationTimestamp — it is the block representing the
+		// chain state as of activation (the last block whose header is in force
+		// when the fork takes effect), and is the correct pairing anchor for the
+		// first post-activation block. Accept any ts within one blockTime before
+		// activation; strictly earlier seals still error. The ts+blockTime form
+		// underflow-protects (ts, blockTime both uint64) and generalises cleanly
+		// to chains whose activation happens to land on a block boundary
+		// (ts == activationTimestamp), in which case the condition is trivially
+		// satisfied.
+		if isBackfill && ts+blockTime > i.activationTimestamp {
 			return eth.BlockID{}, hasBlocks, nil
 		}
 		return eth.BlockID{}, hasBlocks, fmt.Errorf("chain %s: logsDB is empty but expected blocks before timestamp %d: %w",

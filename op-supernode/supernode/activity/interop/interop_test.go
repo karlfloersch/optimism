@@ -1332,6 +1332,17 @@ type mockChainContainer struct {
 	// TestLogBackfill_FailsWhenChainBehindLowerBound to simulate the
 	// inconsistent-SyncStatus case that runLogBackfill must reject.
 	timestampToBlockNumberOverride func(ctx context.Context, ts uint64) (uint64, error)
+
+	// blockTimeOverride, when >0, is returned by BlockTime(). Used by tests
+	// that exercise chains whose blockTime is not 1 (e.g. misaligned
+	// activation timestamps).
+	blockTimeOverride uint64
+
+	// blockInfoTimeFn, when non-nil, computes the timestamp reported by
+	// FetchReceipts' returned blockInfo for a given block number. Used
+	// together with timestampToBlockNumberOverride to simulate a chain with
+	// a blockTime > 1 and genesis-offset scheduling.
+	blockInfoTimeFn func(blockNum uint64) uint64
 }
 
 type invalidateBlockCall struct {
@@ -1438,9 +1449,16 @@ func (m *mockChainContainer) FetchReceipts(ctx context.Context, blockID eth.Bloc
 	if ts == 0 {
 		ts = m.lastRequestedTimestamp
 	}
+	if m.blockInfoTimeFn != nil {
+		ts = m.blockInfoTimeFn(blockID.Number)
+	}
+	// parentHash is derived from the parent block's number (matching how
+	// OutputV0AtBlockNumber produces block hashes), not from ts-1. When
+	// blockNum != ts (e.g. blockTime > 1), these diverge; using
+	// blockID.Number-1 keeps the chain linkage consistent.
 	var parentHash common.Hash
-	if ts > 0 {
-		parentHash = common.BigToHash(big.NewInt(int64(ts - 1)))
+	if blockID.Number > 0 {
+		parentHash = common.BigToHash(new(big.Int).SetUint64(blockID.Number - 1))
 	}
 	blockInfo := &mockBlockInfo{
 		hash:       blockID.Hash,
@@ -1476,7 +1494,12 @@ func (m *mockChainContainer) RewindEngine(ctx context.Context, timestamp uint64,
 	m.rewindEngineCalls = append(m.rewindEngineCalls, timestamp)
 	return m.rewindEngineErr
 }
-func (m *mockChainContainer) BlockTime() uint64 { return 1 }
+func (m *mockChainContainer) BlockTime() uint64 {
+	if m.blockTimeOverride > 0 {
+		return m.blockTimeOverride
+	}
+	return 1
+}
 func (m *mockChainContainer) InvalidateBlock(ctx context.Context, height uint64, payloadHash common.Hash, decisionTimestamp uint64, stateRoot, messagePasserStorageRoot eth.Bytes32) (bool, error) {
 	m.mu.Lock()
 	m.invalidateBlockCalls = append(m.invalidateBlockCalls, invalidateBlockCall{

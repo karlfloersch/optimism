@@ -339,6 +339,78 @@ func TestLogBackfill_FailsWhenChainBehindLowerBound(t *testing.T) {
 		"runtime activation must not advance when backfill fails")
 }
 
+// TestLogBackfill_MisalignedActivation asserts that backfill succeeds when
+// the protocol activation timestamp does not land on a (genesis + k*blockTime)
+// boundary. In this configuration TargetBlockNumber(activation) floors to the
+// last block whose Time() is strictly before activation: that block
+// represents the chain state as of the fork and is the correct pairing
+// anchor for the first post-activation block. An overly strict
+// "first seal must be >= activation" check would reject this block and the
+// retry loop would spin forever with a misleading "virtual nodes may not be
+// ready" log line.
+//
+// Concrete setup: blockTime=3, genesis=0, activation=1000. Block 333 has
+// Time()=999 (the pairing anchor); block 334 is at 1002; LocalSafe is at
+// block 340, Time=1020. T_lo clamps to activation so backfill must seal
+// blocks 333..340 without error. runtimeActivation advances to 1021.
+func TestLogBackfill_MisalignedActivation(t *testing.T) {
+	const (
+		blockTime    uint64 = 3
+		act          uint64 = 1000
+		localSafeNum uint64 = 340
+		localSafeTs  uint64 = 1020 // 340 * blockTime
+	)
+	depth := 60 * time.Second // crossSafe 1020 - 60 = 960 < activation → T_lo clamps to 1000
+
+	blockNumToTime := func(num uint64) uint64 { return num * blockTime }
+	tsToBlockNum := func(ctx context.Context, ts uint64) (uint64, error) {
+		return ts / blockTime, nil // floor, matches rollup.TargetBlockNumber
+	}
+
+	h := newInteropTestHarness(t).
+		WithActivation(act).
+		WithLogBackfillDepth(depth).
+		WithChain(10, func(m *mockChainContainer) {
+			m.blockTimeOverride = blockTime
+			m.blockInfoTimeFn = blockNumToTime
+			m.timestampToBlockNumberOverride = tsToBlockNum
+			m.syncStatusFull = &eth.SyncStatus{
+				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
+				UnsafeL2:    eth.L2BlockRef{Number: localSafeNum, Time: localSafeTs},
+				SafeL2:      eth.L2BlockRef{Number: localSafeNum, Time: localSafeTs},
+				LocalSafeL2: eth.L2BlockRef{Number: localSafeNum, Time: localSafeTs},
+			}
+		}).
+		Build()
+	h.interop.ctx = context.Background()
+
+	require.NoError(t, h.interop.runLogBackfill())
+	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
+	require.Equal(t, localSafeTs+1, h.interop.runtimeActivationTimestamp)
+
+	chain10 := h.Mock(10)
+	db := h.interop.logsDBs[chain10.id]
+
+	// processBlockLogs seals a "virtual parent" before the first real backfill
+	// block so subsequent blocks have a parent to link against. For the first
+	// backfill block at number 333, that virtual parent is at number 332 with
+	// the real block's Time() (999). FirstSealedBlock therefore returns the
+	// virtual parent — the anchor — and the invariant we care about is that
+	// its timestamp is strictly pre-activation but within one blockTime of it.
+	first, err := db.FirstSealedBlock()
+	require.NoError(t, err)
+	require.Equal(t, uint64(332), first.Number, "first sealed block is the virtual parent of TargetBlockNumber(activation)")
+	require.Equal(t, uint64(999), first.Timestamp,
+		"anchor's Time() is the real block's time, strictly pre-activation — this is the pairing anchor, not a violation")
+	require.Less(t, first.Timestamp, act, "sanity: anchor is strictly pre-activation")
+	require.Greater(t, first.Timestamp+blockTime, act,
+		"anchor must still be within one blockTime of activation (the anchor window)")
+
+	latest, has := db.LatestSealedBlock()
+	require.True(t, has)
+	require.Equal(t, localSafeNum, latest.Number)
+}
+
 func TestLogBackfill_AdvancesActivationAndStartsVerifyAfterCeiling(t *testing.T) {
 	const act = uint64(108)
 	depth := time.Second // crossSafe 110, depth 1s -> T_lo 109; seals 109..110; activation advances to 111

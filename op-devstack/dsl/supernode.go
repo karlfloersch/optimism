@@ -166,7 +166,10 @@ func (s *Supernode) AwaitBackfillCompleted() {
 // T_lo all the way to a latest-seal at or near the safe tip. Specifically it
 // asserts the three invariants log backfill must preserve:
 //
-//  1. firstSealed.Timestamp >= ActivationTimestamp  (never seal pre-activation)
+//  1. firstSealed.Timestamp + blockTime > ActivationTimestamp
+//     (the first seal is at most one block before activation; when activation
+//     is not aligned to a block boundary, the block representing the chain
+//     state as of activation is the correct pairing anchor and is sealed).
 //  2. firstSealed.Timestamp <  RuntimeActivationTimestamp
 //     (the main loop's handoff happens strictly after the backfilled range)
 //  3. firstSealed.Timestamp <= max(ActivationTimestamp, latestSealed.Timestamp - depth)
@@ -191,9 +194,9 @@ func (s *Supernode) AssertBackfillCovers(depth time.Duration, blockTime uint64, 
 		s.require.NoErrorf(err, "chain %s: latest sealed block must be readable", chainID)
 		s.require.Truef(hasLatest, "chain %s: logs DB must contain at least one sealed block after backfill", chainID)
 
-		s.require.GreaterOrEqualf(first.Timestamp, activation,
-			"chain %s: first seal ts %d must be >= activation ts %d",
-			chainID, first.Timestamp, activation)
+		s.require.Greaterf(first.Timestamp+blockTime, activation,
+			"chain %s: first seal ts %d must be within one block time (%d) of activation ts %d",
+			chainID, first.Timestamp, blockTime, activation)
 
 		s.require.Lessf(first.Timestamp, runtimeActivation,
 			"chain %s: first seal ts %d must be < runtime activation ts %d (backfill must hand off strictly before main loop)",
