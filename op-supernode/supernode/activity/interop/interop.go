@@ -126,10 +126,6 @@ type Interop struct {
 	// backfillCompleted is set to true once runLogBackfill returns nil (or was skipped
 	// because logBackfillDepth <= 0). Read by integration tests to gate on backfill finishing.
 	backfillCompleted atomic.Bool
-	// backfillFailuresToInject is decremented on each runLogBackfill call; while
-	// positive the call returns a synthetic error so the outer retry loop engages.
-	// Integration test control only.
-	backfillFailuresToInject atomic.Int32
 
 	l1Checker    *byNumberConsistencyChecker
 	frontierView *frontierVerificationView

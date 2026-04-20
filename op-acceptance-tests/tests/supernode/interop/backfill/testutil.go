@@ -1,7 +1,7 @@
 // Package backfillutil contains shared helpers used by the interop log-backfill
 // acceptance tests. The individual test cases live in sibling packages
-// (backfill/happy, backfill/retry) so that each runs in its own test binary
-// and shares no in-process state.
+// (backfill/happy) so that each runs in its own test binary and shares no
+// in-process state.
 package backfill
 
 import (

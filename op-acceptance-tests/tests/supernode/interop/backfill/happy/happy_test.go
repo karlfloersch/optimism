@@ -29,7 +29,7 @@ func TestSupernodeLogBackfill_HappyPath(gt *testing.T) {
 	sys.Supernode.AwaitBackfillCompleted()
 	backfill.AwaitHistoryAtLeast(t, sys, backfill.MinHistoryBeforeRestart)
 
-	sys.Supernode.RestartInterop(true, 0)
+	sys.Supernode.RestartInterop(true)
 	sys.Supernode.AwaitBackfillCompleted()
 
 	t.Require().GreaterOrEqual(sys.Supernode.BackfillAttempts(), int32(1),

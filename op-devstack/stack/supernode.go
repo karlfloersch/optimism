@@ -14,9 +14,8 @@ type Supernode interface {
 // supernode. Tests get direct access to the interop activity via
 // InteropActivity; see op-supernode/supernode/activity/interop for the
 // methods available on the returned pointer (PauseAt, Resume,
-// BackfillAttempts, BackfillCompleted, InjectBackfillFailures,
-// ActivationTimestamp, RuntimeActivationTimestamp, FirstSealedBlock,
-// LatestSealedBlock, ...).
+// BackfillAttempts, BackfillCompleted, ActivationTimestamp,
+// RuntimeActivationTimestamp, FirstSealedBlock, LatestSealedBlock, ...).
 type InteropTestControl interface {
 	// InteropActivity returns the current interop activity, or nil if the
 	// supernode is not running or interop is not configured. Callers must
@@ -27,8 +26,6 @@ type InteropTestControl interface {
 	// RestartInteropActivity stops the running interop activity, optionally
 	// wipes its on-disk logs DBs, and launches a fresh instance against the
 	// still-running supernode (HTTP server, chain containers, and all other
-	// activities remain up). preInjectBackfillFailures, if positive, is
-	// applied to the fresh activity before its goroutine starts, so the
-	// very first runLogBackfill attempt sees the injection.
-	RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFailures int32) error
+	// activities remain up).
+	RestartInteropActivity(wipeLogsDBs bool) error
 }

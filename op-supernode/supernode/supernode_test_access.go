@@ -49,12 +49,9 @@ type verifierReplacer interface {
 // to exercise log backfill against a running, ready cluster without the
 // cost and flakiness of restarting the entire supernode.
 //
-// preInjectBackfillFailures, if positive, is applied to the replacement
-// activity atomically before its background goroutine is launched, so the
-// very first runLogBackfill call on the new activity will observe the
-// injection. Any other test-only mutations on the old activity are
-// discarded when it is Stopped.
-func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFailures int32) error {
+// Any test-only mutations on the old activity are discarded when it is
+// Stopped.
+func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool) error {
 	if s.lifecycleCtx == nil {
 		return fmt.Errorf("supernode: RestartInteropActivity called before Start")
 	}
@@ -98,10 +95,6 @@ func (s *Supernode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFa
 	)
 	if newIA == nil {
 		return fmt.Errorf("supernode: failed to construct replacement interop activity")
-	}
-
-	if preInjectBackfillFailures > 0 {
-		newIA.InjectBackfillFailures(preInjectBackfillFailures)
 	}
 
 	// Replace in s.activities so Reset-callback fan-out and test-only accessors

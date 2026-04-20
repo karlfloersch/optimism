@@ -118,14 +118,12 @@ func (s *Supernode) ResumeInterop() {
 // activities keep running across the restart. Setting wipeLogsDBs=true forces
 // the fresh activity to reconstruct its database via log backfill from the
 // virtual nodes, making this the primary primitive for exercising backfill
-// in tests. preInjectBackfillFailures, if positive, queues that many synthetic
-// backfill failures on the replacement activity before its goroutine runs,
-// enabling deterministic tests of the retry loop.
+// in tests.
 // Requires the Supernode to be created with NewSupernodeWithTestControl.
-func (s *Supernode) RestartInterop(wipeLogsDBs bool, preInjectBackfillFailures int32) {
+func (s *Supernode) RestartInterop(wipeLogsDBs bool) {
 	s.require.NotNil(s.testControl, "RestartInterop requires test control; use NewSupernodeWithTestControl")
-	s.log.Info("restarting interop activity", "wipeLogsDBs", wipeLogsDBs, "preInjectFailures", preInjectBackfillFailures)
-	err := s.testControl.RestartInteropActivity(wipeLogsDBs, preInjectBackfillFailures)
+	s.log.Info("restarting interop activity", "wipeLogsDBs", wipeLogsDBs)
+	err := s.testControl.RestartInteropActivity(wipeLogsDBs)
 	s.require.NoError(err, "failed to restart interop activity")
 }
 

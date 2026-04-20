@@ -31,7 +31,7 @@ type SuperNode struct {
 	l1UserRPC        string
 	l1BeaconAddr     string
 
-	// Configs stored for Start().
+	// Configs stored for Start()/restart.
 	snCfg  *snconfig.CLIConfig
 	vnCfgs map[eth.ChainID]*config.Config
 }
@@ -105,13 +105,13 @@ func (n *SuperNode) InteropActivity() *interop.Interop {
 // RestartInteropActivity stops the running interop activity, optionally
 // wipes its on-disk logs DBs, and launches a fresh instance against the
 // still-running supernode. For integration test control only.
-func (n *SuperNode) RestartInteropActivity(wipeLogsDBs bool, preInjectBackfillFailures int32) error {
+func (n *SuperNode) RestartInteropActivity(wipeLogsDBs bool) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.sn == nil {
 		return errSupernodeNotRunning
 	}
-	return n.sn.RestartInteropActivity(wipeLogsDBs, preInjectBackfillFailures)
+	return n.sn.RestartInteropActivity(wipeLogsDBs)
 }
 
 // SuperNodeProxy is a thin wrapper that points to a shared supernode instance.

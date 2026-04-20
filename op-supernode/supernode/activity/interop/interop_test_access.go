@@ -33,7 +33,7 @@ func (i *Interop) Resume() {
 }
 
 // ---------------------------------------------------------------------------
-// Backfill observability & injection
+// Backfill observability
 // ---------------------------------------------------------------------------
 
 // BackfillAttempts returns the number of times runLogBackfill has been
@@ -49,15 +49,6 @@ func (i *Interop) BackfillAttempts() int32 {
 // until backfill is done.
 func (i *Interop) BackfillCompleted() bool {
 	return i.backfillCompleted.Load()
-}
-
-// InjectBackfillFailures queues n synthetic backfill failures. Each
-// subsequent runLogBackfill invocation consumes one failure and returns an
-// error, causing the outer retry loop to back off and try again. Intended
-// for integration tests that want to exercise the retry path deterministically.
-func (i *Interop) InjectBackfillFailures(n int32) {
-	i.backfillFailuresToInject.Store(n)
-	i.log.Info("backfill failure injection configured", "count", n)
 }
 
 // ---------------------------------------------------------------------------
