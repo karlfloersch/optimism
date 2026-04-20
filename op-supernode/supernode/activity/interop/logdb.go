@@ -173,7 +173,7 @@ func (i *Interop) verifyCanAddTimestamp(chainID eth.ChainID, db LogsDB, ts uint6
 		// The main loop starts at runtimeActivationTimestamp (which may have been
 		// advanced past the protocol activation by backfill). If the DB is empty,
 		// this is the only timestamp the main loop would legitimately seal first.
-		if ts == i.runtimeActivationTimestamp {
+		if ts == i.runtimeActivationTimestamp.Load() {
 			return eth.BlockID{}, hasBlocks, nil
 		}
 		// Backfill's first block is TargetBlockNumber(T_lo), which floors the

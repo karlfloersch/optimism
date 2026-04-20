@@ -66,7 +66,7 @@ func (i *Interop) ActivationTimestamp() uint64 {
 // by the main loop and backfill. It starts equal to ActivationTimestamp and
 // may be advanced past the backfilled range once backfill finishes.
 func (i *Interop) RuntimeActivationTimestamp() uint64 {
-	return i.runtimeActivationTimestamp
+	return i.runtimeActivationTimestamp.Load()
 }
 
 // ---------------------------------------------------------------------------

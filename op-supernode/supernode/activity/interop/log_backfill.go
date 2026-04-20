@@ -87,7 +87,7 @@ func (i *Interop) runLogBackfill() error {
 		}
 	}
 
-	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.runtimeActivationTimestamp, i.logBackfillDepth)
+	Tlo := LogBackfillLowerBound(minCrossSafeTime, i.runtimeActivationTimestamp.Load(), i.logBackfillDepth)
 	// Debug-level because this fires on every retry while VNs are coming up.
 	// The summary "interop log backfill complete" line at the end is the
 	// user-visible signal that backfill finished.
@@ -134,12 +134,12 @@ func (i *Interop) runLogBackfill() error {
 		}
 	}
 
-	if !firstLocal && minLocalSafeTime+1 > i.runtimeActivationTimestamp {
+	if !firstLocal && minLocalSafeTime+1 > i.runtimeActivationTimestamp.Load() {
 		i.log.Info("advancing runtime activation past backfilled range",
-			"oldActivation", i.runtimeActivationTimestamp, "newActivation", minLocalSafeTime+1)
-		i.runtimeActivationTimestamp = minLocalSafeTime + 1
+			"oldActivation", i.runtimeActivationTimestamp.Load(), "newActivation", minLocalSafeTime+1)
+		i.runtimeActivationTimestamp.Store(minLocalSafeTime + 1)
 	}
-	i.log.Info("interop log backfill complete", "runtimeActivationTimestamp", i.runtimeActivationTimestamp)
+	i.log.Info("interop log backfill complete", "runtimeActivationTimestamp", i.runtimeActivationTimestamp.Load())
 	return nil
 }
 

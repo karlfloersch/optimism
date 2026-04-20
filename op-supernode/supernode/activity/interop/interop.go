@@ -21,10 +21,17 @@ import (
 
 // Compile-time interface conformance assertions.
 var (
-	_                  activity.RunnableActivity     = (*Interop)(nil)
-	_                  activity.VerificationActivity = (*Interop)(nil)
-	backoffPeriod                                    = 1 * time.Second // backoff when chains aren't ready
-	errorBackoffPeriod                               = 2 * time.Second // backoff on errors
+	_ activity.RunnableActivity     = (*Interop)(nil)
+	_ activity.VerificationActivity = (*Interop)(nil)
+)
+
+// Default backoff durations used by Start. Seeded into i.backoffPeriod /
+// i.errorBackoffPeriod in New so tests can override them per-instance
+// without racing — two parallel tests each spawning Start on their own
+// Interop used to fight over package-level vars.
+const (
+	defaultBackoffPeriod      = 1 * time.Second // backoff when chains aren't ready
+	defaultErrorBackoffPeriod = 2 * time.Second // backoff on errors
 )
 
 // InteropActivationTimestampFlag is the CLI flag for the interop activation timestamp.
@@ -92,7 +99,11 @@ type Interop struct {
 	// and is advanced past the backfilled range after log backfill completes.
 	// Protocol-facing queries (VerifiedAtTimestamp, VerifiedBlockAtL1, etc.)
 	// always use the original activationTimestamp.
-	runtimeActivationTimestamp uint64
+	//
+	// Atomic so test accessors (RuntimeActivationTimestamp) can read it
+	// from a different goroutine than the one that advances it in
+	// runLogBackfill without tripping the race detector.
+	runtimeActivationTimestamp atomic.Uint64
 
 	dataDir string
 
@@ -105,6 +116,16 @@ type Interop struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
+	// done is closed by Start when it returns. Stop waits on done before
+	// closing logsDBs/verifiedDB so any in-flight backfill or frontier-seal
+	// writes finish before the underlying store files close. Without this,
+	// chain.FetchReceipts returning mid-cancel leaves sealBlockDataIntoLogsDB
+	// mid-SealBlock, racing with db.Close() (which does not hold db.rwLock).
+	done chan struct{}
+	// closeOnce makes Stop idempotent. Before this guard, a second Stop
+	// re-invoked logs.DB.Close() / verifiedDB.Close() on already-closed
+	// handles, which was a latent panic risk.
+	closeOnce sync.Once
 
 	currentL1 eth.BlockID
 
@@ -131,6 +152,13 @@ type Interop struct {
 	frontierView *frontierVerificationView
 
 	logBackfillDepth time.Duration
+
+	// backoffPeriod / errorBackoffPeriod are the Start loop's retry delays.
+	// Instance fields (not package vars) so each test can tune its own
+	// Interop without data-racing another test that happens to run in
+	// parallel. Seeded from defaultBackoffPeriod / defaultErrorBackoffPeriod.
+	backoffPeriod      time.Duration
+	errorBackoffPeriod time.Duration
 }
 
 func (i *Interop) Name() string {
@@ -173,16 +201,18 @@ func New(
 		messageExpiryWindow = defaultMessageExpiryWindow
 	}
 	i := &Interop{
-		log:                        log,
-		chains:                     chains,
-		verifiedDB:                 verifiedDB,
-		logsDBs:                    logsDBs,
-		dataDir:                    dataDir,
-		activationTimestamp:        activationTimestamp,
-		runtimeActivationTimestamp: activationTimestamp,
-		messageExpiryWindow:        messageExpiryWindow,
-		logBackfillDepth:           logBackfillDepth,
+		log:                 log,
+		chains:              chains,
+		verifiedDB:          verifiedDB,
+		logsDBs:             logsDBs,
+		dataDir:             dataDir,
+		activationTimestamp: activationTimestamp,
+		messageExpiryWindow: messageExpiryWindow,
+		logBackfillDepth:    logBackfillDepth,
+		backoffPeriod:       defaultBackoffPeriod,
+		errorBackoffPeriod:  defaultErrorBackoffPeriod,
 	}
+	i.runtimeActivationTimestamp.Store(activationTimestamp)
 	// default to using the verifyInteropMessages function
 	// (can be overridden by tests)
 	i.verifyFn = i.verifyInteropMessages
@@ -201,7 +231,11 @@ func (i *Interop) Start(ctx context.Context) error {
 	}
 	i.ctx, i.cancel = context.WithCancel(ctx)
 	i.started = true
+	i.done = make(chan struct{})
 	i.mu.Unlock()
+	// Signal Stop that all DB writes driven by this Start have drained.
+	// Must fire even on panic so Stop doesn't block forever waiting on it.
+	defer close(i.done)
 
 	if i.logBackfillDepth > 0 {
 		i.log.Info("interop log backfill depth configured", "duration", i.logBackfillDepth.String())
@@ -215,7 +249,7 @@ func (i *Interop) Start(ctx context.Context) error {
 			select {
 			case <-i.ctx.Done():
 				return fmt.Errorf("log backfill interrupted: %w", i.ctx.Err())
-			case <-time.After(errorBackoffPeriod):
+			case <-time.After(i.errorBackoffPeriod):
 			}
 		}
 	}
@@ -230,12 +264,12 @@ func (i *Interop) Start(ctx context.Context) error {
 			if err != nil {
 				// Error: back off before next attempt
 				i.log.Error("failed to progress and record interop", "err", err)
-				time.Sleep(errorBackoffPeriod)
+				time.Sleep(i.errorBackoffPeriod)
 				continue
 			}
 			if !madeProgress {
 				// Chains not ready, back off before next attempt
-				time.Sleep(backoffPeriod)
+				time.Sleep(i.backoffPeriod)
 			}
 			// Otherwise: immediately ready for next iteration (aggressive catch-up)
 		}
@@ -243,22 +277,51 @@ func (i *Interop) Start(ctx context.Context) error {
 }
 
 // Stop stops the Interop activity.
+//
+// Ordering:
+//  1. Cancel i.ctx so backfill / main loop observe the cancel through the
+//     chain RPC calls they make.
+//  2. Wait on i.done (closed by Start's defer) so any in-flight DB writes
+//     finish before we touch the underlying stores. logs.DB.Close does not
+//     take db.rwLock, so closing while SealBlock / AddLog is running would
+//     race on the underlying append-only store. Bounded by ctx so Stop
+//     cannot deadlock a caller with its own timeout.
+//  3. Close the DBs exactly once (idempotent for repeat Stop calls).
 func (i *Interop) Stop(ctx context.Context) error {
 	i.mu.Lock()
-	defer i.mu.Unlock()
+	started := i.started
+	done := i.done
 	if i.cancel != nil {
 		i.cancel()
 	}
-	// Close all logsDBs
-	for chainID, db := range i.logsDBs {
-		if err := db.Close(); err != nil {
-			i.log.Error("failed to close logs DB", "chainID", chainID, "err", err)
+	i.mu.Unlock()
+
+	if started && done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			i.log.Warn("stop timed out waiting for Start to return; closing DBs anyway",
+				"err", ctx.Err())
 		}
 	}
-	if i.verifiedDB != nil {
-		return i.verifiedDB.Close()
-	}
-	return nil
+
+	var firstErr error
+	i.closeOnce.Do(func() {
+		for chainID, db := range i.logsDBs {
+			if err := db.Close(); err != nil {
+				i.log.Error("failed to close logs DB", "chainID", chainID, "err", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		if i.verifiedDB != nil {
+			if err := i.verifiedDB.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	})
+	return firstErr
 }
 
 // checkPreconditions determines whether observation alone already implies an
@@ -374,7 +437,7 @@ func (i *Interop) observeRound() (RoundObservation, error) {
 		obs.LastVerified = &result
 		obs.NextTimestamp = lastTS + 1
 	} else {
-		obs.NextTimestamp = i.runtimeActivationTimestamp
+		obs.NextTimestamp = i.runtimeActivationTimestamp.Load()
 	}
 
 	if pauseTS := i.pauseAtTimestamp.Load(); pauseTS != 0 && obs.NextTimestamp >= pauseTS {
@@ -610,7 +673,7 @@ func (i *Interop) buildRewindPlan(lastTS uint64) (RewindPlan, error) {
 		RewindAtOrAfter: lastTS,
 	}
 
-	if lastTS <= i.runtimeActivationTimestamp {
+	if lastTS <= i.runtimeActivationTimestamp.Load() {
 		return plan, nil
 	}
 
