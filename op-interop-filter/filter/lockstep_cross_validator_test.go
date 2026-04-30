@@ -14,6 +14,25 @@ import (
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
+type recordingMetricer struct {
+	crossUnsafeValidated []uint64
+}
+
+func (r *recordingMetricer) RecordInfo(version string)                               {}
+func (r *recordingMetricer) RecordUp()                                               {}
+func (r *recordingMetricer) RecordFailsafeEnabled(enabled bool)                      {}
+func (r *recordingMetricer) RecordChainHead(chainID uint64, blockNum uint64)         {}
+func (r *recordingMetricer) RecordCheckAccessList(success bool)                      {}
+func (r *recordingMetricer) RecordCheckAccessListDuration(duration float64)          {}
+func (r *recordingMetricer) RecordCheckAccessListRejection(reason string)            {}
+func (r *recordingMetricer) RecordBackfillProgress(chainID uint64, progress float64) {}
+func (r *recordingMetricer) RecordReorgDetected(chainID uint64)                      {}
+func (r *recordingMetricer) RecordLogsAdded(chainID uint64, count int64)             {}
+func (r *recordingMetricer) RecordBlocksSealed(chainID uint64, count int64)          {}
+func (r *recordingMetricer) RecordCrossUnsafeValidatedTimestamp(timestamp uint64) {
+	r.crossUnsafeValidated = append(r.crossUnsafeValidated, timestamp)
+}
+
 // Note: Test helpers (newTestCrossValidator, makeAccess, makeExecDescriptor) and
 // constants (testExpiryWindow, testChainA) are defined in backend_test.go
 
@@ -244,6 +263,30 @@ func TestCrossValidator_StartTimestampZeroStillAdvances(t *testing.T) {
 	ts, ok = cv.CrossValidatedTimestamp()
 	require.True(t, ok)
 	require.Equal(t, uint64(1), ts)
+}
+
+func TestCrossValidator_RecordsCrossUnsafeValidatedTimestampMetric(t *testing.T) {
+	mock := newMockChainIngester()
+	mock.SetLatestTimestamp(102)
+
+	chains := map[eth.ChainID]ChainIngester{
+		eth.ChainIDFromUInt64(testChainA): mock,
+	}
+	rec := &recordingMetricer{}
+	cv := NewLockstepCrossValidator(
+		context.Background(),
+		testlog.Logger(t, log.LevelCrit),
+		rec,
+		testExpiryWindow,
+		100,
+		time.Hour,
+		chains,
+	)
+
+	cv.advanceValidation()
+	cv.advanceValidation()
+
+	require.Equal(t, []uint64{100, 101, 102}, rec.crossUnsafeValidated)
 }
 
 // =============================================================================
