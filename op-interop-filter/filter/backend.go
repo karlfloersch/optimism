@@ -254,3 +254,29 @@ func (b *Backend) GetBlockHashByNumber(chainID eth.ChainID, blockNum rpc.BlockNu
 	}
 	return blockHash, nil
 }
+
+// GetLatestCrossUnsafeBlock returns the latest block for the given chain that has passed cross-unsafe validation.
+func (b *Backend) GetLatestCrossUnsafeBlock(chainID eth.ChainID) (eth.BlockID, error) {
+	if b.FailsafeEnabled() {
+		return eth.BlockID{}, types.ErrFailsafeEnabled
+	}
+	if !b.Ready() {
+		return eth.BlockID{}, types.ErrUninitialized
+	}
+
+	ts, ok := b.crossValidator.CrossValidatedTimestamp()
+	if !ok {
+		return eth.BlockID{}, fmt.Errorf("cross-unsafe timestamp: %w", types.ErrOutOfScope)
+	}
+
+	ingester, ok := b.chains[chainID]
+	if !ok {
+		return eth.BlockID{}, fmt.Errorf("chain %s: %w", chainID, types.ErrUnknownChain)
+	}
+
+	block, ok := ingester.BlockAtOrBeforeTimestamp(ts)
+	if !ok {
+		return eth.BlockID{}, fmt.Errorf("cross-unsafe block for chain %s at timestamp %d: %w", chainID, ts, ethereum.NotFound)
+	}
+	return block, nil
+}

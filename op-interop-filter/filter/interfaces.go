@@ -38,6 +38,9 @@ type ChainIngester interface {
 	// BlockHashByNumber returns the hash of the ingested block at the given height.
 	BlockHashByNumber(number uint64) (common.Hash, bool)
 
+	// BlockAtOrBeforeTimestamp returns the ingested block at or before the given timestamp.
+	BlockAtOrBeforeTimestamp(timestamp uint64) (eth.BlockID, bool)
+
 	// LatestTimestamp returns the timestamp of the latest ingested block.
 	LatestTimestamp() (uint64, bool)
 

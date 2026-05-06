@@ -268,6 +268,36 @@ func (c *LogsDBChainIngester) BlockHashByNumber(blockNum uint64) (common.Hash, b
 	return c.BlockHashAt(blockNum)
 }
 
+// BlockAtOrBeforeTimestamp returns the sealed block at or before the given timestamp.
+func (c *LogsDBChainIngester) BlockAtOrBeforeTimestamp(timestamp uint64) (eth.BlockID, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.logsDB == nil {
+		return eth.BlockID{}, false
+	}
+
+	blockNum, err := c.rollupCfg.TargetBlockNumber(timestamp)
+	if err != nil {
+		return eth.BlockID{}, false
+	}
+
+	latestBlock, ok := c.logsDB.LatestSealedBlock()
+	if !ok {
+		return eth.BlockID{}, false
+	}
+	if blockNum > latestBlock.Number {
+		blockNum = latestBlock.Number
+	}
+
+	seal, err := c.logsDB.FindSealedBlock(blockNum)
+	if err != nil || seal.Timestamp > timestamp {
+		return eth.BlockID{}, false
+	}
+
+	return eth.BlockID{Hash: seal.Hash, Number: seal.Number}, true
+}
+
 // LatestTimestamp returns the timestamp of the latest sealed block
 func (c *LogsDBChainIngester) LatestTimestamp() (uint64, bool) {
 	c.mu.RLock()

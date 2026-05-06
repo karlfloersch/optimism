@@ -35,6 +35,11 @@ func (f *QueryFrontend) GetBlockHashByNumber(ctx context.Context, chainID eth.Ch
 	return f.backend.GetBlockHashByNumber(chainID, blockNum)
 }
 
+// GetLatestCrossUnsafeBlock returns the latest block that has passed cross-unsafe validation.
+func (f *QueryFrontend) GetLatestCrossUnsafeBlock(ctx context.Context, chainID eth.ChainID) (eth.BlockID, error) {
+	return f.backend.GetLatestCrossUnsafeBlock(chainID)
+}
+
 // PublicAdminFrontend exposes read-only admin methods on the public port.
 type PublicAdminFrontend struct {
 	backend *Backend

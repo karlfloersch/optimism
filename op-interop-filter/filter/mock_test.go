@@ -27,6 +27,9 @@ type mockChainIngester struct {
 	// Blocks keyed by block number
 	blocks map[uint64]eth.BlockID
 
+	// Block timestamps keyed by block number
+	blockTimestamps map[uint64]uint64
+
 	// Executing messages with their inclusion context
 	execMsgs []IncludedMessage
 
@@ -52,10 +55,11 @@ type logKey struct {
 // newMockChainIngester creates a new in-memory chain ingester.
 func newMockChainIngester() *mockChainIngester {
 	return &mockChainIngester{
-		logs:     make(map[logKey]types.BlockSeal),
-		blocks:   make(map[uint64]eth.BlockID),
-		execMsgs: make([]IncludedMessage, 0),
-		ready:    true, // Default to ready for simple tests
+		logs:            make(map[logKey]types.BlockSeal),
+		blocks:          make(map[uint64]eth.BlockID),
+		blockTimestamps: make(map[uint64]uint64),
+		execMsgs:        make([]IncludedMessage, 0),
+		ready:           true, // Default to ready for simple tests
 	}
 }
 
@@ -78,6 +82,7 @@ func (m *mockChainIngester) AddLog(timestamp, blockNum uint64, logIdx uint32, ch
 	}
 	m.logs[key] = seal
 	m.blocks[blockNum] = eth.BlockID{Hash: seal.Hash, Number: blockNum}
+	m.blockTimestamps[blockNum] = timestamp
 
 	// Update latest block/timestamp if needed
 	if blockNum > m.latestBlock.Number {
@@ -95,6 +100,7 @@ func (m *mockChainIngester) AddExecMsg(msg IncludedMessage) {
 	defer m.mu.Unlock()
 
 	m.execMsgs = append(m.execMsgs, msg)
+	m.blockTimestamps[msg.InclusionBlockNum] = msg.InclusionTimestamp
 
 	// Update latest block/timestamp if needed
 	if msg.InclusionBlockNum > m.latestBlock.Number {
@@ -108,12 +114,19 @@ func (m *mockChainIngester) AddExecMsg(msg IncludedMessage) {
 
 // AddBlock adds a block directly to the ingester.
 func (m *mockChainIngester) AddBlock(block eth.BlockID) {
+	m.AddBlockWithTimestamp(block, 0)
+}
+
+// AddBlockWithTimestamp adds a block directly to the ingester with its timestamp.
+func (m *mockChainIngester) AddBlockWithTimestamp(block eth.BlockID, timestamp uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.blocks[block.Number] = block
+	m.blockTimestamps[block.Number] = timestamp
 	if block.Number >= m.latestBlock.Number {
 		m.latestBlock = block
+		m.latestTimestamp = timestamp
 	}
 }
 
@@ -164,6 +177,26 @@ func (m *mockChainIngester) BlockHashByNumber(number uint64) (common.Hash, bool)
 		return common.Hash{}, false
 	}
 	return block.Hash, true
+}
+
+// BlockAtOrBeforeTimestamp implements ChainIngester.
+func (m *mockChainIngester) BlockAtOrBeforeTimestamp(timestamp uint64) (eth.BlockID, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result eth.BlockID
+	found := false
+	for number, block := range m.blocks {
+		ts, ok := m.blockTimestamps[number]
+		if !ok || ts > timestamp {
+			continue
+		}
+		if !found || number > result.Number {
+			result = block
+			found = true
+		}
+	}
+	return result, found
 }
 
 // LatestTimestamp implements ChainIngester.
@@ -256,10 +289,12 @@ var _ ChainIngester = (*mockChainIngester)(nil)
 
 // mockCrossValidator is a minimal mock for backend tests that don't need real validation.
 type mockCrossValidator struct {
-	validateErr error
-	errState    *ValidatorError
-	resetTs     uint64
-	resetOK     bool
+	validateErr      error
+	errState         *ValidatorError
+	crossValidatedTs uint64
+	crossValidatedOK bool
+	resetTs          uint64
+	resetOK          bool
 }
 
 func (m *mockCrossValidator) Start() error { return nil }
@@ -267,8 +302,17 @@ func (m *mockCrossValidator) Stop() error  { return nil }
 func (m *mockCrossValidator) ValidateAccessEntry(access types.Access, minSafety types.SafetyLevel, execDescriptor types.ExecutingDescriptor) error {
 	return m.validateErr
 }
-func (m *mockCrossValidator) CrossValidatedTimestamp() (uint64, bool) { return 0, false }
-func (m *mockCrossValidator) Error() *ValidatorError                  { return m.errState }
+func (m *mockCrossValidator) CrossValidatedTimestamp() (uint64, bool) {
+	return m.crossValidatedTs, m.crossValidatedOK
+}
+func (m *mockCrossValidator) Error() *ValidatorError { return m.errState }
+
+// SetCrossValidatedTimestamp sets the cross-unsafe progress for tests.
+func (m *mockCrossValidator) SetCrossValidatedTimestamp(ts uint64) {
+	m.crossValidatedTs = ts
+	m.crossValidatedOK = true
+}
+
 func (m *mockCrossValidator) ResetCrossValidatedTimestamp(timestamp uint64) {
 	m.resetTs = timestamp
 	m.resetOK = true
