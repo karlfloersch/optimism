@@ -1,0 +1,45 @@
+# Rebuild only op-supernode from the current source tree, keeping an
+# existing combined runtime image and op-reth binary unchanged.
+#
+# This is intended for local operator workflows that already have a combined
+# image. For a clean public build from source, use ops/docker/combined/Dockerfile.
+#
+# Example:
+#   docker build \
+#     -f ops/docker/combined/Dockerfile.supernode-only \
+#     --build-arg BASE_IMAGE=op-combined:previous \
+#     --build-arg GIT_COMMIT="$(git rev-parse --short=10 HEAD)" \
+#     --build-arg GIT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+#     -t op-combined:supernode-dev .
+
+ARG BASE_IMAGE
+
+FROM golang:1.24.13-alpine3.22 AS go-builder
+
+RUN apk add --no-cache make gcc musl-dev linux-headers git jq bash just
+
+COPY go.mod go.sum /app/
+WORKDIR /app
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+COPY . /app
+
+ARG GIT_COMMIT
+ARG GIT_DATE
+
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    cd op-supernode && \
+    GITCOMMIT=$GIT_COMMIT GITDATE=$GIT_DATE VERSION=v0.0.0 just op-supernode
+
+FROM ${BASE_IMAGE}
+
+ARG GIT_COMMIT
+ARG GIT_DATE
+
+LABEL org.opencontainers.image.revision=$GIT_COMMIT
+LABEL org.opencontainers.image.created=$GIT_DATE
+LABEL org.opencontainers.image.description="Known-good combined image with op-supernode replaced from upstream develop"
+
+COPY --from=go-builder /app/op-supernode/bin/op-supernode /usr/local/bin/op-supernode
+RUN chmod +x /usr/local/bin/op-supernode

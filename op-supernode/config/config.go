@@ -29,6 +29,8 @@ type CLIConfig struct {
 	// InteropLogBackfillDepth is the duration (e.g. 168h) to extend initiating-message log ingestion
 	// backward from the tip before interop message validation runs. Zero disables.
 	InteropLogBackfillDepth time.Duration
+	// InteropRegisterVerifier controls whether interop verification participates in SuperAuthority.
+	InteropRegisterVerifier bool
 }
 
 func (c *CLIConfig) Check() error {
@@ -73,6 +75,7 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		PprofConfig:             oppprof.ReadCLIConfig(ctx),
 		RawCtx:                  ctx,
 		InteropLogBackfillDepth: ctx.Duration("interop.log-backfill-depth"),
+		InteropRegisterVerifier: ctx.Bool("interop.register-verifier"),
 	}
 	if ctx.IsSet("interop.activation-timestamp") {
 		ts := ctx.Uint64("interop.activation-timestamp")

@@ -142,8 +142,12 @@ func New(ctx context.Context, log gethlog.Logger, version string, requestStop co
 		}
 		interopActivity := interop.New(log.New("activity", "interop"), *interopActivationTimestamp, msgExpiryWindow, s.chains, cfg.DataDir, s.l1Client, cfg.InteropLogBackfillDepth, s.supernodeMetrics)
 		s.activities = append(s.activities, interopActivity)
-		for _, chain := range s.chains {
-			chain.RegisterVerifier(interopActivity)
+		if cfg.InteropRegisterVerifier {
+			for _, chain := range s.chains {
+				chain.RegisterVerifier(interopActivity)
+			}
+		} else {
+			log.Warn("interop activity verifier registration disabled; verification will run without controlling safe/finalized heads")
 		}
 		s.interopActivationTs = interopActivationTimestamp
 		s.interopMsgExpiryWindow = msgExpiryWindow

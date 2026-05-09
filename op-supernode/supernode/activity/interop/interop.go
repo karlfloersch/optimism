@@ -45,8 +45,17 @@ var InteropLogBackfillDepthFlag = &cli.DurationFlag{
 	Value:   0,
 }
 
+// InteropRegisterVerifierFlag controls whether the interop activity participates
+// in SuperAuthority safe/finalized head selection.
+var InteropRegisterVerifierFlag = &cli.BoolFlag{
+	Name:    "interop.register-verifier",
+	Usage:   "Register the interop activity as a SuperAuthority verifier. Set false to run interop verification without controlling safe/finalized heads.",
+	EnvVars: opservice.PrefixEnvVar(flags.EnvVarPrefix, "INTEROP_REGISTER_VERIFIER"),
+	Value:   true,
+}
+
 func init() {
-	flags.RegisterActivityFlags(InteropActivationTimestampFlag, InteropLogBackfillDepthFlag)
+	flags.RegisterActivityFlags(InteropActivationTimestampFlag, InteropLogBackfillDepthFlag, InteropRegisterVerifierFlag)
 }
 
 // chainsReadyResult holds the parallel query results from checkChainsReady.
