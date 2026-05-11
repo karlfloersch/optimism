@@ -46,6 +46,7 @@ use reth_optimism_payload_builder::{
 use reth_optimism_primitives::{DepositReceipt, OpPrimitives};
 use reth_optimism_rpc::{
     SequencerClient,
+    cross_unsafe::{CrossUnsafeHeadApiServer, CrossUnsafeHeadExt},
     eth::{OpEthApiBuilder, ext::OpEthExtApi},
     historical::{HistoricalRpc, HistoricalRpcClient},
     miner::{MinerApiExtServer, OpMinerExtApi},
@@ -54,7 +55,7 @@ use reth_optimism_rpc::{
 use reth_optimism_storage::OpStorage;
 use reth_optimism_txpool::{OpPool, OpPooledTx, supervisor::SupervisorClient};
 use reth_primitives_traits::header::HeaderMut;
-use reth_provider::{CanonStateSubscriptions, providers::ProviderFactoryBuilder};
+use reth_provider::{BlockReaderIdExt, CanonStateSubscriptions, providers::ProviderFactoryBuilder};
 use reth_rpc_api::{
     DebugApiServer, EthConfigApiServer, L2EthApiExtServer,
     eth::{RpcTypes, helpers::config::EthConfigHandler},
@@ -266,6 +267,7 @@ impl OpNode {
             .with_enable_tx_conditional(self.args.enable_tx_conditional)
             .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
             .with_historical_rpc(self.args.historical_rpc.clone())
+            .with_cross_unsafe_head_source_rpcs(self.args.cross_unsafe_head_source_rpcs.clone())
             .with_flashblocks(self.args.flashblocks_url.clone())
             .with_flashblock_consensus(self.args.flashblock_consensus)
     }
@@ -393,6 +395,8 @@ pub struct OpAddOns<
     ///
     /// This can be used to forward pre-bedrock rpc requests (op-mainnet).
     pub historical_rpc: Option<String>,
+    /// Remote execution RPCs used by the runtime cross-unsafe head extension.
+    pub cross_unsafe_head_source_rpcs: Vec<String>,
     /// Whether SDM is explicitly enabled for integration tests.
     sdm_enabled: bool,
     /// Enable transaction conditionals.
@@ -414,6 +418,7 @@ where
         sequencer_url: Option<String>,
         sequencer_headers: Vec<String>,
         historical_rpc: Option<String>,
+        cross_unsafe_head_source_rpcs: Vec<String>,
         sdm_enabled: bool,
         enable_tx_conditional: bool,
         min_suggested_priority_fee: u64,
@@ -425,6 +430,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -477,6 +483,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -489,6 +496,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -510,6 +518,7 @@ where
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             ..
         } = self;
         OpAddOns::new(
@@ -519,6 +528,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -540,6 +550,7 @@ where
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             ..
         } = self;
         OpAddOns::new(
@@ -549,6 +560,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -573,6 +585,7 @@ where
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             ..
         } = self;
         OpAddOns::new(
@@ -582,6 +595,7 @@ where
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
@@ -628,6 +642,7 @@ where
             Pool: TransactionPool<Transaction: OpPooledTx<Consensus = TxTy<N::Types>>>,
         >,
     TxTy<N::Types>: From<Sealed<TxPostExec>>,
+    N::Provider: BlockReaderIdExt + Clone + Send + Sync + 'static,
     EthB: EthApiBuilder<N>,
     PVB: Send,
     EB: EngineApiBuilder<N>,
@@ -648,6 +663,7 @@ where
             sequencer_headers,
             enable_tx_conditional,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             ..
         } = self;
 
@@ -701,6 +717,12 @@ where
             ctx.node.pool().clone(),
             ctx.node.provider().clone(),
         );
+        let cross_unsafe_head_ext = (!cross_unsafe_head_source_rpcs.is_empty())
+            .then(|| {
+                CrossUnsafeHeadExt::new(ctx.node.provider().clone(), cross_unsafe_head_source_rpcs)
+            })
+            .transpose()
+            .map_err(eyre::Report::msg)?;
 
         rpc_add_ons
             .launch_add_ons_with(ctx, move |container| {
@@ -735,6 +757,14 @@ where
                     modules.merge_if_module_configured(
                         RethRpcModule::Eth,
                         tx_conditional_ext.into_rpc(),
+                    )?;
+                }
+
+                if let Some(cross_unsafe_head_ext) = cross_unsafe_head_ext {
+                    debug!(target: "reth::cli", "Installing runtime cross-unsafe head rpc endpoint");
+                    modules.merge_if_module_configured(
+                        RethRpcModule::Eth,
+                        cross_unsafe_head_ext.into_rpc(),
                     )?;
                 }
 
@@ -805,6 +835,8 @@ pub struct OpAddOnsBuilder<NetworkT, RpcMiddleware = Identity> {
     sequencer_headers: Vec<String>,
     /// RPC endpoint for historical data.
     historical_rpc: Option<String>,
+    /// Remote execution RPCs used by the runtime cross-unsafe head extension.
+    cross_unsafe_head_source_rpcs: Vec<String>,
     /// Data availability configuration for the OP builder.
     da_config: Option<OpDAConfig>,
     /// Gas limit configuration for the OP builder.
@@ -833,6 +865,7 @@ impl<NetworkT> Default for OpAddOnsBuilder<NetworkT> {
             sequencer_url: None,
             sequencer_headers: Vec::new(),
             historical_rpc: None,
+            cross_unsafe_head_source_rpcs: Vec::new(),
             da_config: None,
             gas_limit_config: None,
             sdm_enabled: false,
@@ -897,6 +930,15 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
         self
     }
 
+    /// Configures the source RPC used by the runtime cross-unsafe head extension.
+    pub fn with_cross_unsafe_head_source_rpcs(
+        mut self,
+        cross_unsafe_head_source_rpcs: Vec<String>,
+    ) -> Self {
+        self.cross_unsafe_head_source_rpcs = cross_unsafe_head_source_rpcs;
+        self
+    }
+
     /// Configures a custom tokio runtime for the RPC server.
     ///
     /// Caution: This runtime must not be created from within asynchronous context.
@@ -911,6 +953,7 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             da_config,
             gas_limit_config,
             sdm_enabled,
@@ -926,6 +969,7 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             da_config,
             gas_limit_config,
             sdm_enabled,
@@ -973,6 +1017,7 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             enable_tx_conditional,
             min_suggested_priority_fee,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             rpc_middleware,
             tokio_runtime,
             flashblocks_url,
@@ -1001,6 +1046,7 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
             sequencer_url,
             sequencer_headers,
             historical_rpc,
+            cross_unsafe_head_source_rpcs,
             sdm_enabled,
             enable_tx_conditional,
             min_suggested_priority_fee,
