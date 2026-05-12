@@ -45,24 +45,34 @@ func newVCLI(t *testing.T, args []string) *flags.VirtualCLI {
 
 func TestWithNamespacedP2P_DefaultsListenPortsToZero(t *testing.T) {
 	vcli := newVCLI(t, nil)
-	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID)))
+	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID), true))
 
 	require.Equal(t, uint(0), vcli.Uint(opnodeflags.ListenTCPPortName))
 	require.Equal(t, uint(0), vcli.Uint(opnodeflags.ListenUDPPortName))
 }
 
-func TestWithNamespacedP2P_HonoursGlobalListenPorts(t *testing.T) {
+func TestWithNamespacedP2P_HonoursGlobalListenPortsForSingleChain(t *testing.T) {
 	// A global vn.all.* port collides at bind time when more than one chain is
-	// running, but the supernode honours it as configured -- test for
-	// completeness so a single-chain deployment can pin a fixed port.
+	// running, but a single-chain deployment can pin a fixed port.
 	vcli := newVCLI(t, []string{
 		"--" + flags.VNFlagGlobalPrefix + opnodeflags.ListenTCPPortName + "=9222",
 		"--" + flags.VNFlagGlobalPrefix + opnodeflags.ListenUDPPortName + "=9223",
 	})
-	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID)))
+	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID), false))
 
 	require.Equal(t, uint(9222), vcli.Uint(opnodeflags.ListenTCPPortName))
 	require.Equal(t, uint(9223), vcli.Uint(opnodeflags.ListenUDPPortName))
+}
+
+func TestWithNamespacedP2P_DefaultsNonZeroGlobalListenPortsToZeroForMultiChain(t *testing.T) {
+	vcli := newVCLI(t, []string{
+		"--" + flags.VNFlagGlobalPrefix + opnodeflags.ListenTCPPortName + "=9222",
+		"--" + flags.VNFlagGlobalPrefix + opnodeflags.ListenUDPPortName + "=9223",
+	})
+	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID), true))
+
+	require.Equal(t, uint(0), vcli.Uint(opnodeflags.ListenTCPPortName))
+	require.Equal(t, uint(0), vcli.Uint(opnodeflags.ListenUDPPortName))
 }
 
 func TestWithNamespacedP2P_HonoursPerChainListenPorts(t *testing.T) {
@@ -72,7 +82,7 @@ func TestWithNamespacedP2P_HonoursPerChainListenPorts(t *testing.T) {
 		"--" + tcpName + "=9000",
 		"--" + udpName + "=9001",
 	})
-	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID)))
+	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID), true))
 
 	require.Equal(t, uint(9000), vcli.Uint(opnodeflags.ListenTCPPortName))
 	require.Equal(t, uint(9001), vcli.Uint(opnodeflags.ListenUDPPortName))
@@ -84,7 +94,7 @@ func TestWithNamespacedP2P_PerChainOverridesGlobal(t *testing.T) {
 		"--" + flags.VNFlagGlobalPrefix + opnodeflags.ListenTCPPortName + "=9222",
 		"--" + tcpName + "=9000",
 	})
-	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID)))
+	require.NoError(t, withNamespacedP2P(vcli, t.TempDir(), fmt.Sprintf("%d", testChainID), true))
 
 	require.Equal(t, uint(9000), vcli.Uint(opnodeflags.ListenTCPPortName))
 	// UDP fell through to the default-zero override.
@@ -94,7 +104,7 @@ func TestWithNamespacedP2P_PerChainOverridesGlobal(t *testing.T) {
 func TestWithNamespacedP2P_CreatesP2PDir(t *testing.T) {
 	dataDir := t.TempDir()
 	ns := fmt.Sprintf("%d", testChainID)
-	require.NoError(t, withNamespacedP2P(newVCLI(t, nil), dataDir, ns))
+	require.NoError(t, withNamespacedP2P(newVCLI(t, nil), dataDir, ns, true))
 
 	expected := filepath.Join(dataDir, ns, "p2p")
 	info, err := os.Stat(expected)

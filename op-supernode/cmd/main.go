@@ -109,6 +109,7 @@ func main() {
 
 func createVirtualNodeConfigs(cliCtx *cli.Context, cfg *config.CLIConfig, l log.Logger) (map[eth.ChainID]*opnodecfg.Config, error) {
 	vnCfgs := make(map[eth.ChainID]*opnodecfg.Config)
+	multiChain := len(cfg.Chains) > 1
 	for _, chainID := range cfg.Chains {
 		// Create a new VirtualCLI for the chain which will serve as an opnode config
 		vcli := flags.NewVirtualCLI(cliCtx, chainID)
@@ -118,7 +119,7 @@ func createVirtualNodeConfigs(cliCtx *cli.Context, cfg *config.CLIConfig, l log.
 				return nil, fmt.Errorf("failed to disable P2P for chain %d: %w", chainID, err)
 			}
 		} else {
-			if err := withNamespacedP2P(vcli, cfg.DataDir, strconv.FormatUint(chainID, 10)); err != nil {
+			if err := withNamespacedP2P(vcli, cfg.DataDir, strconv.FormatUint(chainID, 10), multiChain); err != nil {
 				return nil, fmt.Errorf("failed to configure P2P for chain %d: %w", chainID, err)
 			}
 		}

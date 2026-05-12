@@ -19,7 +19,7 @@ func withNoP2P(vcli *flags.VirtualCLI) error {
 	return nil
 }
 
-func withNamespacedP2P(vcli *flags.VirtualCLI, datadir string, namespace string) error {
+func withNamespacedP2P(vcli *flags.VirtualCLI, datadir string, namespace string, multiChain bool) error {
 	p2pDir := filepath.Join(datadir, namespace, "p2p")
 	if err := os.MkdirAll(p2pDir, 0o700); err != nil {
 		return fmt.Errorf("failed creating p2p dir for chain %s: %w", namespace, err)
@@ -28,12 +28,19 @@ func withNamespacedP2P(vcli *flags.VirtualCLI, datadir string, namespace string)
 	vcli.WithStringOverride(opnodeflags.PeerstorePathName, filepath.Join(p2pDir, "peerstore_db"))
 	vcli.WithStringOverride(opnodeflags.DiscoveryPathName, filepath.Join(p2pDir, "discovery_db"))
 	// Default listen ports to 0 (dynamic) to prevent collisions when the user
-	// has not pinned a port. Honour vn.all.<flag> and vn.<id>.<flag> when set.
-	if !vcli.IsSet(opnodeflags.ListenTCPPortName) {
-		vcli.WithUintOverride(opnodeflags.ListenTCPPortName, 0)
-	}
-	if !vcli.IsSet(opnodeflags.ListenUDPPortName) {
-		vcli.WithUintOverride(opnodeflags.ListenUDPPortName, 0)
-	}
+	// has not pinned a port. In multi-chain mode, a non-zero vn.all.<flag>
+	// would be reused by every virtual node, so require per-chain ports instead.
+	withNamespacedP2PListenPort(vcli, opnodeflags.ListenTCPPortName, multiChain)
+	withNamespacedP2PListenPort(vcli, opnodeflags.ListenUDPPortName, multiChain)
 	return nil
+}
+
+func withNamespacedP2PListenPort(vcli *flags.VirtualCLI, name string, multiChain bool) {
+	if !vcli.IsSet(name) {
+		vcli.WithUintOverride(name, 0)
+		return
+	}
+	if multiChain && !vcli.IsChainSet(name) && vcli.IsGlobalSet(name) && vcli.Uint(name) != 0 {
+		vcli.WithUintOverride(name, 0)
+	}
 }
