@@ -139,6 +139,88 @@ func TestTruncate(t *testing.T) {
 	})
 }
 
+func TestTruncateCleanupWAL(t *testing.T) {
+	t.Run("ReopenDrainsPendingCleanup", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "entries.db")
+		db := openEntryDB(t, file)
+		require.NoError(t, db.Append(createEntry(1), createEntry(2), createEntry(3)))
+		require.NoError(t, db.Sync())
+
+		require.NoError(t, db.Truncate(0))
+		require.FileExists(t, file+".cleanup")
+		require.NoError(t, db.Close())
+
+		db = openEntryDB(t, file)
+		require.EqualValues(t, 1, db.Size())
+		requireRead(t, db, 0, createEntry(1))
+		_, err := db.Read(1)
+		require.ErrorIs(t, err, io.EOF)
+		require.NoFileExists(t, file+".cleanup")
+		stat, err := os.Stat(file)
+		require.NoError(t, err)
+		require.EqualValues(t, TestEntrySize, stat.Size())
+		require.NoError(t, db.Close())
+	})
+
+	t.Run("AppendDrainsPendingCleanupBeforeWriting", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "entries.db")
+		db := openEntryDB(t, file)
+		require.NoError(t, db.Append(createEntry(1), createEntry(2), createEntry(3)))
+		require.NoError(t, db.Sync())
+
+		require.NoError(t, db.Truncate(0))
+		require.FileExists(t, file+".cleanup")
+		require.NoError(t, db.Append(createEntry(4)))
+
+		require.EqualValues(t, 2, db.Size())
+		requireRead(t, db, 0, createEntry(1))
+		requireRead(t, db, 1, createEntry(4))
+		_, err := db.Read(2)
+		require.ErrorIs(t, err, io.EOF)
+		require.NoFileExists(t, file+".cleanup")
+		stat, err := os.Stat(file)
+		require.NoError(t, err)
+		require.EqualValues(t, 2*TestEntrySize, stat.Size())
+		require.NoError(t, db.Close())
+	})
+
+	t.Run("SyncClearsPendingCleanup", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "entries.db")
+		db := openEntryDB(t, file)
+		require.NoError(t, db.Append(createEntry(1), createEntry(2)))
+		require.NoError(t, db.Sync())
+
+		require.NoError(t, db.Truncate(0))
+		require.FileExists(t, file+".cleanup")
+		require.NoError(t, db.Sync())
+		require.NoFileExists(t, file+".cleanup")
+		require.NoError(t, db.Close())
+
+		db = openEntryDB(t, file)
+		require.EqualValues(t, 1, db.Size())
+		requireRead(t, db, 0, createEntry(1))
+		require.NoError(t, db.Close())
+	})
+
+	t.Run("PendingCleanupDoesNotExpandFile", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "entries.db")
+		entry := createEntry(1)
+		require.NoError(t, os.WriteFile(file, entry[:], 0o644))
+		require.NoError(t, os.WriteFile(file+".cleanup", []byte("100\n"), 0o644))
+
+		db := openEntryDB(t, file)
+		require.EqualValues(t, 1, db.Size())
+		requireRead(t, db, 0, createEntry(1))
+		_, err := db.Read(1)
+		require.ErrorIs(t, err, io.EOF)
+		stat, err := os.Stat(file)
+		require.NoError(t, err)
+		require.EqualValues(t, TestEntrySize, stat.Size())
+		require.NoFileExists(t, file+".cleanup")
+		require.NoError(t, db.Close())
+	})
+}
+
 func TestTruncateTrailingPartialEntries(t *testing.T) {
 	logger := testlog.Logger(t, log.LvlInfo)
 	file := filepath.Join(t.TempDir(), "entries.db")
@@ -223,12 +305,17 @@ func createEntry(i byte) TestEntry {
 }
 
 func createEntryDB(t *testing.T) *TestEntryDB {
-	logger := testlog.Logger(t, log.LvlInfo)
-	db, err := NewEntryDB[TestEntryType, TestEntry, TestEntryBinary](logger, filepath.Join(t.TempDir(), "entries.db"))
-	require.NoError(t, err)
+	db := openEntryDB(t, filepath.Join(t.TempDir(), "entries.db"))
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())
 	})
+	return db
+}
+
+func openEntryDB(t *testing.T, file string) *TestEntryDB {
+	logger := testlog.Logger(t, log.LvlInfo)
+	db, err := NewEntryDB[TestEntryType, TestEntry, TestEntryBinary](logger, file)
+	require.NoError(t, err)
 	return db
 }
 

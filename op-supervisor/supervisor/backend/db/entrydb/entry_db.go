@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -53,10 +56,12 @@ type dataAccess interface {
 type EntryDB[T EntryType, E Entry[T], B Binary[T, E]] struct {
 	data         dataAccess
 	lastEntryIdx EntryIdx
+	cleanupPath  string
 
 	b B
 
 	cleanupFailedWrite bool
+	pendingCleanup     *EntryIdx
 }
 
 // NewEntryDB creates an EntryDB. A new file will be created if the specified path does not exist,
@@ -79,7 +84,20 @@ func NewEntryDB[T EntryType, E Entry[T], B Binary[T, E]](logger log.Logger, path
 	db := &EntryDB[T, E, B]{
 		data:         file,
 		lastEntryIdx: EntryIdx(size - 1),
+		cleanupPath:  path + ".cleanup",
 	}
+	if err := db.loadCleanup(); err != nil {
+		return nil, fmt.Errorf("failed to load pending cleanup at %v: %w", path, err)
+	}
+	if err := db.drainCleanup(); err != nil {
+		return nil, fmt.Errorf("failed to drain pending cleanup at %v: %w", path, err)
+	}
+	info, err = file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat database after cleanup at %v: %w", path, err)
+	}
+	size = info.Size() / int64(b.EntrySize())
+	db.lastEntryIdx = EntryIdx(size - 1)
 	if size*int64(b.EntrySize()) != info.Size() {
 		logger.Warn("File size is not a multiple of entry size. Truncating to last complete entry", "fileSize", size, "entrySize", b.EntrySize())
 		if err := db.recover(); err != nil {
@@ -89,20 +107,27 @@ func NewEntryDB[T EntryType, E Entry[T], B Binary[T, E]](logger log.Logger, path
 	return db, nil
 }
 
+func (e *EntryDB[T, E, B]) effectiveLastEntryIdx() EntryIdx {
+	if e.pendingCleanup != nil && *e.pendingCleanup < e.lastEntryIdx {
+		return *e.pendingCleanup
+	}
+	return e.lastEntryIdx
+}
+
 func (e *EntryDB[T, E, B]) Size() int64 {
-	return int64(e.lastEntryIdx) + 1
+	return int64(e.effectiveLastEntryIdx()) + 1
 }
 
 // LastEntryIdx returns the index of the last entry in the DB.
 // This returns -1 if the DB is empty.
 func (e *EntryDB[T, E, B]) LastEntryIdx() EntryIdx {
-	return e.lastEntryIdx
+	return e.effectiveLastEntryIdx()
 }
 
 // Read an entry from the database by index. Returns io.EOF iff idx is after the last entry.
 func (e *EntryDB[T, E, B]) Read(idx EntryIdx) (E, error) {
 	var out E
-	if idx > e.lastEntryIdx {
+	if idx > e.effectiveLastEntryIdx() {
 		return out, io.EOF
 	}
 	read, err := e.b.ReadAt(&out, e.data, int64(idx)*int64(e.b.EntrySize()))
@@ -118,6 +143,9 @@ func (e *EntryDB[T, E, B]) Read(idx EntryIdx) (E, error) {
 // If the write fails, it will attempt to truncate any partially written data.
 // Subsequent writes to this instance will fail until partially written data is truncated.
 func (e *EntryDB[T, E, B]) Append(entries ...E) error {
+	if err := e.drainCleanup(); err != nil {
+		return fmt.Errorf("failed to drain pending cleanup before append: %w", err)
+	}
 	if e.cleanupFailedWrite {
 		// Try to rollback partially written data from a previous Append
 		if truncateErr := e.Truncate(e.lastEntryIdx); truncateErr != nil {
@@ -148,6 +176,12 @@ func (e *EntryDB[T, E, B]) Append(entries ...E) error {
 
 // Truncate the database so that the last retained entry is idx. Any entries after idx are deleted.
 func (e *EntryDB[T, E, B]) Truncate(idx EntryIdx) error {
+	if e.pendingCleanup != nil && idx > *e.pendingCleanup {
+		idx = *e.pendingCleanup
+	}
+	if err := e.recordCleanup(idx); err != nil {
+		return fmt.Errorf("failed to record cleanup to entry %v: %w", idx, err)
+	}
 	if err := e.data.Truncate((int64(idx) + 1) * int64(e.b.EntrySize())); err != nil {
 		return fmt.Errorf("failed to truncate to entry %v: %w", idx, err)
 	}
@@ -158,17 +192,119 @@ func (e *EntryDB[T, E, B]) Truncate(idx EntryIdx) error {
 }
 
 func (e *EntryDB[T, E, B]) Sync() error {
-	return e.data.Sync()
-}
-
-// recover an invalid database by truncating back to the last complete event.
-func (e *EntryDB[T, E, B]) recover() error {
-	if err := e.data.Truncate(e.Size() * int64(e.b.EntrySize())); err != nil {
-		return fmt.Errorf("failed to truncate trailing partial entries: %w", err)
+	if err := e.data.Sync(); err != nil {
+		return err
+	}
+	if e.pendingCleanup != nil {
+		if err := e.clearCleanup(); err != nil {
+			return fmt.Errorf("failed to clear pending cleanup: %w", err)
+		}
 	}
 	return nil
 }
 
+// recover an invalid database by truncating back to the last complete event.
+func (e *EntryDB[T, E, B]) recover() error {
+	if err := e.Truncate(EntryIdx(e.Size() - 1)); err != nil {
+		return fmt.Errorf("failed to truncate trailing partial entries: %w", err)
+	}
+	return e.Sync()
+}
+
 func (e *EntryDB[T, E, B]) Close() error {
 	return e.data.Close()
+}
+
+func (e *EntryDB[T, E, B]) loadCleanup() error {
+	if e.cleanupPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(e.cleanupPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	target, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return fmt.Errorf("decode cleanup target: %w", err)
+	}
+	idx := EntryIdx(target)
+	e.pendingCleanup = &idx
+	return nil
+}
+
+func (e *EntryDB[T, E, B]) recordCleanup(idx EntryIdx) error {
+	if e.cleanupPath == "" {
+		target := idx
+		e.pendingCleanup = &target
+		return nil
+	}
+	tmpPath := e.cleanupPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f, "%d\n", idx); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, e.cleanupPath); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(e.cleanupPath)); err != nil {
+		return err
+	}
+	target := idx
+	e.pendingCleanup = &target
+	return nil
+}
+
+func (e *EntryDB[T, E, B]) clearCleanup() error {
+	if e.cleanupPath != "" {
+		if err := os.Remove(e.cleanupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := syncDir(filepath.Dir(e.cleanupPath)); err != nil {
+			return err
+		}
+	}
+	e.pendingCleanup = nil
+	e.cleanupFailedWrite = false
+	return nil
+}
+
+func (e *EntryDB[T, E, B]) drainCleanup() error {
+	if e.pendingCleanup == nil {
+		return nil
+	}
+	target := *e.pendingCleanup
+	if target > e.lastEntryIdx {
+		target = e.lastEntryIdx
+	}
+	if err := e.data.Truncate((int64(target) + 1) * int64(e.b.EntrySize())); err != nil {
+		return fmt.Errorf("failed to truncate to pending cleanup entry %v: %w", target, err)
+	}
+	e.lastEntryIdx = target
+	if err := e.data.Sync(); err != nil {
+		return fmt.Errorf("failed to sync pending cleanup truncate: %w", err)
+	}
+	return e.clearCleanup()
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
