@@ -15,6 +15,7 @@ type EntryStore[T EntryType, E Entry[T]] interface {
 	Read(idx EntryIdx) (E, error)
 	Append(entries ...E) error
 	Truncate(idx EntryIdx) error
+	Sync() error
 	Close() error
 }
 
@@ -46,6 +47,7 @@ type dataAccess interface {
 	io.Writer
 	io.Closer
 	Truncate(size int64) error
+	Sync() error
 }
 
 type EntryDB[T EntryType, E Entry[T], B Binary[T, E]] struct {
@@ -153,6 +155,10 @@ func (e *EntryDB[T, E, B]) Truncate(idx EntryIdx) error {
 	e.lastEntryIdx = idx
 	e.cleanupFailedWrite = false
 	return nil
+}
+
+func (e *EntryDB[T, E, B]) Sync() error {
+	return e.data.Sync()
 }
 
 // recover an invalid database by truncating back to the last complete event.

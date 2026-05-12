@@ -552,16 +552,14 @@ func (db *DB) debugTip() {
 	}
 }
 
-func (db *DB) flush() error {
-	for i, e := range db.lastEntryContext.out {
+func (db *DB) appendEntries(out []Entry, nextEntryIndex entrydb.EntryIdx) error {
+	for i, e := range out {
 		db.log.Trace("appending entry", "type", e.Type(), "entry", hexutil.Bytes(e[:]),
-			"next", int(db.lastEntryContext.nextEntryIndex)-len(db.lastEntryContext.out)+i)
+			"next", int(nextEntryIndex)-len(out)+i)
 	}
-	if err := db.store.Append(db.lastEntryContext.out...); err != nil {
+	if err := db.store.Append(out...); err != nil {
 		return fmt.Errorf("failed to append entries: %w", err)
 	}
-	db.lastEntryContext.out = db.lastEntryContext.out[:0]
-	db.updateEntryCountMetric()
 	return nil
 }
 
@@ -569,27 +567,58 @@ func (db *DB) SealBlock(parentHash common.Hash, block eth.BlockID, timestamp uin
 	db.rwLock.Lock()
 	defer db.rwLock.Unlock()
 
-	if err := db.lastEntryContext.SealBlock(parentHash, block, timestamp); err != nil {
+	next := db.lastEntryContext
+	if err := next.SealBlock(parentHash, block, timestamp); err != nil {
 		return fmt.Errorf("failed to seal block: %w", err)
 	}
 	db.log.Trace("Sealed block", "parent", parentHash, "block", block, "timestamp", timestamp)
-	return db.flush()
+	prevIdx := db.lastEntryContext.nextEntryIndex - 1
+	if err := db.appendEntries(next.out, next.nextEntryIndex); err != nil {
+		return err
+	}
+	if err := db.store.Sync(); err != nil {
+		if truncateErr := db.store.Truncate(prevIdx); truncateErr != nil {
+			return errors.Join(
+				fmt.Errorf("failed to sync sealed block: %w", err),
+				fmt.Errorf("failed to roll back unsynced seal entries: %w", truncateErr),
+			)
+		}
+		return fmt.Errorf("failed to sync sealed block: %w", err)
+	}
+	next.out = next.out[:0]
+	db.lastEntryContext = next
+	db.updateEntryCountMetric()
+	return nil
 }
 
 func (db *DB) AddLog(logHash common.Hash, parentBlock eth.BlockID, logIdx uint32, execMsg *types.ExecutingMessage) error {
 	db.rwLock.Lock()
 	defer db.rwLock.Unlock()
 
-	if err := db.lastEntryContext.ApplyLog(parentBlock, logIdx, logHash, execMsg); err != nil {
+	next := db.lastEntryContext
+	if err := next.ApplyLog(parentBlock, logIdx, logHash, execMsg); err != nil {
 		return fmt.Errorf("failed to apply log: %w", err)
 	}
 	db.log.Trace("Applied log", "parentBlock", parentBlock, "logIndex", logIdx, "logHash", logHash, "executing", execMsg != nil)
-	return db.flush()
+	if err := db.appendEntries(next.out, next.nextEntryIndex); err != nil {
+		return err
+	}
+	next.out = next.out[:0]
+	db.lastEntryContext = next
+	db.updateEntryCountMetric()
+	return nil
 }
 
 // Clear clears the DB such that there is no data left.
 // An invalidator is required as argument, to force users to invalidate any current open reads.
 func (db *DB) Clear(inv reads.Invalidator) error {
+	db.rwLock.Lock()
+	defer db.rwLock.Unlock()
+	defer db.updateEntryCountMetric()
+	return db.clearLocked(inv)
+}
+
+func (db *DB) clearLocked(inv reads.Invalidator) error {
 	release, invalidateErr := inv.TryInvalidate(reads.InvalidationRules{
 		reads.DerivedInvalidation{Timestamp: 0},
 	})
@@ -597,9 +626,11 @@ func (db *DB) Clear(inv reads.Invalidator) error {
 		return invalidateErr
 	}
 	defer release()
-	defer db.updateEntryCountMetric()
 	if truncateErr := db.store.Truncate(-1); truncateErr != nil {
 		return fmt.Errorf("failed to empty DB: %w", truncateErr)
+	}
+	if syncErr := db.store.Sync(); syncErr != nil {
+		return fmt.Errorf("failed to sync empty DB: %w", syncErr)
 	}
 	db.lastEntryContext = logContext{}
 	return nil
@@ -617,7 +648,7 @@ func (db *DB) Rewind(inv reads.Invalidator, newHead eth.BlockID) error {
 	iter, err := db.newIteratorAt(newHead.Number, 0)
 	if err != nil {
 		if errors.Is(err, types.ErrPreviousToFirst) || errors.Is(err, types.ErrSkipped) {
-			if err := db.Clear(inv); err != nil {
+			if err := db.clearLocked(inv); err != nil {
 				return fmt.Errorf("failed to clear logs DB, upon rewinding to log block %s before first block: %w", newHead, err)
 			}
 			return nil
@@ -638,14 +669,17 @@ func (db *DB) Rewind(inv reads.Invalidator, newHead eth.BlockID) error {
 		return err
 	}
 	defer release()
+	target := iter.current
+
 	// Truncate to contain idx entries. The Truncate func keeps the given index as last index.
-	if err := db.store.Truncate(iter.NextIndex() - 1); err != nil {
+	if err := db.store.Truncate(target.NextIndex() - 1); err != nil {
 		return fmt.Errorf("failed to truncate to block %s: %w", newHead, err)
 	}
-	// Use db.init() to find the log context for the new latest log entry
-	if err := db.init(true); err != nil {
-		return fmt.Errorf("failed to find new last entry context: %w", err)
+	if err := db.store.Sync(); err != nil {
+		return fmt.Errorf("failed to sync rewind to block %s: %w", newHead, err)
 	}
+	db.lastEntryContext = target
+	db.lastEntryContext.out = nil
 	return nil
 }
 

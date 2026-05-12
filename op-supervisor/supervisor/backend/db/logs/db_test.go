@@ -2,6 +2,8 @@ package logs
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -42,6 +44,126 @@ func TestErrorOpeningDatabase(t *testing.T) {
 	chainID := eth.ChainIDFromUInt64(123)
 	_, err := NewFromFile(testlog.Logger(t, log.LvlInfo), &stubMetrics{}, chainID, filepath.Join(dir, "missing-dir", "file.db"), false)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type faultEntryStore struct {
+	entries []Entry
+
+	appendErr   error
+	syncErr     error
+	truncateErr error
+}
+
+func (s *faultEntryStore) Size() int64 {
+	return int64(len(s.entries))
+}
+
+func (s *faultEntryStore) LastEntryIdx() entrydb.EntryIdx {
+	return entrydb.EntryIdx(len(s.entries) - 1)
+}
+
+func (s *faultEntryStore) Read(idx entrydb.EntryIdx) (Entry, error) {
+	if idx < entrydb.EntryIdx(len(s.entries)) {
+		return s.entries[idx], nil
+	}
+	return Entry{}, io.EOF
+}
+
+func (s *faultEntryStore) Append(entries ...Entry) error {
+	if s.appendErr != nil {
+		return s.appendErr
+	}
+	s.entries = append(s.entries, entries...)
+	return nil
+}
+
+func (s *faultEntryStore) Truncate(idx entrydb.EntryIdx) error {
+	if s.truncateErr != nil {
+		return s.truncateErr
+	}
+	s.entries = s.entries[:idx+1]
+	return nil
+}
+
+func (s *faultEntryStore) Sync() error {
+	return s.syncErr
+}
+
+func (s *faultEntryStore) Close() error {
+	return nil
+}
+
+var _ entrydb.EntryStore[EntryType, Entry] = (*faultEntryStore)(nil)
+
+func TestMutationAtomicity(t *testing.T) {
+	logger := testlog.Logger(t, log.LvlInfo)
+	chainID := eth.ChainIDFromUInt64(123)
+
+	t.Run("AddLogAppendFailureDoesNotAdvanceState", func(t *testing.T) {
+		store := &faultEntryStore{}
+		db, err := NewFromEntryStore(logger, &stubMetrics{}, chainID, store, false)
+		require.NoError(t, err)
+		bl0 := eth.BlockID{Hash: createHash(0), Number: 0}
+		require.NoError(t, db.SealBlock(common.Hash{}, bl0, 100))
+		before := db.lastEntryContext
+
+		expectedErr := errors.New("append failed")
+		store.appendErr = expectedErr
+		err = db.AddLog(createHash(1), bl0, 0, nil)
+		require.ErrorIs(t, err, expectedErr)
+		require.Equal(t, before, db.lastEntryContext)
+		require.Equal(t, before.nextEntryIndex, db.lastEntryContext.nextEntryIndex)
+	})
+
+	t.Run("SealBlockSyncFailureDoesNotAdvanceState", func(t *testing.T) {
+		store := &faultEntryStore{}
+		db, err := NewFromEntryStore(logger, &stubMetrics{}, chainID, store, false)
+		require.NoError(t, err)
+		bl0 := eth.BlockID{Hash: createHash(0), Number: 0}
+		require.NoError(t, db.SealBlock(common.Hash{}, bl0, 100))
+		before := db.lastEntryContext
+		beforeEntries := len(store.entries)
+
+		expectedErr := errors.New("sync failed")
+		store.syncErr = expectedErr
+		bl1 := eth.BlockID{Hash: createHash(1), Number: 1}
+		err = db.SealBlock(bl0.Hash, bl1, 101)
+		require.ErrorIs(t, err, expectedErr)
+		require.Equal(t, before, db.lastEntryContext)
+		require.Len(t, store.entries, beforeEntries)
+	})
+
+	t.Run("RewindSyncFailureDoesNotAdvanceState", func(t *testing.T) {
+		store := &faultEntryStore{}
+		db, err := NewFromEntryStore(logger, &stubMetrics{}, chainID, store, false)
+		require.NoError(t, err)
+		bl0 := eth.BlockID{Hash: createHash(0), Number: 0}
+		bl1 := eth.BlockID{Hash: createHash(1), Number: 1}
+		require.NoError(t, db.SealBlock(common.Hash{}, bl0, 100))
+		require.NoError(t, db.SealBlock(bl0.Hash, bl1, 101))
+		before := db.lastEntryContext
+
+		expectedErr := errors.New("sync failed")
+		store.syncErr = expectedErr
+		err = db.Rewind(reads.NoopRegistry{}, bl0)
+		require.ErrorIs(t, err, expectedErr)
+		require.Equal(t, before, db.lastEntryContext)
+	})
+
+	t.Run("ClearSyncFailureDoesNotAdvanceState", func(t *testing.T) {
+		store := &faultEntryStore{}
+		db, err := NewFromEntryStore(logger, &stubMetrics{}, chainID, store, false)
+		require.NoError(t, err)
+		bl0 := eth.BlockID{Hash: createHash(0), Number: 0}
+		require.NoError(t, db.SealBlock(common.Hash{}, bl0, 100))
+		before := db.lastEntryContext
+
+		expectedErr := errors.New("sync failed")
+		store.syncErr = expectedErr
+		err = db.Clear(reads.NoopRegistry{})
+		require.ErrorIs(t, err, expectedErr)
+		require.Equal(t, before, db.lastEntryContext)
+	})
 }
 
 func runDBTest(t *testing.T, setup func(t *testing.T, db *DB, m *stubMetrics), assert func(t *testing.T, db *DB, m *stubMetrics)) {
