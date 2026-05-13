@@ -37,7 +37,7 @@ var InteropActivationTimestampFlag = &cli.Uint64Flag{
 	Value:   0,
 }
 
-// InteropLogBackfillDepthFlag extends initiating-message log ingestion backward from the L2 tip by this duration (clamped to activation). Validation still starts only beyond the local safe head.
+// InteropLogBackfillDepthFlag extends initiating-message log ingestion backward from the startup boundary by this duration (clamped to activation).
 var InteropLogBackfillDepthFlag = &cli.DurationFlag{
 	Name:    "interop.log-backfill-depth",
 	Usage:   "Duration to pre-ingest logs behind the tip before interop validation (e.g. 168h). Never loads logs before interop.activation-timestamp. Requires interop.activation-timestamp.",
@@ -140,7 +140,7 @@ type Interop struct {
 	// backfillEndTimestamp represents the end of the range of timestamps that were sealed by runLogBackfill.
 	// this is used for loop handoff from log backfill to main processing.
 	// firstVerifiableTimestamp is used to determine the start of the main processing loop, which is backfillEndTimestamp + 1
-	// after backfill, or the safe-head-derived startup timestamp when backfill was not used.
+	// after backfill, or the EL-finalized-derived startup timestamp when backfill was not used.
 	backfillEndTimestamp uint64
 	firstVerifiableSet   bool
 	firstVerifiable      uint64
@@ -195,7 +195,7 @@ func (i *Interop) Name() string {
 // firstVerifiableTimestamp is the earliest timestamp the main loop will attempt
 // to verify. If verification has already committed results, the first committed
 // timestamp is the durable handoff boundary. Otherwise it is backfillEndTimestamp+1
-// after log backfill, or the safe-head-derived startup timestamp.
+// after log backfill, or the EL-finalized-derived startup timestamp.
 func (i *Interop) firstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if i.verifiedDB != nil {
 		if first, initialized := i.verifiedDB.FirstTimestamp(); initialized {
@@ -294,7 +294,7 @@ func (i *Interop) Start(ctx context.Context) error {
 				i.backfillEndTimestamp = end
 				break
 			}
-			i.log.Warn("log backfill failed, retrying (virtual nodes may not be ready yet)", "err", err)
+			i.log.Warn("log backfill failed, retrying (EL finalized head or chain data may not be ready yet)", "err", err)
 			for cid := range i.chains {
 				i.metrics.LogBackfillRetries.WithLabelValues(cid.String()).Inc()
 			}
@@ -308,37 +308,48 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.backfillCompleted.Store(true)
 	i.log.Info("log backfill complete", "backfillEndTimestamp", i.backfillEndTimestamp)
 
-	firstVerifiableLog := uint64(0)
-	if i.backfillEndTimestamp != 0 {
-		firstVerifiableLog = i.backfillEndTimestamp + 1
-		if firstVerifiableLog < i.activationTimestamp {
-			firstVerifiableLog = i.activationTimestamp
-		}
-	} else if lastTS, initialized := i.verifiedDB.LastTimestamp(); initialized {
-		firstVerifiableLog = lastTS + 1
-	} else {
+	waitForFirstVerifiable := func(resolve func(context.Context) (uint64, error)) (uint64, error) {
 		for {
-			first, err := i.readyFirstVerifiableTimestamp(i.ctx)
+			first, err := resolve(i.ctx)
 			if err == nil {
-				i.firstVerifiable = first
-				i.firstVerifiableSet = true
-				firstVerifiableLog = first
-				break
+				return first, nil
 			}
 			// Permanent SafeDB gap must halt normal startup cleanly. Backfill-enabled
 			// startup reaches this path only if backfill had no range to seal.
 			if errors.Is(err, cc.ErrHistoryUnavailable) {
 				i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
 					"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
-				return fmt.Errorf("interop halted due to unavailable history: %w", err)
+				return 0, fmt.Errorf("interop halted due to unavailable history: %w", err)
 			}
-			i.log.Warn("first verifiable timestamp unavailable, retrying (virtual nodes may not be ready yet)", "err", err)
+			i.log.Warn("first verifiable timestamp unavailable, retrying (EL finalized head or chain data may not be ready yet)", "err", err)
 			select {
 			case <-i.ctx.Done():
-				return fmt.Errorf("first verifiable timestamp interrupted: %w", i.ctx.Err())
+				return 0, fmt.Errorf("first verifiable timestamp interrupted: %w", i.ctx.Err())
 			case <-time.After(errorBackoffPeriod):
 			}
 		}
+	}
+
+	firstVerifiableLog := uint64(0)
+	if i.backfillEndTimestamp != 0 {
+		firstVerifiableLog = i.backfillEndTimestamp + 1
+		if firstVerifiableLog < i.activationTimestamp {
+			firstVerifiableLog = i.activationTimestamp
+		}
+	} else if _, initialized := i.verifiedDB.LastTimestamp(); initialized {
+		first, err := waitForFirstVerifiable(i.resolveFirstVerifiableTimestamp)
+		if err != nil {
+			return err
+		}
+		firstVerifiableLog = first
+	} else {
+		first, err := waitForFirstVerifiable(i.readyFirstVerifiableTimestamp)
+		if err != nil {
+			return err
+		}
+		i.firstVerifiable = first
+		i.firstVerifiableSet = true
+		firstVerifiableLog = first
 	}
 	i.log.Info("interop first verifiable timestamp resolved",
 		"activationTimestamp", i.activationTimestamp,
@@ -991,7 +1002,7 @@ func (i *Interop) CurrentL1() eth.BlockID {
 
 // VerifiedAtTimestamp returns whether the data is verified at the given timestamp.
 // Timestamps before the first verifiable timestamp are already covered by
-// pre-activation consensus or by the safe-head startup handoff.
+// pre-activation consensus or by the startup handoff.
 func (i *Interop) VerifiedAtTimestamp(ts uint64) (bool, error) {
 	if ts < i.activationTimestamp {
 		return true, nil
