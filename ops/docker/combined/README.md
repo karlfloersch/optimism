@@ -287,5 +287,3 @@ visible APIs used by existing monitoring, indexers, and applications.
 - `op-supernode` replaces the `op-node` process, not the execution-layer RPC
   API. Existing execution RPC consumers should continue to talk to the bundled
   `op-reth` endpoint for their chain.
-- The second chain can be ignored by existing single-chain consumers, but it
-  still requires CPU, memory, network, and disk.
