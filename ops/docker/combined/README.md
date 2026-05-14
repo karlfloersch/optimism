@@ -289,5 +289,3 @@ visible APIs used by existing monitoring, indexers, and applications.
   `op-reth` endpoint for their chain.
 - The second chain can be ignored by existing single-chain consumers, but it
   still requires CPU, memory, network, and disk.
-- Keep secrets, private RPC URLs, cloud project names, and private registry
-  paths out of images and committed compose files.
