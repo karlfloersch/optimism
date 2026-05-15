@@ -26,7 +26,7 @@ import (
 var (
 	_                  activity.RunnableActivity     = (*Interop)(nil)
 	_                  activity.VerificationActivity = (*Interop)(nil)
-	backoffPeriod                                    = 1 * time.Second // backoff when chains aren't ready
+	backoffPeriod                                    = 100 * time.Millisecond // backoff when chains aren't ready
 	errorBackoffPeriod                               = 2 * time.Second // backoff on errors
 )
 
