@@ -11,8 +11,10 @@ import (
 
 // resolveFirstVerifiableTimestamp returns the first timestamp not yet covered
 // by durable local state: verifiedDB.LastTimestamp+1 when initialized,
-// otherwise a latched cold-start handoff derived from the newest local-safe
-// progress across all chains (clamped to activation).
+// otherwise a latched cold-start handoff derived from the first timestamp after
+// the earliest SafeDB coverage available across all chains (clamped to
+// activation). Starting after the first SafeDB entry leaves the entry itself
+// available as the frontier block when persisting the first verified timestamp.
 func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if len(i.chains) == 0 {
 		return i.activationTimestamp, nil
@@ -25,38 +27,46 @@ func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, 
 	if i.firstVerifiableSet {
 		return i.firstVerifiable, nil
 	}
-	maxLocalSafeTime, err := i.maxLocalSafeTime(ctx)
+	firstSafeDBTime, err := i.firstSafeDBCoveredTime(ctx)
 	if err != nil {
 		return 0, err
 	}
 	first := i.activationTimestamp
-	if maxLocalSafeTime >= i.activationTimestamp {
-		first = maxLocalSafeTime + 1
+	if firstSafeDBTime >= i.activationTimestamp {
+		first = firstSafeDBTime + 1
 	}
 	i.firstVerifiable = first
 	i.firstVerifiableSet = true
 	return first, nil
 }
 
-func (i *Interop) maxLocalSafeTime(ctx context.Context) (uint64, error) {
-	maxLocalSafeTime := uint64(0)
+type firstSafeHeadReader interface {
+	FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error)
+}
+
+func (i *Interop) firstSafeDBCoveredTime(ctx context.Context) (uint64, error) {
+	firstSafeDBTime := uint64(0)
 	for _, chain := range i.chains {
-		status, err := chain.SyncStatus(ctx)
+		reader, ok := chain.(firstSafeHeadReader)
+		if !ok {
+			return 0, fmt.Errorf("chain %s: first safe head reader unavailable", chain.ID())
+		}
+		l1, l2, err := reader.FirstSafeHead(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("chain %s: sync status: %w", chain.ID(), err)
+			return 0, fmt.Errorf("chain %s: first safe head: %w", chain.ID(), err)
 		}
-		if status == nil {
-			return 0, fmt.Errorf("chain %s: sync status unavailable", chain.ID())
+		if l2 == (eth.BlockID{}) {
+			return 0, fmt.Errorf("chain %s: first safe head not yet available", chain.ID())
 		}
-		localSafe := status.LocalSafeL2
-		if localSafe == (eth.L2BlockRef{}) {
-			return 0, fmt.Errorf("chain %s: local safe head not yet available", chain.ID())
+		ts, err := chain.BlockNumberToTimestamp(ctx, l2.Number)
+		if err != nil {
+			return 0, fmt.Errorf("chain %s: first safe head timestamp: %w", chain.ID(), err)
 		}
-		i.log.Debug("first verifiable timestamp: local safe handoff",
-			"chain", chain.ID(), "localSafe", localSafe)
-		maxLocalSafeTime = max(maxLocalSafeTime, localSafe.Time)
+		i.log.Debug("first verifiable timestamp: SafeDB handoff",
+			"chain", chain.ID(), "l1", l1, "l2", l2, "timestamp", ts)
+		firstSafeDBTime = max(firstSafeDBTime, ts)
 	}
-	return maxLocalSafeTime, nil
+	return firstSafeDBTime, nil
 }
 
 func (i *Interop) runLogBackfill() (uint64, error) {

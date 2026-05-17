@@ -189,9 +189,9 @@ func TestInteropActivationTimestampFlagEnvVar(t *testing.T) {
 Spec: firstVerifiableTimestamp is the common interop startup readiness gate.
 
   - If verifiedDB is initialized, it returns the first committed timestamp.
-  - It returns an error while sync status or local-safe progress is unavailable.
-  - Once ready, it returns activation when there are no chains, or one past the
-    newest local-safe timestamp across chains otherwise.
+  - It returns an error while SafeDB coverage is unavailable.
+  - Once ready, it returns activation when there are no chains, or the newest
+    first-SafeDB-covered timestamp across chains otherwise.
   - The no-backfill startup path uses that same timestamp for its first
     verification attempt.
 */
@@ -210,95 +210,92 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 			want: 100,
 		},
 		{
-			name: "sync status error blocks startup",
+			name: "SafeDB first entry error blocks startup",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusOverride = func() (*eth.SyncStatus, error) {
-							return nil, errors.New("sync status not ready")
-						}
+						m.firstSafeHeadErr = errors.New("safedb not ready")
 					}).
 					Build()
 			},
 			wantErr: true,
 		},
 		{
-			name: "empty local safe response blocks startup",
+			name: "empty first SafeDB entry blocks startup",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{}
+						m.firstSafeHeadSet = true
 					}).
 					Build()
 			},
 			wantErr: true,
 		},
 		{
-			name: "local safe at genesis with a real hash is accepted",
+			name: "first SafeDB entry at genesis with a real hash is accepted",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{
-							LocalSafeL2: eth.L2BlockRef{Number: 0, Hash: common.HexToHash("0xabc123")},
-						}
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 0, Hash: common.HexToHash("0xabc123")}
 					}).
 					Build()
 			},
 			want: 100,
 		},
 		{
-			name: "local safe before activation returns activation",
+			name: "first SafeDB entry before activation returns activation",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{
-							SafeL2:      eth.L2BlockRef{Number: 99, Time: 99},
-							LocalSafeL2: eth.L2BlockRef{Number: 99, Time: 99},
-						}
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 99, Hash: common.BigToHash(big.NewInt(99))}
 					}).
 					Build()
 			},
 			want: 100,
 		},
 		{
-			name: "local safe at activation returns timestamp after activation",
+			name: "first SafeDB entry at activation returns timestamp after activation",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{
-							SafeL2:      eth.L2BlockRef{Number: 100, Time: 100},
-							LocalSafeL2: eth.L2BlockRef{Number: 100, Time: 100},
-						}
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 100, Hash: common.BigToHash(big.NewInt(100))}
 					}).
 					Build()
 			},
 			want: 101,
 		},
 		{
-			name: "returns timestamp after newest local safe across chains",
+			name: "returns newest first SafeDB-covered timestamp across chains",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{
-							SafeL2:      eth.L2BlockRef{Number: 140, Time: 140},
-							LocalSafeL2: eth.L2BlockRef{Number: 140, Time: 140},
-						}
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 140, Hash: common.BigToHash(big.NewInt(140))}
 					}).
 					WithChain(20, func(m *mockChainContainer) {
-						m.syncStatusFull = &eth.SyncStatus{
-							SafeL2:      eth.L2BlockRef{Number: 125, Time: 125},
-							LocalSafeL2: eth.L2BlockRef{Number: 125, Time: 125},
-						}
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 125, Hash: common.BigToHash(big.NewInt(125))}
 					}).
 					Build()
 			},
 			want: 141,
 		},
 		{
-			name: "uses local safe when sync status safe is stale",
+			name: "uses SafeDB when sync status is stale",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
+						m.firstSafeHeadSet = true
+						m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+						m.firstSafeL2 = eth.BlockID{Number: 180, Hash: common.BigToHash(big.NewInt(180))}
 						m.syncStatusFull = &eth.SyncStatus{
 							SafeL2:      eth.L2BlockRef{Number: 0, Time: 100},
 							LocalSafeL2: eth.L2BlockRef{Number: 200, Time: 200},
@@ -306,7 +303,7 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 					}).
 					Build()
 			},
-			want: 201,
+			want: 181,
 		},
 	}
 
@@ -1203,7 +1200,7 @@ func TestVerifiedResultAtTimestamp(t *testing.T) {
 			}).
 			Build()
 			// 126 > activation and >= firstVerifiable (resolves to 101 from
-			// local safe time 100); no entry yet -> ethereum.NotFound.
+			// first SafeDB timestamp 100); no entry yet -> ethereum.NotFound.
 		_, _, err := h.interop.VerifiedResultAtTimestamp(126)
 		require.ErrorIs(t, err, ethereum.NotFound)
 		require.NotErrorIs(t, err, ErrNotActive)
@@ -1214,7 +1211,7 @@ func TestVerifiedResultAtTimestamp(t *testing.T) {
 		h := newInteropTestHarness(t).
 			WithActivation(100).
 			WithChain(10, func(m *mockChainContainer) {
-				// Local safe time 500 -> firstVerifiable=501. ts=200 is post
+				// First SafeDB timestamp 500 -> firstVerifiable=501. ts=200 is post
 				// activation but below firstVerifiable on this node.
 				m.syncStatusFull = &eth.SyncStatus{
 					SafeL2:      eth.L2BlockRef{Number: 500, Time: 500},
@@ -1290,7 +1287,7 @@ func TestNoopVerifiedResultReader(t *testing.T) {
 	}
 }
 
-func TestFirstVerifiableTimestampRestoresSafeHeadHandoffAfterRestart(t *testing.T) {
+func TestFirstVerifiableTimestampRestoresSafeDBHandoffAfterRestart(t *testing.T) {
 	t.Parallel()
 
 	dataDir := t.TempDir()
@@ -2029,6 +2026,12 @@ type mockChainContainer struct {
 	optimisticL1    eth.BlockID
 	optimisticAtErr error
 
+	firstSafeL1       eth.BlockID
+	firstSafeL2       eth.BlockID
+	firstSafeHeadSet  bool
+	firstSafeHeadErr  error
+	firstSafeOverride func(context.Context) (eth.BlockID, eth.BlockID, error)
+
 	// If set, SyncStatus returns this instead of synthesizing from currentL1 only.
 	syncStatusFull          *eth.SyncStatus
 	syncStatusOverride      func() (*eth.SyncStatus, error)
@@ -2100,7 +2103,30 @@ func (m *mockChainContainer) BlockNumberToTimestamp(ctx context.Context, blocknu
 	if m.blockNumberToTimestampOverride != nil {
 		return m.blockNumberToTimestampOverride(ctx, blocknum)
 	}
-	return 0, nil
+	return blocknum, nil
+}
+
+func (m *mockChainContainer) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.firstSafeHeadErr != nil {
+		return eth.BlockID{}, eth.BlockID{}, m.firstSafeHeadErr
+	}
+	if m.firstSafeOverride != nil {
+		return m.firstSafeOverride(ctx)
+	}
+	if m.firstSafeHeadSet {
+		return m.firstSafeL1, m.firstSafeL2, nil
+	}
+	if m.syncStatusFull != nil && m.syncStatusFull.LocalSafeL2 != (eth.L2BlockRef{}) {
+		return eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}, m.syncStatusFull.LocalSafeL2.ID(), nil
+	}
+	safeNum := m.defaultSafeTime
+	if safeNum == 0 {
+		safeNum = 1
+	}
+	return eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")},
+		eth.BlockID{Number: safeNum, Hash: common.BigToHash(new(big.Int).SetUint64(safeNum))}, nil
 }
 func (m *mockChainContainer) ELFinalizedHead(ctx context.Context) (eth.L2BlockRef, error) {
 	m.mu.Lock()

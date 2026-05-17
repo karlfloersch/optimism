@@ -106,6 +106,11 @@ func (m *mockVirtualNode) SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (
 	return m.safeHeadL1, m.safeHeadL2, m.safeHeadErr
 }
 
+// FirstSafeHead implements virtual_node.VirtualNode FirstSafeHead
+func (m *mockVirtualNode) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
+	return m.safeHeadL1, m.safeHeadL2, m.safeHeadErr
+}
+
 // L1AtSafeHead implements virtual_node.VirtualNode L1AtSafeHead
 func (m *mockVirtualNode) L1AtSafeHead(ctx context.Context, target eth.BlockID) (eth.BlockID, error) {
 	return m.safeHeadL1, m.safeHeadErr
@@ -1045,6 +1050,9 @@ type mockVNForL1AtSafeHeadError struct {
 func (m *mockVNForL1AtSafeHeadError) Start(ctx context.Context) error { return nil }
 func (m *mockVNForL1AtSafeHeadError) Stop(ctx context.Context) error  { return nil }
 func (m *mockVNForL1AtSafeHeadError) SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (eth.BlockID, eth.BlockID, error) {
+	return eth.BlockID{}, eth.BlockID{}, nil
+}
+func (m *mockVNForL1AtSafeHeadError) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
 	return eth.BlockID{}, eth.BlockID{}, nil
 }
 func (m *mockVNForL1AtSafeHeadError) L1AtSafeHead(ctx context.Context, target eth.BlockID) (eth.BlockID, error) {

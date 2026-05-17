@@ -146,7 +146,7 @@ type Interop struct {
 	// backfillEndTimestamp represents the end of the range of timestamps that were sealed by runLogBackfill.
 	// this is used for loop handoff from log backfill to main processing.
 	// firstVerifiableTimestamp is used to determine the start of the main processing loop, which is backfillEndTimestamp + 1
-	// after backfill, or the latched local-safe startup handoff when backfill was not used.
+	// after backfill, or the latched SafeDB startup handoff when backfill was not used.
 	backfillEndTimestamp uint64
 	firstVerifiableSet   bool
 	firstVerifiable      uint64
@@ -202,7 +202,7 @@ func (i *Interop) Name() string {
 // to verify. If verification has already committed results, the first committed
 // timestamp is the durable handoff boundary. Otherwise it is backfillEndTimestamp+1
 // after log backfill, or — on cold start with no committed results and no
-// backfill range — the latched local-safe startup handoff.
+// backfill range — the latched SafeDB startup handoff.
 func (i *Interop) firstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if i.verifiedDB != nil {
 		if first, initialized := i.verifiedDB.FirstTimestamp(); initialized {

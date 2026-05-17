@@ -61,6 +61,11 @@ func TestStoreSafeHeads(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, l1b, actualL1)
 		require.Equal(t, l2b.ID(), actualL2)
+
+		actualL1, actualL2, err = db.FirstSafeHead(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, l1a, actualL1)
+		require.Equal(t, l2a.ID(), actualL2)
 	}
 	// Verify loading the safe heads with the already open DB
 	verifySafeHeads(db)
@@ -80,6 +85,8 @@ func TestSafeHeadAtL1_EmptyDatabase(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 	_, _, err = db.SafeHeadAtL1(context.Background(), 100)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, _, err = db.FirstSafeHead(context.Background())
 	require.ErrorIs(t, err, ErrNotFound)
 }
 

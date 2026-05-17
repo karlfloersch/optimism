@@ -96,12 +96,12 @@ func TestLogBackfill_ResumesAfterInterruption(t *testing.T) {
 	require.Equal(t, int32(6), fetchCount.Load())
 }
 
-func TestLogBackfill_RetriesWhenSyncStatusNotReady(t *testing.T) {
+func TestLogBackfill_RetriesWhenFirstSafeHeadNotReady(t *testing.T) {
 	const act = uint64(100)
 	depth := 10 * time.Second
 
-	// Track sync status call count so we can make the first N calls fail.
-	var syncStatusCalls atomic.Int32
+	// Track first SafeDB entry call count so we can make the first N calls fail.
+	var firstSafeCalls atomic.Int32
 	failUntil := int32(3) // first 3 calls return error, then succeed
 
 	h := newInteropTestHarness(t).
@@ -109,18 +109,19 @@ func TestLogBackfill_RetriesWhenSyncStatusNotReady(t *testing.T) {
 		WithLogBackfillDepth(depth).
 		WithChain(10, func(m *mockChainContainer) {
 			m.currentL1 = eth.BlockRef{Number: 1, Hash: common.HexToHash("0xL1")}
+			localSafe := eth.L2BlockRef{Number: 110, Time: 110, Hash: common.BigToHash(big.NewInt(110))}
 			m.syncStatusFull = &eth.SyncStatus{
 				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
-				UnsafeL2:    eth.L2BlockRef{Number: 110, Time: 110},
-				SafeL2:      eth.L2BlockRef{Number: 110, Time: 110},
-				LocalSafeL2: eth.L2BlockRef{Number: 110, Time: 110},
+				UnsafeL2:    localSafe,
+				SafeL2:      localSafe,
+				LocalSafeL2: localSafe,
 			}
-			m.syncStatusOverride = func() (*eth.SyncStatus, error) {
-				n := syncStatusCalls.Add(1)
+			m.firstSafeOverride = func(context.Context) (eth.BlockID, eth.BlockID, error) {
+				n := firstSafeCalls.Add(1)
 				if n <= failUntil {
-					return nil, errors.New("sync status not ready")
+					return eth.BlockID{}, eth.BlockID{}, errors.New("safedb not ready")
 				}
-				return m.syncStatusFull, nil
+				return eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}, localSafe.ID(), nil
 			}
 		}).
 		Build()
@@ -142,8 +143,8 @@ func TestLogBackfill_RetriesWhenSyncStatusNotReady(t *testing.T) {
 		return h.interop.backfillEndTimestamp > 0
 	}, 5*time.Second, 20*time.Millisecond, "backfill should eventually succeed after retries")
 
-	require.GreaterOrEqual(t, syncStatusCalls.Load(), failUntil,
-		"sync status should have been called at least %d times (the failing ones)", failUntil)
+	require.GreaterOrEqual(t, firstSafeCalls.Load(), failUntil,
+		"first SafeDB entry should have been called at least %d times (the failing ones)", failUntil)
 	require.Equal(t, uint64(110), h.interop.backfillEndTimestamp)
 	requireFirstVerifiableTimestamp(t, h.interop, 111)
 	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
@@ -266,23 +267,23 @@ func TestLogBackfill_RetriesStopOnContextCancel(t *testing.T) {
 }
 
 // TestLogBackfill_AsymmetricMultiChain asserts that every chain is backfilled
-// over the same [T_lo, newestLocalSafeTime] window. This keeps the system
-// symmetric at startup and chooses a handoff above every chain's local-safe
-// progress instead of anchoring to an execution-layer finalized label.
+// over the same [T_lo, newestFirstSafeDBTime] window. This keeps the system
+// symmetric at startup and chooses a handoff above every chain's first SafeDB
+// entry instead of anchoring to an execution-layer finalized label.
 //
-//   - T_lo is derived from max(local-safe time) across chains.
-//   - End of backfill for every chain is TimestampToBlockNumber(newestLocalSafeTime).
-//   - backfillEndTimestamp is set to newestLocalSafeTime; the main loop
+//   - T_lo is derived from max(first SafeDB timestamp) across chains.
+//   - End of backfill for every chain is TimestampToBlockNumber(newestFirstSafeDBTime).
+//   - backfillEndTimestamp is set to newestFirstSafeDBTime; the main loop
 //     resumes at backfillEndTimestamp+1.
 func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 	const act = uint64(50)
-	depth := 10 * time.Second // newest local safe 130 -> T_lo 120
+	depth := 10 * time.Second // newest first SafeDB timestamp 130 -> T_lo 120
 
-	// Chain 10: local safe at 120.
-	// Chain 20: local safe at 130 (the newest, pinning T_lo).
-	// Chain 30: local safe at 110.
+	// Chain 10: first SafeDB entry at 120.
+	// Chain 20: first SafeDB entry at 130 (the newest, pinning T_lo).
+	// Chain 30: first SafeDB entry at 110.
 	// Every chain backfills 120..130 (the shared shape), so each seals 11
-	// blocks regardless of each chain's local-safe timestamp.
+	// blocks regardless of each chain's first SafeDB timestamp.
 	h := newInteropTestHarness(t).
 		WithActivation(act).
 		WithLogBackfillDepth(depth).
@@ -339,7 +340,7 @@ func TestLogBackfill_AsymmetricMultiChain(t *testing.T) {
 	h.interop.backfillEndTimestamp = end
 	require.Equal(t, act, h.interop.activationTimestamp, "protocol activation must not change")
 	require.Equal(t, uint64(130), end,
-		"runLogBackfill must return newestLocalSafeTime as the end of the sealed range")
+		"runLogBackfill must return newestFirstSafeDBTime as the end of the sealed range")
 	requireFirstVerifiableTimestamp(t, h.interop, 131,
 		"main loop resumes at backfillEndTimestamp+1")
 
@@ -404,6 +405,9 @@ func TestLogBackfill_MisalignedActivation(t *testing.T) {
 			m.blockTimeOverride = blockTime
 			m.blockInfoTimeFn = blockNumToTime
 			m.timestampToBlockNumberOverride = tsToBlockNum
+			m.blockNumberToTimestampOverride = func(ctx context.Context, num uint64) (uint64, error) {
+				return blockNumToTime(num), nil
+			}
 			m.syncStatusFull = &eth.SyncStatus{
 				CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
 				UnsafeL2:    eth.L2BlockRef{Number: localSafeNum, Time: localSafeTs},
@@ -520,6 +524,9 @@ func TestLogBackfill_NoOpWhenDepthZero(t *testing.T) {
 		WithChain(10, func(m *mockChainContainer) {
 			m.elFinalizedHead = eth.L2BlockRef{Number: 110, Time: 110}
 			m.elFinalizedHeadSet = true
+			m.firstSafeHeadSet = true
+			m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+			m.firstSafeL2 = eth.BlockID{Number: 110, Hash: common.BigToHash(big.NewInt(110))}
 			m.syncStatusOverride = func() (*eth.SyncStatus, error) {
 				syncStatusCalls.Add(1)
 				return &eth.SyncStatus{
@@ -711,11 +718,15 @@ func TestLogBackfill_ClampsStartToGenesis(t *testing.T) {
 				WithChain(10, func(m *mockChainContainer) {
 					m.elFinalizedHead = eth.L2BlockRef{Number: tc.localSafeTip, Time: tc.localSafeTip}
 					m.elFinalizedHeadSet = true
+					firstSafeNum := tc.wantEndBlock
+					m.firstSafeHeadSet = true
+					m.firstSafeL1 = eth.BlockID{Number: 1, Hash: common.HexToHash("0xL1")}
+					m.firstSafeL2 = eth.BlockID{Number: firstSafeNum, Hash: common.BigToHash(new(big.Int).SetUint64(firstSafeNum))}
 					m.syncStatusFull = &eth.SyncStatus{
 						CurrentL1:   eth.L1BlockRef{Number: 1, Hash: common.HexToHash("0xL1")},
-						UnsafeL2:    eth.L2BlockRef{Number: tc.localSafeTip, Time: tc.localSafeTip},
-						SafeL2:      eth.L2BlockRef{Number: tc.localSafeTip, Time: tc.localSafeTip},
-						LocalSafeL2: eth.L2BlockRef{Number: tc.localSafeTip, Time: tc.localSafeTip},
+						UnsafeL2:    eth.L2BlockRef{Number: firstSafeNum, Time: tc.localSafeTip},
+						SafeL2:      eth.L2BlockRef{Number: firstSafeNum, Time: tc.localSafeTip},
+						LocalSafeL2: eth.L2BlockRef{Number: firstSafeNum, Time: tc.localSafeTip},
 					}
 					m.blockNumberToTimestampOverride = tc.blockNumberToTimestamp
 					if tc.timestampToBlockNum != nil {
@@ -855,7 +866,7 @@ func TestLogBackfill_UsesVerifiedDBWhenAheadOfELFinalized(t *testing.T) {
 // seal loop then no-ops because startNum (latest+1) > endNum.
 //
 // Setup: cold start (empty verifiedDB), act=100, depth=60s,
-// local safe=120 -> endTime=120. Pre-seal blocks 100..120 with canonical
+// first SafeDB entry=120 -> endTime=120. Pre-seal blocks 100..120 with canonical
 // hashes for chain 10. After backfill the logsDB tip must still be 120.
 func TestLogBackfill_LeavesAheadLogsDBUnchanged(t *testing.T) {
 	const (
@@ -896,7 +907,7 @@ func TestLogBackfill_LeavesAheadLogsDBUnchanged(t *testing.T) {
 	end, err := h.interop.runLogBackfill()
 	require.NoError(t, err)
 	require.Equal(t, preSeedTip, end,
-		"backfill end must equal newest local safe time")
+		"backfill end must equal newest first SafeDB timestamp")
 
 	latest, has := db.LatestSealedBlock()
 	require.True(t, has)
@@ -912,7 +923,7 @@ func TestLogBackfill_LeavesAheadLogsDBUnchanged(t *testing.T) {
 // while supernode was offline). reconcileLogsDBTail must walk back to the
 // last canonical block, after which backfill seals forward up to endTime.
 //
-// Setup: cold start, act=100, depth=60s, local safe=120 → endTime=120.
+// Setup: cold start, act=100, depth=60s, first SafeDB entry=120 -> endTime=120.
 // Pre-seal blocks 100..108 with canonical hashes, then 109..120 with a v1
 // fork hash. Expect reconcile to rewind to 108, and the seal loop to seal
 // 109..120 with canonical hashes. Final tip is endTime (120).
@@ -966,7 +977,7 @@ func TestLogBackfill_TrimsNonCanonicalAheadLogsDBAndCatchesUp(t *testing.T) {
 	end, err := h.interop.runLogBackfill()
 	require.NoError(t, err)
 	require.Equal(t, preSeedTip, end,
-		"backfill end must equal newest local safe time")
+		"backfill end must equal newest first SafeDB timestamp")
 
 	latest, has := db.LatestSealedBlock()
 	require.True(t, has)

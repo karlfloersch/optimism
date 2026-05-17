@@ -474,6 +474,14 @@ func (c *simpleChainContainer) SyncStatus(ctx context.Context) (*eth.SyncStatus,
 	return st, nil
 }
 
+func (c *simpleChainContainer) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
+	vn := c.getVN()
+	if vn == nil {
+		return eth.BlockID{}, eth.BlockID{}, virtual_node.ErrVirtualNodeNotRunning
+	}
+	return vn.FirstSafeHead(ctx)
+}
+
 func (c *simpleChainContainer) OutputRootAtL2BlockHash(ctx context.Context, blockHash common.Hash) (eth.Bytes32, error) {
 	if c.engine == nil {
 		return eth.Bytes32{}, engine_controller.ErrNoEngineClient

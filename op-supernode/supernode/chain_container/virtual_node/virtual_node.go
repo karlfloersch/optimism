@@ -40,6 +40,7 @@ type VirtualNode interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 
+	FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error)
 	SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (eth.BlockID, eth.BlockID, error)
 	// L1AtSafeHead returns the earliest L1 block at which the given L2 block became safe.
 	L1AtSafeHead(ctx context.Context, target eth.BlockID) (eth.BlockID, error)
@@ -195,6 +196,21 @@ func (v *simpleVirtualNode) State() VNState {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.state
+}
+
+// FirstSafeHead returns the earliest recorded SafeDB mapping.
+func (v *simpleVirtualNode) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
+	v.mu.Lock()
+	inner := v.inner
+	v.mu.Unlock()
+	if inner == nil {
+		return eth.BlockID{}, eth.BlockID{}, ErrVirtualNodeNotRunning
+	}
+	db := inner.SafeDB()
+	if db == nil {
+		return eth.BlockID{}, eth.BlockID{}, ErrVirtualNodeNotRunning
+	}
+	return db.FirstSafeHead(ctx)
 }
 
 // SafeHeadAtL1 returns the recorded mapping of L1 block -> L2 safe head at or before the given L1 block number.

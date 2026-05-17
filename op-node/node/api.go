@@ -43,6 +43,7 @@ type driverClient interface {
 }
 
 type SafeDBReader interface {
+	FirstSafeHead(ctx context.Context) (l1 eth.BlockID, l2 eth.BlockID, err error)
 	SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (l1 eth.BlockID, l2 eth.BlockID, err error)
 }
 

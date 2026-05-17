@@ -344,6 +344,9 @@ func (m *mockVNForInvalidation) LatestSafe(ctx context.Context) (eth.BlockID, er
 func (m *mockVNForInvalidation) SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (eth.BlockID, eth.BlockID, error) {
 	return eth.BlockID{}, eth.BlockID{}, nil
 }
+func (m *mockVNForInvalidation) FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error) {
+	return eth.BlockID{}, eth.BlockID{}, nil
+}
 func (m *mockVNForInvalidation) L1AtSafeHead(ctx context.Context, target eth.BlockID) (eth.BlockID, error) {
 	return eth.BlockID{}, nil
 }
