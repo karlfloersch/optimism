@@ -101,20 +101,17 @@ func (s *Superroot) atTimestamp(ctx context.Context, timestamp uint64) (eth.Supe
 			response.CurrentL1 = verifierL1
 		}
 		return response, nil
-	case errors.Is(vrErr, interop.ErrInteropDisabled), errors.Is(vrErr, interop.ErrNotStarted):
+	case errors.Is(vrErr, interop.ErrInteropDisabled), errors.Is(vrErr, interop.ErrNotStarted),
+		errors.Is(vrErr, interop.ErrNotActive), errors.Is(vrErr, interop.ErrBeforeVerifiedDB):
 		optimisticBranch, err := s.buildOptimisticBranch(ctx, timestamp)
 		if err != nil {
 			return eth.SuperRootAtTimestampResponse{}, fmt.Errorf("build optimistic branch at %d: %w", timestamp, err)
 		}
 		response.OptimisticAtTimestamp = optimisticBranch
-		// Optimistic outputs are canonical: interop is disabled, or the verifier
-		// has not started yet and the caller is on the pre-start retry path.
+		// Optimistic outputs are canonical before verifier coverage, or when the
+		// verifier is unavailable for this timestamp. Preserve historical superroot
+		// queries independently of the interop verifiedDB backfill boundary.
 		response.Data = composeHandoffDataFromOptimistic(timestamp, s.chains, optimisticBranch)
-		return response, nil
-	case errors.Is(vrErr, interop.ErrNotActive), errors.Is(vrErr, interop.ErrBeforeVerifiedDB):
-		// Be pessimistic for historical timestamps outside the verifier's local
-		// coverage. Building an optimistic branch here may require SafeDB history
-		// that this node does not have.
 		return response, nil
 	default:
 		return eth.SuperRootAtTimestampResponse{}, fmt.Errorf("read verifiedDB at %d: %w", timestamp, vrErr)

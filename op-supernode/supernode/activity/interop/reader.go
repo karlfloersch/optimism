@@ -26,8 +26,9 @@ var ErrNotStarted = errors.New("interop activity not started")
 // activities. Errors discriminate the regime:
 //   - nil:                  verified entry returned
 //   - ErrInteropDisabled:   interop not configured; compose from optimistic outputs
-//   - ErrNotActive:         pre-activation; do not query interop superroots
-//   - ErrBeforeVerifiedDB:  post-activation but below firstVerifiable
+//   - ErrNotActive:         pre-activation; compose from optimistic outputs
+//   - ErrBeforeVerifiedDB:  post-activation but below firstVerifiable; compose
+//     from optimistic outputs
 //   - ethereum.NotFound:    verifier may eventually produce a result but has
 //     not yet — return Data = nil and let CurrentL1 communicate progress
 //

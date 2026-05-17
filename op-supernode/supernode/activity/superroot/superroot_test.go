@@ -558,8 +558,8 @@ func TestSuperroot_AtTimestamp_PreInteropFallback_BelowActivation(t *testing.T) 
 	s := newSuperroot(chains, reader)
 	resp, err := (&superrootAPI{s: s}).AtTimestamp(context.Background(), 123)
 	require.NoError(t, err)
-	require.Nil(t, resp.Data)
-	require.Empty(t, resp.OptimisticAtTimestamp)
+	require.NotNil(t, resp.Data)
+	require.Contains(t, resp.OptimisticAtTimestamp, chainA)
 }
 
 func TestSuperroot_AtTimestamp_PreInteropFallback_NoSecondFetch(t *testing.T) {
@@ -602,12 +602,14 @@ func TestSuperroot_AtTimestamp_InteropNotStarted_ComposesFromOptimistic(t *testi
 
 // ------ Below-verified-db handoff tests ------
 
-// Below firstVerifiable, this node may not have SafeDB provenance for the
-// requested timestamp. The RPC response is deliberately pessimistic.
-func TestSuperroot_AtTimestamp_BelowVerifiedDB_ReturnsNoData(t *testing.T) {
+// Below firstVerifiable, preserve the historical optimistic superroot path.
+// The verifier's backfill boundary is separate from whether the EL can still
+// serve historical output roots and SafeDB provenance for the requested time.
+func TestSuperroot_AtTimestamp_BelowVerifiedDB_ComposesFromOptimistic(t *testing.T) {
 	t.Parallel()
+	chainA := eth.ChainIDFromUInt64(10)
 	chains := map[eth.ChainID]cc.ChainContainer{
-		eth.ChainIDFromUInt64(10): &mockCC{
+		chainA: &mockCC{
 			optL2:     eth.BlockID{Number: 100, Hash: common.HexToHash("0x01")},
 			optL1:     eth.BlockID{Number: 900},
 			optOutput: &eth.OutputV0{StateRoot: eth.Bytes32{0x01}},
@@ -618,8 +620,8 @@ func TestSuperroot_AtTimestamp_BelowVerifiedDB_ReturnsNoData(t *testing.T) {
 	s := newSuperroot(chains, reader)
 	resp, err := (&superrootAPI{s: s}).AtTimestamp(context.Background(), 123)
 	require.NoError(t, err)
-	require.Nil(t, resp.Data)
-	require.Empty(t, resp.OptimisticAtTimestamp)
+	require.NotNil(t, resp.Data)
+	require.Contains(t, resp.OptimisticAtTimestamp, chainA)
 }
 
 // assertErr returns a generic error instance used to signal mock failures.
