@@ -143,10 +143,9 @@ type Interop struct {
 	chains              map[eth.ChainID]cc.InteropChain
 	activationTimestamp uint64 // immutable protocol activation timestamp
 
-	// backfillEndTimestamp represents the end of the range of timestamps that were sealed by runLogBackfill.
-	// this is used for loop handoff from log backfill to main processing.
-	// firstVerifiableTimestamp is used to determine the start of the main processing loop, which is backfillEndTimestamp + 1
-	// after backfill, or the latched SafeDB startup handoff when backfill was not used.
+	// backfillEndTimestamp is the inclusive end of the cold-start log range
+	// sealed before normal verification starts. It is only set when verifiedDB
+	// is empty and SafeDB coverage begins after activation.
 	backfillEndTimestamp uint64
 	firstVerifiableSet   bool
 	firstVerifiable      uint64
@@ -198,11 +197,10 @@ func (i *Interop) Name() string {
 	return "interop"
 }
 
-// firstVerifiableTimestamp is the earliest timestamp the main loop will attempt
-// to verify. If verification has already committed results, the first committed
-// timestamp is the durable handoff boundary. Otherwise it is backfillEndTimestamp+1
-// after log backfill, or — on cold start with no committed results and no
-// backfill range — the latched SafeDB startup handoff.
+// firstVerifiableTimestamp is the earliest timestamp covered by this node's
+// verifier state. With an initialized verifiedDB this is the first committed
+// timestamp. On cold start it is the post-activation handoff chosen by startup
+// backfill, or activation if no backfill range is needed.
 func (i *Interop) firstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if i.verifiedDB != nil {
 		if first, initialized := i.verifiedDB.FirstTimestamp(); initialized {
@@ -292,7 +290,7 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.started = true
 	i.mu.Unlock()
 
-	if i.logBackfillDepth > 0 {
+	if i.shouldRunStartupLogBackfill() {
 		i.log.Info("interop log backfill depth configured", "duration", i.logBackfillDepth.String())
 		for {
 			i.backfillAttempts.Add(1)

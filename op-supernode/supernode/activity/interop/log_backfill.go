@@ -9,24 +9,26 @@ import (
 	cc "github.com/ethereum-optimism/optimism/op-supernode/supernode/chain_container"
 )
 
-// resolveFirstVerifiableTimestamp returns the first timestamp not yet covered
-// by durable local state: verifiedDB.LastTimestamp+1 when initialized,
-// otherwise a latched cold-start handoff derived from the first timestamp after
-// the earliest SafeDB coverage available across all chains (clamped to
-// activation). Starting after the first SafeDB entry leaves the entry itself
-// available as the frontier block when persisting the first verified timestamp.
+// resolveFirstVerifiableTimestamp returns the next timestamp that normal
+// interop verification should process.
+//
+// Startup has three cases:
+//   - with an initialized verifiedDB, resume at LastTimestamp+1;
+//   - with no post-activation SafeDB gap, begin at activation;
+//   - with an empty verifiedDB and post-activation SafeDB coverage, latch a
+//     cold-start handoff from the first SafeDB-covered timestamp across all
+//     chains.
+//
+// Starting after the first SafeDB entry leaves the entry itself available as
+// the frontier block when persisting the first verified timestamp.
 func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, error) {
-	if len(i.chains) == 0 {
-		return i.activationTimestamp, nil
+	if lastTS, initialized := i.verifiedDBLastTimestamp(); initialized {
+		return lastTS + 1, nil
 	}
-	if i.verifiedDB != nil {
-		if lastTS, initialized := i.verifiedDB.LastTimestamp(); initialized {
-			return lastTS + 1, nil
-		}
+	if len(i.chains) == 0 || i.firstVerifiableSet {
+		return max(i.activationTimestamp, i.firstVerifiable), nil
 	}
-	if i.firstVerifiableSet {
-		return i.firstVerifiable, nil
-	}
+
 	firstSafeDBTime, err := i.firstSafeDBCoveredTime(ctx)
 	if err != nil {
 		return 0, err
@@ -69,21 +71,32 @@ func (i *Interop) firstSafeDBCoveredTime(ctx context.Context) (uint64, error) {
 	return firstSafeDBTime, nil
 }
 
-func (i *Interop) runLogBackfill() (uint64, error) {
-	if i.logBackfillDepth <= 0 {
-		return 0, nil
+// shouldRunStartupLogBackfill keeps log backfill on the cold-start path only.
+// If verifiedDB already has results, normal verification resumes from
+// LastTimestamp+1 and the log backfill phase is skipped.
+func (i *Interop) shouldRunStartupLogBackfill() bool {
+	if i.logBackfillDepth <= 0 || len(i.chains) == 0 {
+		return false
 	}
-	if len(i.chains) == 0 {
+	_, initialized := i.verifiedDBLastTimestamp()
+	return !initialized
+}
+
+func (i *Interop) verifiedDBLastTimestamp() (uint64, bool) {
+	if i.verifiedDB == nil {
+		return 0, false
+	}
+	return i.verifiedDB.LastTimestamp()
+}
+
+func (i *Interop) runLogBackfill() (uint64, error) {
+	if !i.shouldRunStartupLogBackfill() {
 		return 0, nil
 	}
 
-	firstVerifiable := i.firstVerifiable
-	if !i.firstVerifiableSet {
-		var err error
-		firstVerifiable, err = i.readyFirstVerifiableTimestamp(i.ctx)
-		if err != nil {
-			return 0, err
-		}
+	firstVerifiable, err := i.readyFirstVerifiableTimestamp(i.ctx)
+	if err != nil {
+		return 0, err
 	}
 	if firstVerifiable == i.activationTimestamp {
 		return 0, nil

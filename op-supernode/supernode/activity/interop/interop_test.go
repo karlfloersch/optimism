@@ -186,12 +186,13 @@ func TestInteropActivationTimestampFlagEnvVar(t *testing.T) {
 }
 
 /*
-Spec: firstVerifiableTimestamp is the common interop startup readiness gate.
+Spec: firstVerifiableTimestamp is the common cold-start readiness gate.
 
-  - If verifiedDB is initialized, it returns the first committed timestamp.
+  - If verifiedDB is initialized, verifier state already exists and this returns
+    the first committed timestamp.
   - It returns an error while SafeDB coverage is unavailable.
   - Once ready, it returns activation when there are no chains, or the newest
-    first-SafeDB-covered timestamp across chains otherwise.
+    first-SafeDB-covered timestamp plus one across chains otherwise.
   - The no-backfill startup path uses that same timestamp for its first
     verification attempt.
 */
@@ -421,9 +422,9 @@ func TestStartWithoutBackfillUsesFirstVerifiableTimestamp(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
-// Warm restart with no backfill must resume from verifiedDB without consulting
-// EL finalized.
-func TestStartWithoutBackfillResumesFromVerifiedDBIgnoringELFinalized(t *testing.T) {
+// Warm restart must resume from verifiedDB without consulting EL finalized or
+// running startup backfill, even when backfill is configured.
+func TestStartWithVerifiedDBResumesWithoutBackfillOrELFinalized(t *testing.T) {
 	const (
 		activation   uint64 = 100
 		lastVerified uint64 = 195
@@ -432,6 +433,7 @@ func TestStartWithoutBackfillResumesFromVerifiedDBIgnoringELFinalized(t *testing
 	var elFinalizedCalls atomic.Int32
 	h := newInteropTestHarness(t).
 		WithActivation(activation).
+		WithLogBackfillDepth(60*time.Second).
 		WithChain(10, func(m *mockChainContainer) {
 			m.elFinalizedHeadOverride = func() (eth.L2BlockRef, error) {
 				elFinalizedCalls.Add(1)
@@ -475,6 +477,8 @@ func TestStartWithoutBackfillResumesFromVerifiedDBIgnoringELFinalized(t *testing
 	}
 
 	require.ErrorIs(t, <-done, context.Canceled)
+	require.Zero(t, h.interop.BackfillAttempts(),
+		"warm-restart startup must not run log backfill when verifiedDB is initialized")
 	require.Zero(t, elFinalizedCalls.Load(),
 		"warm-restart startup must not consult EL finalized when verifiedDB is initialized")
 }

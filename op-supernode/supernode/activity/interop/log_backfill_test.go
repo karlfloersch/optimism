@@ -763,12 +763,12 @@ func TestLogBackfill_ClampsStartToGenesis(t *testing.T) {
 	}
 }
 
-// TestLogBackfill_UsesVerifiedDBWhenInitializedAndSyncStatusStale simulates startup while
-// StatusTracker still reports a stale SafeL2 block and local-safe has moved
-// beyond the persisted EL-finalized label. With an initialized verifiedDB,
-// backfill should cap at verifiedDB.LastTimestamp instead of sampling moving
-// SyncStatus state or extending past verifiedDB.
-func TestLogBackfill_UsesVerifiedDBWhenInitializedAndSyncStatusStale(t *testing.T) {
+// TestLogBackfill_SkipsWhenVerifiedDBInitializedAndSyncStatusStale simulates
+// startup while StatusTracker still reports a stale SafeL2 block and local-safe
+// has moved beyond the persisted EL-finalized label. With an initialized
+// verifiedDB, startup should resume from verifiedDB.LastTimestamp+1 and skip
+// log backfill entirely.
+func TestLogBackfill_SkipsWhenVerifiedDBInitializedAndSyncStatusStale(t *testing.T) {
 	const (
 		act           uint64 = 100
 		staleCross    uint64 = 100
@@ -805,19 +805,21 @@ func TestLogBackfill_UsesVerifiedDBWhenInitializedAndSyncStatusStale(t *testing.
 
 	end, err := h.interop.runLogBackfill()
 	require.NoError(t, err)
-	h.interop.backfillEndTimestamp = end
 
-	require.Equal(t, lastVerified, end,
-		"backfill must derive endTime from verifiedDB.LastTimestamp when verifiedDB is initialized")
+	require.Equal(t, uint64(0), end,
+		"startup backfill must be skipped when verifiedDB is initialized")
 
 	latest, has := h.interop.logsDBs[chain10.id].LatestSealedBlock()
-	require.True(t, has)
-	require.Equal(t, lastVerified, latest.Number)
+	require.False(t, has)
+	require.Equal(t, eth.BlockID{}, latest)
+	next, err := h.interop.resolveFirstVerifiableTimestamp(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, lastVerified+1, next)
 }
 
 // verifiedDB.LastTimestamp may exceed the local node's persisted EL-finalized
-// label; backfill must still resume from verifiedDB.
-func TestLogBackfill_UsesVerifiedDBWhenAheadOfELFinalized(t *testing.T) {
+// label; startup must still resume from verifiedDB without running backfill.
+func TestLogBackfill_SkipsWhenVerifiedDBAheadOfELFinalized(t *testing.T) {
 	const (
 		act          uint64 = 100
 		elFinalized  uint64 = 190
@@ -851,12 +853,15 @@ func TestLogBackfill_UsesVerifiedDBWhenAheadOfELFinalized(t *testing.T) {
 
 	end, err := h.interop.runLogBackfill()
 	require.NoError(t, err)
-	require.Equal(t, lastVerified, end,
-		"backfill end derives from verifiedDB.LastTimestamp regardless of startup handoff state")
+	require.Equal(t, uint64(0), end,
+		"startup backfill must be skipped when verifiedDB is initialized")
 
 	latest, has := h.interop.logsDBs[chain10.id].LatestSealedBlock()
-	require.True(t, has)
-	require.Equal(t, lastVerified, latest.Number)
+	require.False(t, has)
+	require.Equal(t, eth.BlockID{}, latest)
+	next, err := h.interop.resolveFirstVerifiableTimestamp(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, lastVerified+1, next)
 }
 
 // TestLogBackfill_LeavesAheadLogsDBUnchanged asserts that when a chain's
