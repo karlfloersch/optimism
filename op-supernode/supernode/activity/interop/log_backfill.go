@@ -14,10 +14,11 @@ import (
 //
 // Startup has three cases:
 //   - with an initialized verifiedDB, resume at LastTimestamp+1;
-//   - with no post-activation SafeDB gap, begin at activation;
-//   - with an empty verifiedDB and post-activation SafeDB coverage, latch a
-//     cold-start handoff from the first SafeDB-covered timestamp across all
-//     chains.
+//   - with an empty verifiedDB and SafeDB coverage before activation, begin
+//     at activation;
+//   - with an empty verifiedDB and SafeDB coverage after activation, latch a
+//     cold-start handoff from the newest first SafeDB-covered timestamp across
+//     all chains.
 //
 // Starting after the first SafeDB entry leaves the entry itself available as
 // the frontier block when persisting the first verified timestamp.
@@ -25,17 +26,20 @@ func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, 
 	if lastTS, initialized := i.verifiedDBLastTimestamp(); initialized {
 		return lastTS + 1, nil
 	}
-	if len(i.chains) == 0 || i.firstVerifiableSet {
-		return max(i.activationTimestamp, i.firstVerifiable), nil
+	if i.firstVerifiableSet {
+		return i.firstVerifiable, nil
+	}
+	if len(i.chains) == 0 {
+		return i.activationTimestamp, nil
 	}
 
-	firstSafeDBTime, err := i.firstSafeDBCoveredTime(ctx)
+	safeDBHandoffTime, err := i.safeDBHandoffTimestamp(ctx)
 	if err != nil {
 		return 0, err
 	}
 	first := i.activationTimestamp
-	if firstSafeDBTime >= i.activationTimestamp {
-		first = firstSafeDBTime + 1
+	if safeDBHandoffTime >= i.activationTimestamp {
+		first = safeDBHandoffTime + 1
 	}
 	i.firstVerifiable = first
 	i.firstVerifiableSet = true
@@ -46,8 +50,11 @@ type firstSafeHeadReader interface {
 	FirstSafeHead(ctx context.Context) (eth.BlockID, eth.BlockID, error)
 }
 
-func (i *Interop) firstSafeDBCoveredTime(ctx context.Context) (uint64, error) {
-	firstSafeDBTime := uint64(0)
+// safeDBHandoffTimestamp returns the newest first SafeDB-covered timestamp
+// across all chains. Starting verification after this timestamp guarantees that
+// every chain has at least one SafeDB-backed frontier block.
+func (i *Interop) safeDBHandoffTimestamp(ctx context.Context) (uint64, error) {
+	handoffTime := uint64(0)
 	for _, chain := range i.chains {
 		reader, ok := chain.(firstSafeHeadReader)
 		if !ok {
@@ -66,9 +73,9 @@ func (i *Interop) firstSafeDBCoveredTime(ctx context.Context) (uint64, error) {
 		}
 		i.log.Debug("first verifiable timestamp: SafeDB handoff",
 			"chain", chain.ID(), "l1", l1, "l2", l2, "timestamp", ts)
-		firstSafeDBTime = max(firstSafeDBTime, ts)
+		handoffTime = max(handoffTime, ts)
 	}
-	return firstSafeDBTime, nil
+	return handoffTime, nil
 }
 
 // shouldRunStartupLogBackfill keeps log backfill on the cold-start path only.
@@ -98,22 +105,11 @@ func (i *Interop) runLogBackfill() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if firstVerifiable == i.activationTimestamp {
+	startTime, endTime, ok := i.logBackfillTimeRange(firstVerifiable)
+	if !ok {
 		return 0, nil
 	}
-	endTime := firstVerifiable - 1
 
-	// naively, end minus depth is the ideal backfill start.
-	// guard the subtraction so a young handoff timestamp doesn't wrap.
-	depthSec := uint64(i.logBackfillDepth.Seconds())
-	var idealStart uint64
-	if endTime >= depthSec {
-		idealStart = endTime - depthSec
-	}
-	// clamp to the activation timestamp: never backfill before activation.
-	startTime := max(idealStart, i.activationTimestamp)
-
-	// backfill every chain in parallel over [startTime, endTime]
 	errCh := make(chan error, len(i.chains))
 	wg := sync.WaitGroup{}
 	wg.Add(len(i.chains))
@@ -129,7 +125,7 @@ func (i *Interop) runLogBackfill() (uint64, error) {
 			}
 			startNum, err := chain.TimestampToBlockNumber(i.ctx, chainStartTime)
 			if err != nil {
-				errCh <- fmt.Errorf("chain %s: timestamp to block number for start %d: %w", chain.ID(), startTime, err)
+				errCh <- fmt.Errorf("chain %s: timestamp to block number for start %d: %w", chain.ID(), chainStartTime, err)
 				i.log.Error("log backfill: timestamp to block number for start", "chain", chain.ID(), "err", err)
 				return
 			}
@@ -155,6 +151,21 @@ func (i *Interop) runLogBackfill() (uint64, error) {
 	return endTime, nil
 }
 
+// logBackfillTimeRange returns the inclusive timestamp range to seal before
+// normal verification starts.
+func (i *Interop) logBackfillTimeRange(firstVerifiable uint64) (startTime, endTime uint64, ok bool) {
+	if firstVerifiable <= i.activationTimestamp {
+		return 0, 0, false
+	}
+	endTime = firstVerifiable - 1
+	depthSec := uint64(i.logBackfillDepth.Seconds())
+	if endTime >= depthSec {
+		startTime = endTime - depthSec
+	}
+	startTime = max(startTime, i.activationTimestamp)
+	return startTime, endTime, true
+}
+
 func (i *Interop) backfillChain(ctx context.Context, cid eth.ChainID, chain cc.ChainContainer, startNum, endNum uint64) error {
 	db := i.logsDBs[cid]
 	// This is a startup best-effort repair for pre-existing logsDB reorg drift,
@@ -168,6 +179,9 @@ func (i *Interop) backfillChain(ctx context.Context, cid eth.ChainID, chain cc.C
 	}
 	if latest, has := db.LatestSealedBlock(); has {
 		startNum = latest.Number + 1
+	}
+	if startNum > endNum {
+		return nil
 	}
 	totalBlocks := endNum - startNum + 1
 	for num := startNum; num <= endNum; num++ {

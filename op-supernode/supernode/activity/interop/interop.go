@@ -290,66 +290,12 @@ func (i *Interop) Start(ctx context.Context) error {
 	i.started = true
 	i.mu.Unlock()
 
-	if i.shouldRunStartupLogBackfill() {
-		i.log.Info("interop log backfill depth configured", "duration", i.logBackfillDepth.String())
-		for {
-			i.backfillAttempts.Add(1)
-			end, err := i.runLogBackfill()
-			if err == nil {
-				i.backfillEndTimestamp = end
-				break
-			}
-			if errors.Is(err, cc.ErrHistoryUnavailable) {
-				i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
-					"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
-				return fmt.Errorf("interop halted due to unavailable history: %w", err)
-			}
-			i.log.Warn("log backfill failed, retrying (startup handoff or chain data may not be ready yet)", "err", err)
-			for cid := range i.chains {
-				i.metrics.LogBackfillRetries.WithLabelValues(cid.String()).Inc()
-			}
-			select {
-			case <-i.ctx.Done():
-				return fmt.Errorf("log backfill interrupted: %w", i.ctx.Err())
-			case <-time.After(errorBackoffPeriod):
-			}
-		}
+	if err := i.runStartupLogBackfill(); err != nil {
+		return err
 	}
-	i.backfillCompleted.Store(true)
-	i.log.Info("log backfill complete", "backfillEndTimestamp", i.backfillEndTimestamp)
-
-	firstVerifiableLog := uint64(0)
-	if i.backfillEndTimestamp != 0 {
-		firstVerifiableLog = i.backfillEndTimestamp + 1
-		if firstVerifiableLog < i.activationTimestamp {
-			firstVerifiableLog = i.activationTimestamp
-		}
-	} else if lastTS, initialized := i.verifiedDB.LastTimestamp(); initialized {
-		// Resume from the last commit to keep verifiedDB gap-free.
-		firstVerifiableLog = lastTS + 1
-	} else {
-		for {
-			first, err := i.readyFirstVerifiableTimestamp(i.ctx)
-			if err == nil {
-				i.firstVerifiable = first
-				i.firstVerifiableSet = true
-				firstVerifiableLog = first
-				break
-			}
-			// Permanent SafeDB gap must halt normal startup cleanly. Backfill-enabled
-			// startup reaches this path only if backfill had no range to seal.
-			if errors.Is(err, cc.ErrHistoryUnavailable) {
-				i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
-					"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
-				return fmt.Errorf("interop halted due to unavailable history: %w", err)
-			}
-			i.log.Warn("first verifiable timestamp unavailable, retrying (startup handoff or chain data may not be ready yet)", "err", err)
-			select {
-			case <-i.ctx.Done():
-				return fmt.Errorf("first verifiable timestamp interrupted: %w", i.ctx.Err())
-			case <-time.After(errorBackoffPeriod):
-			}
-		}
+	firstVerifiableLog, err := i.startupFirstVerifiableTimestamp()
+	if err != nil {
+		return err
 	}
 	i.log.Info("interop first verifiable timestamp resolved",
 		"activationTimestamp", i.activationTimestamp,
@@ -365,9 +311,7 @@ func (i *Interop) Start(ctx context.Context) error {
 				// Permanent SafeDB gap: log once and halt — retrying cannot fix it.
 				if errors.Is(err, cc.ErrHistoryUnavailable) {
 					i.metrics.ActivityErrors.WithLabelValues("interop", "history_unavailable").Inc()
-					i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
-						"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
-					return fmt.Errorf("interop halted due to unavailable history: %w", err)
+					return i.haltOnUnavailableHistory(err)
 				}
 				i.metrics.ActivityErrors.WithLabelValues("interop", "progress").Inc()
 				i.log.Error("failed to progress and record interop", "err", err)
@@ -381,6 +325,78 @@ func (i *Interop) Start(ctx context.Context) error {
 			// Otherwise: immediately ready for next iteration (aggressive catch-up)
 		}
 	}
+}
+
+// runStartupLogBackfill seals the cold-start log window when the verifier has
+// no committed state yet. Warm restarts skip this phase and resume directly
+// from verifiedDB.
+func (i *Interop) runStartupLogBackfill() error {
+	if !i.shouldRunStartupLogBackfill() {
+		i.backfillCompleted.Store(true)
+		return nil
+	}
+
+	i.log.Info("interop log backfill starting", "duration", i.logBackfillDepth.String())
+	for {
+		i.backfillAttempts.Add(1)
+		end, err := i.runLogBackfill()
+		if err == nil {
+			i.backfillEndTimestamp = end
+			i.backfillCompleted.Store(true)
+			i.log.Info("interop log backfill complete", "backfillEndTimestamp", end)
+			return nil
+		}
+		if errors.Is(err, cc.ErrHistoryUnavailable) {
+			return i.haltOnUnavailableHistory(err)
+		}
+		i.log.Warn("log backfill failed, retrying (startup handoff or chain data may not be ready yet)", "err", err)
+		for cid := range i.chains {
+			i.metrics.LogBackfillRetries.WithLabelValues(cid.String()).Inc()
+		}
+		select {
+		case <-i.ctx.Done():
+			return fmt.Errorf("log backfill interrupted: %w", i.ctx.Err())
+		case <-time.After(errorBackoffPeriod):
+		}
+	}
+}
+
+// startupFirstVerifiableTimestamp returns the first timestamp the main loop
+// should try after startup has completed any required backfill.
+func (i *Interop) startupFirstVerifiableTimestamp() (uint64, error) {
+	if i.backfillEndTimestamp != 0 {
+		return max(i.activationTimestamp, i.backfillEndTimestamp+1), nil
+	}
+	if lastTS, initialized := i.verifiedDBLastTimestamp(); initialized {
+		return lastTS + 1, nil
+	}
+	return i.waitForReadyFirstVerifiableTimestamp()
+}
+
+func (i *Interop) waitForReadyFirstVerifiableTimestamp() (uint64, error) {
+	for {
+		first, err := i.readyFirstVerifiableTimestamp(i.ctx)
+		if err == nil {
+			i.firstVerifiable = first
+			i.firstVerifiableSet = true
+			return first, nil
+		}
+		if errors.Is(err, cc.ErrHistoryUnavailable) {
+			return 0, i.haltOnUnavailableHistory(err)
+		}
+		i.log.Warn("first verifiable timestamp unavailable, retrying (startup handoff or chain data may not be ready yet)", "err", err)
+		select {
+		case <-i.ctx.Done():
+			return 0, fmt.Errorf("first verifiable timestamp interrupted: %w", i.ctx.Err())
+		case <-time.After(errorBackoffPeriod):
+		}
+	}
+}
+
+func (i *Interop) haltOnUnavailableHistory(err error) error {
+	i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
+		"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
+	return fmt.Errorf("interop halted due to unavailable history: %w", err)
 }
 
 // readyFirstVerifiableTimestamp resolves the first timestamp that still needs
