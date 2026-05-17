@@ -115,9 +115,9 @@ var _ cc.ChainContainer = (*mockCC)(nil)
 
 // mockVerifiedReader is a test fake for interop.VerifiedResultReader.
 // Set result to return a VerifiedResult; set err to return an error
-// (ethereum.NotFound for "active but not yet verified", interop.ErrNotActive
-// for pre-interop fallback, interop.ErrBeforeVerifiedDB for the
-// hard-error regime, or any other error for the default branch).
+// (ethereum.NotFound for "active but not yet verified", interop.ErrInteropDisabled
+// for the no-interop fallback, interop.ErrNotActive / interop.ErrBeforeVerifiedDB
+// for pessimistic historical responses, or any other error for the default branch).
 type mockVerifiedReader struct {
 	result    interop.VerifiedResult
 	currentL1 eth.BlockID
@@ -128,7 +128,7 @@ func (m *mockVerifiedReader) VerifiedResultAtTimestamp(ts uint64) (interop.Verif
 	return m.result, m.currentL1, m.err
 }
 
-// preInteropReader always reports the pre-interop fallback regime.
+// preInteropReader always reports the interop-disabled fallback regime.
 func preInteropReader() interop.VerifiedResultReader {
 	return interop.NoopVerifiedResultReader{}
 }
@@ -558,7 +558,8 @@ func TestSuperroot_AtTimestamp_PreInteropFallback_BelowActivation(t *testing.T) 
 	s := newSuperroot(chains, reader)
 	resp, err := (&superrootAPI{s: s}).AtTimestamp(context.Background(), 123)
 	require.NoError(t, err)
-	require.NotNil(t, resp.Data)
+	require.Nil(t, resp.Data)
+	require.Empty(t, resp.OptimisticAtTimestamp)
 }
 
 func TestSuperroot_AtTimestamp_PreInteropFallback_NoSecondFetch(t *testing.T) {
@@ -601,10 +602,9 @@ func TestSuperroot_AtTimestamp_InteropNotStarted_ComposesFromOptimistic(t *testi
 
 // ------ Below-verified-db handoff tests ------
 
-// Below firstVerifiable, the safe-head startup handoff guarantees the
-// optimistic outputs are canonical, so Data is composed from them rather
-// than returning an error.
-func TestSuperroot_AtTimestamp_BelowVerifiedDB_ComposesFromOptimistic(t *testing.T) {
+// Below firstVerifiable, this node may not have SafeDB provenance for the
+// requested timestamp. The RPC response is deliberately pessimistic.
+func TestSuperroot_AtTimestamp_BelowVerifiedDB_ReturnsNoData(t *testing.T) {
 	t.Parallel()
 	chains := map[eth.ChainID]cc.ChainContainer{
 		eth.ChainIDFromUInt64(10): &mockCC{
@@ -618,7 +618,8 @@ func TestSuperroot_AtTimestamp_BelowVerifiedDB_ComposesFromOptimistic(t *testing
 	s := newSuperroot(chains, reader)
 	resp, err := (&superrootAPI{s: s}).AtTimestamp(context.Background(), 123)
 	require.NoError(t, err)
-	require.NotNil(t, resp.Data)
+	require.Nil(t, resp.Data)
+	require.Empty(t, resp.OptimisticAtTimestamp)
 }
 
 // assertErr returns a generic error instance used to signal mock failures.

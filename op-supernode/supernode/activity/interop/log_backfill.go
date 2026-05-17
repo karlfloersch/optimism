@@ -3,7 +3,6 @@ package interop
 import (
 	"context"
 	"fmt"
-	"math"
 	"sync"
 
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -12,7 +11,8 @@ import (
 
 // resolveFirstVerifiableTimestamp returns the first timestamp not yet covered
 // by durable local state: verifiedDB.LastTimestamp+1 when initialized,
-// otherwise the minimum EL finalized head + 1 (clamped to activation).
+// otherwise a latched cold-start handoff derived from the newest local-safe
+// progress across all chains (clamped to activation).
 func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if len(i.chains) == 0 {
 		return i.activationTimestamp, nil
@@ -22,37 +22,41 @@ func (i *Interop) resolveFirstVerifiableTimestamp(ctx context.Context) (uint64, 
 			return lastTS + 1, nil
 		}
 	}
-	minELFinalizedTime, err := i.minELFinalizedTime(ctx)
+	if i.firstVerifiableSet {
+		return i.firstVerifiable, nil
+	}
+	maxLocalSafeTime, err := i.maxLocalSafeTime(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if minELFinalizedTime < i.activationTimestamp {
-		return i.activationTimestamp, nil
+	first := i.activationTimestamp
+	if maxLocalSafeTime >= i.activationTimestamp {
+		first = maxLocalSafeTime + 1
 	}
-	return minELFinalizedTime + 1, nil
+	i.firstVerifiable = first
+	i.firstVerifiableSet = true
+	return first, nil
 }
 
-func (i *Interop) minELFinalizedTime(ctx context.Context) (uint64, error) {
-	if len(i.chains) == 0 {
-		return i.activationTimestamp, nil
-	}
-
-	minELFinalizedTime := uint64(math.MaxUint64)
+func (i *Interop) maxLocalSafeTime(ctx context.Context) (uint64, error) {
+	maxLocalSafeTime := uint64(0)
 	for _, chain := range i.chains {
-		elFinalized, err := chain.ELFinalizedHead(ctx)
+		status, err := chain.SyncStatus(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("chain %s: EL finalized head: %w", chain.ID(), err)
+			return 0, fmt.Errorf("chain %s: sync status: %w", chain.ID(), err)
 		}
-		// Genesis (Number == 0) with a real hash is a legitimate finalized head;
-		// only reject the zero-value response from an EL that isn't ready yet.
-		if elFinalized == (eth.L2BlockRef{}) {
-			return 0, fmt.Errorf("chain %s: EL finalized head not yet available", chain.ID())
+		if status == nil {
+			return 0, fmt.Errorf("chain %s: sync status unavailable", chain.ID())
 		}
-		i.log.Debug("first verifiable timestamp: EL finalized head",
-			"chain", chain.ID(), "elFinalized", elFinalized)
-		minELFinalizedTime = min(minELFinalizedTime, elFinalized.Time)
+		localSafe := status.LocalSafeL2
+		if localSafe == (eth.L2BlockRef{}) {
+			return 0, fmt.Errorf("chain %s: local safe head not yet available", chain.ID())
+		}
+		i.log.Debug("first verifiable timestamp: local safe handoff",
+			"chain", chain.ID(), "localSafe", localSafe)
+		maxLocalSafeTime = max(maxLocalSafeTime, localSafe.Time)
 	}
-	return minELFinalizedTime, nil
+	return maxLocalSafeTime, nil
 }
 
 func (i *Interop) runLogBackfill() (uint64, error) {
@@ -66,7 +70,7 @@ func (i *Interop) runLogBackfill() (uint64, error) {
 	firstVerifiable := i.firstVerifiable
 	if !i.firstVerifiableSet {
 		var err error
-		firstVerifiable, err = i.resolveFirstVerifiableTimestamp(i.ctx)
+		firstVerifiable, err = i.readyFirstVerifiableTimestamp(i.ctx)
 		if err != nil {
 			return 0, err
 		}
@@ -77,7 +81,7 @@ func (i *Interop) runLogBackfill() (uint64, error) {
 	endTime := firstVerifiable - 1
 
 	// naively, end minus depth is the ideal backfill start.
-	// guard the subtraction so a young chain (EL finalized < depth) doesn't wrap.
+	// guard the subtraction so a young handoff timestamp doesn't wrap.
 	depthSec := uint64(i.logBackfillDepth.Seconds())
 	var idealStart uint64
 	if endTime >= depthSec {

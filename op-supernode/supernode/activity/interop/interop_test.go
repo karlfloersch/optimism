@@ -189,9 +189,9 @@ func TestInteropActivationTimestampFlagEnvVar(t *testing.T) {
 Spec: firstVerifiableTimestamp is the common interop startup readiness gate.
 
   - If verifiedDB is initialized, it returns the first committed timestamp.
-  - It returns an error while the EL finalized head is unavailable or unset.
+  - It returns an error while sync status or local-safe progress is unavailable.
   - Once ready, it returns activation when there are no chains, or one past the
-    minimum EL finalized timestamp across chains otherwise.
+    newest local-safe timestamp across chains otherwise.
   - The no-backfill startup path uses that same timestamp for its first
     verification attempt.
 */
@@ -210,41 +210,44 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 			want: 100,
 		},
 		{
-			name: "EL finalized error blocks startup",
+			name: "sync status error blocks startup",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.elFinalizedHeadErr = errors.New("EL finalized not ready")
+						m.syncStatusOverride = func() (*eth.SyncStatus, error) {
+							return nil, errors.New("sync status not ready")
+						}
 					}).
 					Build()
 			},
 			wantErr: true,
 		},
 		{
-			name: "empty EL finalized response blocks startup",
+			name: "empty local safe response blocks startup",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.elFinalizedHeadSet = true
+						m.syncStatusFull = &eth.SyncStatus{}
 					}).
 					Build()
 			},
 			wantErr: true,
 		},
 		{
-			name: "EL finalized at genesis with a real hash is accepted",
+			name: "local safe at genesis with a real hash is accepted",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.elFinalizedHead = eth.L2BlockRef{Number: 0, Hash: common.HexToHash("0xabc123")}
-						m.elFinalizedHeadSet = true
+						m.syncStatusFull = &eth.SyncStatus{
+							LocalSafeL2: eth.L2BlockRef{Number: 0, Hash: common.HexToHash("0xabc123")},
+						}
 					}).
 					Build()
 			},
 			want: 100,
 		},
 		{
-			name: "EL finalized before activation returns activation",
+			name: "local safe before activation returns activation",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
@@ -258,7 +261,7 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 			want: 100,
 		},
 		{
-			name: "EL finalized at activation returns timestamp after activation",
+			name: "local safe at activation returns timestamp after activation",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
@@ -272,7 +275,7 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 			want: 101,
 		},
 		{
-			name: "returns timestamp after minimum EL finalized across chains",
+			name: "returns timestamp after newest local safe across chains",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
@@ -289,15 +292,13 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 					}).
 					Build()
 			},
-			want: 126,
+			want: 141,
 		},
 		{
-			name: "uses EL finalized when sync status safe is stale",
+			name: "uses local safe when sync status safe is stale",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(100).
 					WithChain(10, func(m *mockChainContainer) {
-						m.elFinalizedHead = eth.L2BlockRef{Number: 125, Time: 125}
-						m.elFinalizedHeadSet = true
 						m.syncStatusFull = &eth.SyncStatus{
 							SafeL2:      eth.L2BlockRef{Number: 0, Time: 100},
 							LocalSafeL2: eth.L2BlockRef{Number: 200, Time: 200},
@@ -305,7 +306,7 @@ func TestFirstVerifiableTimestamp(t *testing.T) {
 					}).
 					Build()
 			},
-			want: 126,
+			want: 201,
 		},
 	}
 
@@ -481,7 +482,7 @@ func TestStartWithoutBackfillResumesFromVerifiedDBIgnoringELFinalized(t *testing
 		"warm-restart startup must not consult EL finalized when verifiedDB is initialized")
 }
 
-func TestStartWithBackfillRunsBeforeSafeDBReadyCheck(t *testing.T) {
+func TestStartWithBackfillHaltsWhenStartupHandoffHistoryUnavailable(t *testing.T) {
 	const activation = uint64(100)
 	const safe = uint64(125)
 
@@ -509,20 +510,11 @@ func TestStartWithBackfillRunsBeforeSafeDBReadyCheck(t *testing.T) {
 	}
 	require.ErrorIs(t, err, cc.ErrHistoryUnavailable)
 	require.Equal(t, int32(1), h.interop.BackfillAttempts())
-	require.Equal(t, safe, h.interop.BackfillEndTimestamp())
+	require.Zero(t, h.interop.BackfillEndTimestamp())
 
-	first, err := h.interop.FirstSealedBlock(eth.ChainIDFromUInt64(10))
+	_, ok, err := h.interop.LatestSealedBlock(eth.ChainIDFromUInt64(10))
 	require.NoError(t, err)
-	// The first real backfilled block is 120, and the logs DB records its
-	// virtual parent as the first sealed block.
-	require.Equal(t, uint64(119), first.Number)
-	require.Equal(t, uint64(120), first.Timestamp)
-
-	latest, ok, err := h.interop.LatestSealedBlock(eth.ChainIDFromUInt64(10))
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, safe, latest.Number)
-	require.Equal(t, safe, latest.Timestamp)
+	require.False(t, ok, "logs must not be sealed when startup handoff SafeDB history is unavailable")
 }
 
 // =============================================================================
@@ -846,7 +838,7 @@ func TestProgressInterop(t *testing.T) {
 		run      func(t *testing.T, h *interopTestHarness) // override for complex cases
 	}{
 		{
-			name: "not initialized uses first timestamp after finalized head",
+			name: "not initialized uses activation timestamp",
 			setup: func(h *interopTestHarness) *interopTestHarness {
 				return h.WithActivation(5000).WithChain(10, func(m *mockChainContainer) {
 					m.blockAtTimestamp = eth.L2BlockRef{Number: 100, Hash: common.HexToHash("0x1")}
@@ -1211,7 +1203,7 @@ func TestVerifiedResultAtTimestamp(t *testing.T) {
 			}).
 			Build()
 			// 126 > activation and >= firstVerifiable (resolves to 101 from
-			// EL finalized time 100); no entry yet -> ethereum.NotFound.
+			// local safe time 100); no entry yet -> ethereum.NotFound.
 		_, _, err := h.interop.VerifiedResultAtTimestamp(126)
 		require.ErrorIs(t, err, ethereum.NotFound)
 		require.NotErrorIs(t, err, ErrNotActive)
@@ -1222,7 +1214,7 @@ func TestVerifiedResultAtTimestamp(t *testing.T) {
 		h := newInteropTestHarness(t).
 			WithActivation(100).
 			WithChain(10, func(m *mockChainContainer) {
-				// EL finalized time 500 -> firstVerifiable=501. ts=200 is post
+				// Local safe time 500 -> firstVerifiable=501. ts=200 is post
 				// activation but below firstVerifiable on this node.
 				m.syncStatusFull = &eth.SyncStatus{
 					SafeL2:      eth.L2BlockRef{Number: 500, Time: 500},
@@ -1294,7 +1286,7 @@ func TestNoopVerifiedResultReader(t *testing.T) {
 	var r VerifiedResultReader = NoopVerifiedResultReader{}
 	for _, ts := range []uint64{0, 1, 1000, 1 << 60} {
 		_, _, err := r.VerifiedResultAtTimestamp(ts)
-		require.ErrorIs(t, err, ErrNotActive)
+		require.ErrorIs(t, err, ErrInteropDisabled)
 	}
 }
 

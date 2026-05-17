@@ -146,7 +146,7 @@ type Interop struct {
 	// backfillEndTimestamp represents the end of the range of timestamps that were sealed by runLogBackfill.
 	// this is used for loop handoff from log backfill to main processing.
 	// firstVerifiableTimestamp is used to determine the start of the main processing loop, which is backfillEndTimestamp + 1
-	// after backfill, or the EL-finalized-derived startup timestamp when backfill was not used.
+	// after backfill, or the latched local-safe startup handoff when backfill was not used.
 	backfillEndTimestamp uint64
 	firstVerifiableSet   bool
 	firstVerifiable      uint64
@@ -202,7 +202,7 @@ func (i *Interop) Name() string {
 // to verify. If verification has already committed results, the first committed
 // timestamp is the durable handoff boundary. Otherwise it is backfillEndTimestamp+1
 // after log backfill, or — on cold start with no committed results and no
-// backfill range — the EL-finalized-derived startup timestamp.
+// backfill range — the latched local-safe startup handoff.
 func (i *Interop) firstVerifiableTimestamp(ctx context.Context) (uint64, error) {
 	if i.verifiedDB != nil {
 		if first, initialized := i.verifiedDB.FirstTimestamp(); initialized {
@@ -301,7 +301,12 @@ func (i *Interop) Start(ctx context.Context) error {
 				i.backfillEndTimestamp = end
 				break
 			}
-			i.log.Warn("log backfill failed, retrying (EL finalized head or chain data may not be ready yet)", "err", err)
+			if errors.Is(err, cc.ErrHistoryUnavailable) {
+				i.log.Error("interop activity halted: SafeDB history unavailable on this node", "err", err,
+					"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
+				return fmt.Errorf("interop halted due to unavailable history: %w", err)
+			}
+			i.log.Warn("log backfill failed, retrying (startup handoff or chain data may not be ready yet)", "err", err)
 			for cid := range i.chains {
 				i.metrics.LogBackfillRetries.WithLabelValues(cid.String()).Inc()
 			}
@@ -340,7 +345,7 @@ func (i *Interop) Start(ctx context.Context) error {
 					"remediation", "reseed data dir, advance interop.activation-timestamp past the gap, or rederive from L1")
 				return fmt.Errorf("interop halted due to unavailable history: %w", err)
 			}
-			i.log.Warn("first verifiable timestamp unavailable, retrying (EL finalized head or chain data may not be ready yet)", "err", err)
+			i.log.Warn("first verifiable timestamp unavailable, retrying (startup handoff or chain data may not be ready yet)", "err", err)
 			select {
 			case <-i.ctx.Done():
 				return fmt.Errorf("first verifiable timestamp interrupted: %w", i.ctx.Err())
