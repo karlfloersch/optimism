@@ -10,6 +10,7 @@ import (
 
 	opnodecfg "github.com/ethereum-optimism/optimism/op-node/config"
 	rollupNode "github.com/ethereum-optimism/optimism/op-node/node"
+	nodesync "github.com/ethereum-optimism/optimism/op-node/rollup/sync"
 	"github.com/ethereum-optimism/optimism/op-service/apis"
 	"github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
@@ -113,6 +114,10 @@ func New(ctx context.Context, log gethlog.Logger, version string, requestStop co
 	var verifiedReader interop.VerifiedResultReader = interop.NoopVerifiedResultReader{}
 	var interopActivity *interop.Interop
 	if interopActivationTimestamp != nil {
+		logBackfillDepth, logBackfillDisabledForCLSync := effectiveInteropLogBackfillDepth(cfg.InteropLogBackfillDepth, vnCfgs)
+		if logBackfillDisabledForCLSync {
+			log.Warn("disabling interop log backfill because at least one virtual node is configured for consensus-layer sync", "configured_depth", cfg.InteropLogBackfillDepth)
+		}
 		var msgExpiryWindow uint64
 		for _, vnCfg := range vnCfgs {
 			if vnCfg.DependencySet != nil {
@@ -120,7 +125,7 @@ func New(ctx context.Context, log gethlog.Logger, version string, requestStop co
 				break
 			}
 		}
-		interopActivity = interop.New(log.New("activity", "interop"), *interopActivationTimestamp, msgExpiryWindow, s.chains, cfg.DataDir, s.l1Client, cfg.InteropLogBackfillDepth, s.supernodeMetrics)
+		interopActivity = interop.New(log.New("activity", "interop"), *interopActivationTimestamp, msgExpiryWindow, s.chains, cfg.DataDir, s.l1Client, logBackfillDepth, s.supernodeMetrics)
 		verifiedReader = interopActivity
 	}
 
@@ -154,6 +159,21 @@ func New(ctx context.Context, log gethlog.Logger, version string, requestStop co
 		s.metrics = resources.NewMetricsService(log, cfg.MetricsConfig.ListenAddr, cfg.MetricsConfig.ListenPort, s.metricsFanIn)
 	}
 	return s, nil
+}
+
+func effectiveInteropLogBackfillDepth(depth time.Duration, vnCfgs map[eth.ChainID]*opnodecfg.Config) (time.Duration, bool) {
+	if depth <= 0 {
+		return depth, false
+	}
+	for _, vnCfg := range vnCfgs {
+		if vnCfg == nil {
+			continue
+		}
+		if vnCfg.Sync.SyncMode == nodesync.CLSync {
+			return 0, true
+		}
+	}
+	return depth, false
 }
 
 func resolveInteropActivationTimestamp(override *uint64, vnCfgs map[eth.ChainID]*opnodecfg.Config) (*uint64, error) {
