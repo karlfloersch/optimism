@@ -143,3 +143,42 @@ func TestFinalizedHead_HoldPrevious_NoCache_ReturnsZero(t *testing.T) {
 	require.Equal(t, common.Hash{}, got.Hash,
 		"resulting ForkchoiceUpdate sends a zero finalized hash, preserving the EL's own label")
 }
+
+func TestPromoteFinalized_WithSuperAuthorityDoesNotPublishLocalFinalityAheadOfSafe(t *testing.T) {
+	oldPublished := eth.L2BlockRef{Hash: common.Hash{0x99}, Number: 99}
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 12_374}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 12_105}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2Head:       eth.BlockID{Hash: oldPublished.Hash, Number: oldPublished.Number},
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
+		holdPreviousFinalized:     true,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(oldPublished)
+	ec.superAuthorityFinalizedHead = oldPublished
+
+	mockEngine.ExpectL2BlockRefByHash(oldPublished.Hash, oldPublished, nil)
+	mockEngine.ExpectL2BlockRefByNumber(oldPublished.Number, oldPublished, nil)
+
+	ec.PromoteFinalized(context.Background(), localFinalized)
+
+	require.Equal(t, localFinalized, ec.localFinalizedHead,
+		"local finality should still advance and bound future super-authority finality")
+	require.Equal(t, oldPublished, ec.deprecatedFinalizedHead,
+		"published/FCU finality must remain at the super-authority finalized head")
+	mockEngine.AssertExpectations(t)
+}

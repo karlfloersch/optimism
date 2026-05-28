@@ -1091,6 +1091,10 @@ func (e *EngineController) PromoteFinalized(ctx context.Context, ref eth.L2Block
 }
 
 func (e *EngineController) promoteFinalized(ctx context.Context, ref eth.L2BlockRef) {
+	if e.superAuthority != nil {
+		e.promoteLocalFinalizedWithSuperAuthority(ctx, ref)
+		return
+	}
 	if ref.Number < e.FinalizedHead().Number {
 		e.log.Error("Cannot rewind finality,", "ref", ref, "finalized", e.FinalizedHead())
 		return
@@ -1102,6 +1106,41 @@ func (e *EngineController) promoteFinalized(ctx context.Context, ref eth.L2Block
 	e.SetFinalizedHead(ref)
 	e.emitter.Emit(ctx, FinalizedUpdateEvent{Ref: ref})
 	// Try to apply the forkchoice changes
+	e.tryUpdateEngine(ctx)
+}
+
+func (e *EngineController) promoteLocalFinalizedWithSuperAuthority(ctx context.Context, ref eth.L2BlockRef) {
+	if ref.Number < e.localFinalizedHead.Number {
+		e.log.Error("Cannot rewind local finality,", "ref", ref, "local_finalized", e.localFinalizedHead)
+		return
+	}
+	if eth.L2BlockRefAdvances(e.localFinalizedHead, ref) {
+		e.localFinalizedHead = ref
+	}
+
+	finalized := e.FinalizedHead()
+	if finalized == (eth.L2BlockRef{}) {
+		return
+	}
+	safe := e.SafeL2Head()
+	if finalized.Number > safe.Number {
+		e.log.Error("Super authority finalized must be safe before it can be published", "finalized", finalized, "safe", safe)
+		return
+	}
+	if finalized.Number < e.deprecatedFinalizedHead.Number {
+		e.log.Error("Cannot rewind published finality,", "finalized", finalized, "published_finalized", e.deprecatedFinalizedHead)
+		return
+	}
+	if finalized.ID() == e.deprecatedFinalizedHead.ID() {
+		return
+	}
+	if finalized.Number == e.deprecatedFinalizedHead.Number {
+		panic("superAuthority finalized head conflicts with published finalized head at same height")
+	}
+
+	e.metrics.RecordL2Ref("l2_finalized", finalized)
+	e.deprecatedFinalizedHead = finalized
+	e.emitter.Emit(ctx, FinalizedUpdateEvent{Ref: finalized})
 	e.tryUpdateEngine(ctx)
 }
 
