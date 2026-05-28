@@ -63,6 +63,17 @@ func (c *simpleChainContainer) FinalizedL2Head(ctx context.Context) (rollup.Veri
 			"verifier", v.Name(), "err", err)
 		return rollup.VerifierHead{}, false
 	}
+	safeContribution, err := c.verifierContribution(v.LatestVerifiedL2Block(c.chainID))
+	if err != nil {
+		c.log.Warn("FinalizedL2Head: safe verifier read failed, holding previous",
+			"verifier", v.Name(), "err", err)
+		return rollup.VerifierHead{}, false
+	}
+	if verifierHeadAheadOf(contribution, safeContribution) {
+		c.log.Warn("FinalizedL2Head: verifier finalized ahead of fully verified safe, clamping to safe",
+			"verifier", v.Name(), "finalized", contribution, "safe", safeContribution)
+		return safeContribution, true
+	}
 	return contribution, true
 }
 
@@ -77,6 +88,26 @@ func (c *simpleChainContainer) verifierContribution(bId eth.BlockID, ts uint64, 
 		return rollup.VerifierHead{Source: rollup.VerifierHeadAnchor, Timestamp: ts}, nil
 	}
 	return rollup.VerifierHead{Source: rollup.VerifierHeadVerified, Block: bId, Timestamp: ts}, nil
+}
+
+func verifierHeadAheadOf(a, b rollup.VerifierHead) bool {
+	if a.Source == b.Source {
+		switch a.Source {
+		case rollup.VerifierHeadVerified:
+			return a.Block.Number > b.Block.Number
+		case rollup.VerifierHeadAnchor:
+			return a.Timestamp > b.Timestamp
+		default:
+			return false
+		}
+	}
+	if a.Source == rollup.VerifierHeadVerified && b.Source == rollup.VerifierHeadAnchor {
+		return true
+	}
+	if a.Source != rollup.VerifierHeadPreActivation && b.Source == rollup.VerifierHeadPreActivation {
+		return true
+	}
+	return false
 }
 
 func (c *simpleChainContainer) localSafeTimestamp(ctx context.Context) (uint64, bool) {

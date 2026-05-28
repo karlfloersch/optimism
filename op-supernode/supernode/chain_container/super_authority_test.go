@@ -249,6 +249,8 @@ func TestChainContainer_FinalizedL2Head_SingleVerifier(t *testing.T) {
 	})
 
 	v := &mockVerificationActivityForSuperAuthority{
+		latestVerifiedBlock:  eth.BlockID{Hash: [32]byte{2}, Number: 200},
+		latestVerifiedTS:     1000,
 		activationTimestamp:  1000,
 		latestFinalizedBlock: eth.BlockID{Hash: [32]byte{1}, Number: 100},
 		latestFinalizedTS:    1000,
@@ -278,6 +280,52 @@ func TestChainContainer_FinalizedL2Head_PostActivation_EmptyVerifierContributesA
 		"empty verifier post-activation contributes anchor (fixes the safeDB-to-genesis bug, #20944)")
 	require.Equal(t, uint64(999), head.Timestamp,
 		"anchor timestamp is activationTimestamp - 1; engine_controller resolves to a block")
+}
+
+func TestChainContainer_FinalizedL2Head_ClampsToAnchorWhenLatestVerifiedEmpty(t *testing.T) {
+	t.Parallel()
+
+	cc := newTestChainContainer(t, eth.ChainIDFromUInt64(420))
+	setSyncStatus(t, cc, &eth.SyncStatus{
+		FinalizedL1: eth.L1BlockRef{Number: 400},
+		LocalSafeL2: eth.L2BlockRef{Number: 600, Time: 1500},
+	})
+
+	cc.RegisterVerifier(&mockVerificationActivityForSuperAuthority{
+		activationTimestamp:  1000,
+		latestFinalizedBlock: eth.BlockID{Hash: [32]byte{1}, Number: 100},
+		latestFinalizedTS:    1100,
+	})
+
+	head, ok := cc.FinalizedL2Head(t.Context())
+	require.True(t, ok)
+	require.Equal(t, rollup.VerifierHeadAnchor, head.Source,
+		"finalized must not advance past the fully verified safe contribution")
+	require.Equal(t, uint64(999), head.Timestamp)
+}
+
+func TestChainContainer_FinalizedL2Head_ClampsToVerifiedSafe(t *testing.T) {
+	t.Parallel()
+
+	cc := newTestChainContainer(t, eth.ChainIDFromUInt64(420))
+	setSyncStatus(t, cc, &eth.SyncStatus{
+		FinalizedL1: eth.L1BlockRef{Number: 400},
+		LocalSafeL2: eth.L2BlockRef{Number: 600, Time: 1500},
+	})
+
+	safe := eth.BlockID{Hash: [32]byte{2}, Number: 50}
+	cc.RegisterVerifier(&mockVerificationActivityForSuperAuthority{
+		activationTimestamp:  1000,
+		latestVerifiedBlock:  safe,
+		latestVerifiedTS:     1000,
+		latestFinalizedBlock: eth.BlockID{Hash: [32]byte{1}, Number: 100},
+		latestFinalizedTS:    1100,
+	})
+
+	head, ok := cc.FinalizedL2Head(t.Context())
+	require.True(t, ok)
+	require.Equal(t, rollup.VerifierHeadVerified, head.Source)
+	require.Equal(t, safe, head.Block)
 }
 
 func TestChainContainer_FinalizedL2Head_PreActivation_ReturnsPreActivationSource(t *testing.T) {
