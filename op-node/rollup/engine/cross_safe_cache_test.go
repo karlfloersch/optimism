@@ -15,7 +15,7 @@ import (
 
 func TestCrossSafeCache_EmptyReturnsFalse(t *testing.T) {
 	c := newCrossSafeCache(testlog.Logger(t, 0))
-	_, ok := c.Get(context.Background(), &testutils.MockEngine{}, eth.L2BlockRef{Number: 100})
+	_, ok := c.Get(context.Background(), &testutils.MockEngine{}, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok)
 }
 
@@ -27,7 +27,7 @@ func TestCrossSafeCache_CanonicalReturnsCached(t *testing.T) {
 	c := newCrossSafeCache(testlog.Logger(t, 0))
 	c.Store(cached)
 
-	got, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	got, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{Number: 50})
 	require.True(t, ok)
 	require.Equal(t, cached, got)
 }
@@ -41,11 +41,11 @@ func TestCrossSafeCache_NonCanonicalClears(t *testing.T) {
 	c := newCrossSafeCache(testlog.Logger(t, 0))
 	c.Store(cached)
 
-	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok)
 
 	// Second call short-circuits: cache cleared, no further engine calls expected.
-	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok)
 }
 
@@ -56,12 +56,12 @@ func TestCrossSafeCache_AheadOfLocalSafeClears(t *testing.T) {
 	c := newCrossSafeCache(testlog.Logger(t, 0))
 	c.Store(cached)
 
-	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok, "cache ahead of local-safe must not be returned")
 
 	// And it's been cleared — no engine call ever happened for that read, and the
 	// next read short-circuits on empty.
-	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok)
 }
 
@@ -73,10 +73,38 @@ func TestCrossSafeCache_EngineErrorClears(t *testing.T) {
 	c := newCrossSafeCache(testlog.Logger(t, 0))
 	c.Store(cached)
 
-	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
 	require.False(t, ok)
 
 	// Cache cleared on lookup failure; next read short-circuits.
-	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100})
+	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 100}, eth.L2BlockRef{})
+	require.False(t, ok)
+}
+
+func TestCrossSafeCache_BehindFinalizedClears(t *testing.T) {
+	cached := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 80}
+	finalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 100}
+	engine := &testutils.MockEngine{}
+
+	c := newCrossSafeCache(testlog.Logger(t, 0))
+	c.Store(cached)
+
+	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 120}, finalized)
+	require.False(t, ok, "cache behind finalized must not be returned")
+
+	// Cache cleared before any engine lookup.
+	_, ok = c.Get(context.Background(), engine, eth.L2BlockRef{Number: 120}, finalized)
+	require.False(t, ok)
+}
+
+func TestCrossSafeCache_ConflictsWithFinalizedAtSameHeightClears(t *testing.T) {
+	cached := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 100}
+	finalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 100}
+	engine := &testutils.MockEngine{}
+
+	c := newCrossSafeCache(testlog.Logger(t, 0))
+	c.Store(cached)
+
+	_, ok := c.Get(context.Background(), engine, eth.L2BlockRef{Number: 120}, finalized)
 	require.False(t, ok)
 }

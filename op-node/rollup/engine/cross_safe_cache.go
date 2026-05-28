@@ -27,31 +27,49 @@ func (c *crossSafeCache) Store(br eth.L2BlockRef) {
 	c.cached = br
 }
 
+func (c *crossSafeCache) Clear() {
+	c.cached = eth.L2BlockRef{}
+}
+
 // Get returns the cached cross-safe head if it is still canonical on the EL
-// and not ahead of localSafeHead. Otherwise clears the cache and returns
-// (zero, false).
-func (c *crossSafeCache) Get(ctx context.Context, engine ExecEngine, localSafeHead eth.L2BlockRef) (eth.L2BlockRef, bool) {
+// and within the local-safe/finalized bounds. Otherwise clears the cache and
+// returns (zero, false).
+func (c *crossSafeCache) Get(ctx context.Context, engine ExecEngine, localSafeHead, finalizedHead eth.L2BlockRef) (eth.L2BlockRef, bool) {
 	cached := c.cached
 	if cached == (eth.L2BlockRef{}) {
 		return eth.L2BlockRef{}, false
 	}
+	if finalizedHead != (eth.L2BlockRef{}) {
+		if cached.Number < finalizedHead.Number {
+			c.log.Warn("cached cross-safe behind finalized; clearing cache",
+				"cached", cached, "finalized", finalizedHead)
+			c.Clear()
+			return eth.L2BlockRef{}, false
+		}
+		if cached.Number == finalizedHead.Number && cached.Hash != finalizedHead.Hash {
+			c.log.Warn("cached cross-safe conflicts with finalized at same height; clearing cache",
+				"cached", cached, "finalized", finalizedHead)
+			c.Clear()
+			return eth.L2BlockRef{}, false
+		}
+	}
 	if cached.Number > localSafeHead.Number {
 		c.log.Info("cached cross-safe ahead of local-safe; clearing cache",
 			"cached", cached, "local_safe", localSafeHead)
-		c.cached = eth.L2BlockRef{}
+		c.Clear()
 		return eth.L2BlockRef{}, false
 	}
 	canonical, err := engine.L2BlockRefByNumber(ctx, cached.Number)
 	if err != nil {
 		c.log.Warn("cannot validate cached cross-safe canonicality; clearing cache",
 			"cached", cached, "err", err)
-		c.cached = eth.L2BlockRef{}
+		c.Clear()
 		return eth.L2BlockRef{}, false
 	}
 	if canonical.Hash != cached.Hash {
 		c.log.Info("cached cross-safe non-canonical (reorg); clearing cache",
 			"cached", cached, "canonical", canonical)
-		c.cached = eth.L2BlockRef{}
+		c.Clear()
 		return eth.L2BlockRef{}, false
 	}
 	return cached, true

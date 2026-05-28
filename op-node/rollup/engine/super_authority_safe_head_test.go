@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/sync"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-service/event"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 	"github.com/ethereum-optimism/optimism/op-service/testutils"
 )
@@ -39,7 +40,6 @@ func TestSafeL2Head_EmptyVerifier_DoesNotDropToGenesis(t *testing.T) {
 	anchorRef := eth.L2BlockRef{Hash: common.Hash{0xa1}, Number: 499}
 
 	mockEngine := &testutils.MockEngine{}
-	emitter := &testutils.MockEmitter{}
 	sa := &mockSuperAuthority{
 		fullyVerifiedL2HeadSource: rollup.VerifierHeadAnchor,
 		fullyVerifiedTimestamp:    999,
@@ -52,7 +52,7 @@ func TestSafeL2Head_EmptyVerifier_DoesNotDropToGenesis(t *testing.T) {
 		cfg,
 		&sync.Config{},
 		&testutils.MockL1Source{},
-		emitter,
+		event.NoopEmitter{},
 		sa,
 	)
 	ec.SetLocalSafeHead(localSafe)
@@ -83,7 +83,6 @@ func TestSafeL2Head_VerifierError_FloorsAtFinalized(t *testing.T) {
 	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 50}
 
 	mockEngine := &testutils.MockEngine{}
-	emitter := &testutils.MockEmitter{}
 	sa := &mockSuperAuthority{
 		holdPreviousVerified: true,
 		// FinalizedHead is also consulted; configure it to PreActivation so the
@@ -98,7 +97,7 @@ func TestSafeL2Head_VerifierError_FloorsAtFinalized(t *testing.T) {
 		&rollup.Config{},
 		&sync.Config{},
 		&testutils.MockL1Source{},
-		emitter,
+		event.NoopEmitter{},
 		sa,
 	)
 	ec.SetLocalSafeHead(localSafe)
@@ -123,7 +122,6 @@ func TestSafeL2Head_HoldPrevious_UsesCanonicalCache(t *testing.T) {
 	verifiedRef := eth.L2BlockRef{Hash: verifiedBlock.Hash, Number: verifiedBlock.Number}
 
 	mockEngine := &testutils.MockEngine{}
-	emitter := &testutils.MockEmitter{}
 	sa := &mockSuperAuthority{
 		fullyVerifiedL2Head:       verifiedBlock,
 		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
@@ -137,7 +135,7 @@ func TestSafeL2Head_HoldPrevious_UsesCanonicalCache(t *testing.T) {
 		&rollup.Config{},
 		&sync.Config{},
 		&testutils.MockL1Source{},
-		emitter,
+		event.NoopEmitter{},
 		sa,
 	)
 	ec.SetLocalSafeHead(localSafe)
@@ -200,6 +198,87 @@ func TestSafeL2Head_HoldPrevious_NonCanonicalCache_FloorsAtFinalized(t *testing.
 		eth.L2BlockRef{Hash: common.Hash{0xdd}, Number: verifiedBlock.Number}, nil)
 	got := ec.SafeL2Head()
 	require.Equal(t, localFinalized, got, "non-canonical cache must clear and floor at finalized")
+}
+
+func TestSafeL2Head_HoldPrevious_CachedBehindFinalized_FloorsAtFinalized(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 120}
+	initialFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 50}
+	newFinalized := eth.L2BlockRef{Hash: common.Hash{0xdd}, Number: 100}
+	verifiedBlock := eth.BlockID{Hash: common.Hash{0xcc}, Number: 80}
+	verifiedRef := eth.L2BlockRef{Hash: verifiedBlock.Hash, Number: verifiedBlock.Number}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2Head:       verifiedBlock,
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(initialFinalized)
+
+	mockEngine.ExpectL2BlockRefByHash(verifiedBlock.Hash, verifiedRef, nil)
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number, verifiedRef, nil)
+	got := ec.SafeL2Head()
+	require.Equal(t, verifiedRef, got)
+
+	ec.SetFinalizedHead(newFinalized)
+	sa.holdPreviousVerified = true
+	got = ec.SafeL2Head()
+	require.Equal(t, newFinalized, got, "cache behind finalized must be ignored to preserve finalized <= safe")
+}
+
+func TestForceReset_SeedsCrossSafeCache(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 100}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 50}
+	verifiedBlock := eth.BlockID{Hash: common.Hash{0xcc}, Number: 80}
+	verifiedRef := eth.L2BlockRef{Hash: verifiedBlock.Hash, Number: verifiedBlock.Number}
+	resetCrossSafe := eth.L2BlockRef{Hash: common.Hash{0xdd}, Number: 60}
+
+	mockEngine := &testutils.MockEngine{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2Head:       verifiedBlock,
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		event.NoopEmitter{},
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(localFinalized)
+
+	mockEngine.ExpectL2BlockRefByHash(verifiedBlock.Hash, verifiedRef, nil)
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number, verifiedRef, nil)
+	got := ec.SafeL2Head()
+	require.Equal(t, verifiedRef, got)
+
+	sa.holdPreviousVerified = true
+	mockEngine.ExpectL2BlockRefByNumber(resetCrossSafe.Number, resetCrossSafe, nil)
+	mockEngine.ExpectL2BlockRefByNumber(resetCrossSafe.Number, resetCrossSafe, nil)
+	mockEngine.ExpectL2BlockRefByNumber(resetCrossSafe.Number, resetCrossSafe, nil)
+	ec.forceReset(context.Background(), localSafe, localSafe, localSafe, resetCrossSafe, localFinalized, true)
+
+	got = ec.SafeL2Head()
+	require.Equal(t, resetCrossSafe, got, "reset cross-safe must replace any stale pre-reset cache value")
 }
 
 // TestFinalizedHead_HoldPrevious_NoCache_ReturnsZero documents the
