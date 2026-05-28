@@ -112,6 +112,96 @@ func TestSafeL2Head_VerifierError_FloorsAtFinalized(t *testing.T) {
 		"SafeL2Head must floor at localFinalizedHead on verifier error (HoldPrevious semantics).")
 }
 
+// TestSafeL2Head_HoldPrevious_UsesCanonicalCache verifies that on HoldPrevious
+// the cross-safe cache is consulted (and re-validated for canonicality) before
+// falling back to FinalizedHead, so a transient verifier outage doesn't drop
+// cross-safe.
+func TestSafeL2Head_HoldPrevious_UsesCanonicalCache(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 100}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 50}
+	verifiedBlock := eth.BlockID{Hash: common.Hash{0xcc}, Number: 80}
+	verifiedRef := eth.L2BlockRef{Hash: verifiedBlock.Hash, Number: verifiedBlock.Number}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2Head:       verifiedBlock,
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(localFinalized)
+
+	// First call: Verified path populates the cache.
+	mockEngine.ExpectL2BlockRefByHash(verifiedBlock.Hash, verifiedRef, nil)
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number, verifiedRef, nil)
+	got := ec.SafeL2Head()
+	require.Equal(t, verifiedRef, got, "first call should resolve via the Verified path")
+
+	// Verifier returns HoldPrevious; cache canonicality re-validates and is
+	// returned in preference to flooring at finalized.
+	sa.holdPreviousVerified = true
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number, verifiedRef, nil)
+	got = ec.SafeL2Head()
+	require.Equal(t, verifiedRef, got,
+		"HoldPrevious must return the canonicality-validated cache, not drop to localFinalized")
+}
+
+// TestSafeL2Head_HoldPrevious_NonCanonicalCache_FloorsAtFinalized verifies
+// that the cross-safe cache is cleared when the cached block is no longer
+// canonical (reorg), and the caller then floors at FinalizedHead.
+func TestSafeL2Head_HoldPrevious_NonCanonicalCache_FloorsAtFinalized(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 100}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 50}
+	verifiedBlock := eth.BlockID{Hash: common.Hash{0xcc}, Number: 80}
+	verifiedRef := eth.L2BlockRef{Hash: verifiedBlock.Hash, Number: verifiedBlock.Number}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2Head:       verifiedBlock,
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadVerified,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(localFinalized)
+
+	// First call: Verified path populates the cache.
+	mockEngine.ExpectL2BlockRefByHash(verifiedBlock.Hash, verifiedRef, nil)
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number, verifiedRef, nil)
+	_ = ec.SafeL2Head()
+
+	// Simulate a reorg: the EL now reports a different canonical block at the
+	// cached number. HoldPrevious must clear the cache and floor at finalized.
+	sa.holdPreviousVerified = true
+	mockEngine.ExpectL2BlockRefByNumber(verifiedBlock.Number,
+		eth.L2BlockRef{Hash: common.Hash{0xdd}, Number: verifiedBlock.Number}, nil)
+	got := ec.SafeL2Head()
+	require.Equal(t, localFinalized, got, "non-canonical cache must clear and floor at finalized")
+}
+
 // TestFinalizedHead_HoldPrevious_NoCache_ReturnsZero documents the
 // error-after-startup trace: verifier errors on the first call, no cached
 // super-authority finalized head yet, localSafeHead and localFinalizedHead are
