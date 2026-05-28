@@ -112,6 +112,77 @@ func TestSafeL2Head_VerifierError_FloorsAtFinalized(t *testing.T) {
 		"SafeL2Head must floor at localFinalizedHead on verifier error (HoldPrevious semantics).")
 }
 
+func TestSafeL2Head_SuperAuthorityAnchorBehindFinalizedUsesFinalized(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 100_000}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 82_351}
+	anchorRef := eth.L2BlockRef{Hash: common.Hash{0x49}, Number: 49}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadAnchor,
+		fullyVerifiedTimestamp:    98,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{BlockTime: 2},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(localFinalized)
+	ec.superAuthorityFinalizedHead = localFinalized
+
+	mockEngine.ExpectL2BlockRefByNumber(anchorRef.Number, anchorRef, nil)
+
+	got := ec.SafeL2Head()
+	require.Equal(t, localFinalized, got,
+		"SuperAuthority safe must not publish an anchor behind finalized")
+	require.Equal(t, localFinalized, ec.deprecatedSafeHead,
+		"cross-safe cache should be raised to finalized when verifier safe is behind finalized")
+}
+
+func TestSafeL2Head_SuperAuthorityAnchorBehindCachedSafeUsesCache(t *testing.T) {
+	localSafe := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 10_000}
+	localFinalized := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 100}
+	cachedSafe := eth.L2BlockRef{Hash: common.Hash{0xcc}, Number: 5_000}
+	anchorRef := eth.L2BlockRef{Hash: common.Hash{0x99}, Number: 1_000}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	sa := &mockSuperAuthority{
+		fullyVerifiedL2HeadSource: rollup.VerifierHeadAnchor,
+		fullyVerifiedTimestamp:    2_000,
+		finalizedL2HeadSource:     rollup.VerifierHeadPreActivation,
+	}
+	ec := NewEngineController(
+		context.Background(),
+		mockEngine,
+		testlog.Logger(t, 0),
+		metrics.NoopMetrics,
+		&rollup.Config{BlockTime: 2},
+		&sync.Config{},
+		&testutils.MockL1Source{},
+		emitter,
+		sa,
+	)
+	ec.SetLocalSafeHead(localSafe)
+	ec.SetFinalizedHead(localFinalized)
+	ec.SetDeprecatedSafeHead(cachedSafe)
+
+	mockEngine.ExpectL2BlockRefByNumber(anchorRef.Number, anchorRef, nil)
+
+	got := ec.SafeL2Head()
+	require.Equal(t, cachedSafe, got,
+		"SuperAuthority safe must not rewind behind cached cross-safe")
+}
+
 // TestFinalizedHead_HoldPrevious_NoCache_ReturnsZero documents the
 // error-after-startup trace: verifier errors on the first call, no cached
 // super-authority finalized head yet, localSafeHead and localFinalizedHead are

@@ -213,7 +213,7 @@ func (e *EngineController) SafeL2Head() eth.L2BlockRef {
 	}
 	switch head.Source {
 	case rollup.VerifierHeadPreActivation:
-		return e.localSafeHead
+		return e.applySafeHeadCacheChecks(e.localSafeHead, "pre-activation")
 	case rollup.VerifierHeadAnchor:
 		return e.resolveAnchorAsSafe(head.Timestamp)
 	case rollup.VerifierHeadVerified:
@@ -244,7 +244,7 @@ func (e *EngineController) resolveVerifiedAsSafe(block eth.BlockID) eth.L2BlockR
 			"super_authority_safe", br, "canonical", canonicalRef)
 		return e.crossSafeFallback("non-canonical")
 	}
-	return br
+	return e.applySafeHeadCacheChecks(br, "verified")
 }
 
 // resolveAnchorAsSafe handles the Anchor branch of SafeL2Head: resolve the
@@ -263,16 +263,28 @@ func (e *EngineController) resolveAnchorAsSafe(ts uint64) eth.L2BlockRef {
 	}
 	if br.Number > e.localSafeHead.Number {
 		// Local safe hasn't reached the anchor block for the validator, so use local safe head.
-		return e.localSafeHead
+		return e.applySafeHeadCacheChecks(e.localSafeHead, "anchor-local-safe-bound")
 	}
-	return br
+	return e.applySafeHeadCacheChecks(br, "anchor")
 }
 
-// crossSafeFallback is the cross-safe fallback path: returns FinalizedHead so
-// we never advance cross-safe to local-safe on a verifier read failure or any
-// reorg signal, and never drop below finalized.
+// crossSafeFallback is the cross-safe fallback path: returns the cached cross-safe
+// head when available, and floors at FinalizedHead so we never advance cross-safe
+// to local-safe on a verifier read failure or any reorg signal, and never drop
+// below finalized.
 func (e *EngineController) crossSafeFallback(reason string) eth.L2BlockRef {
 	finalized := e.FinalizedHead()
+	cached := e.deprecatedSafeHead
+	if cached != (eth.L2BlockRef{}) {
+		if finalized != (eth.L2BlockRef{}) && cached.Number < finalized.Number {
+			e.log.Warn("cached cross-safe behind finalized; using finalized",
+				"reason", reason, "cached_cross_safe", cached, "finalized", finalized)
+			e.SetDeprecatedSafeHead(finalized)
+			return finalized
+		}
+		e.log.Debug("cross-safe fallback using cached cross-safe", "reason", reason, "cross_safe", cached)
+		return cached
+	}
 	e.log.Debug("cross-safe fallback flooring at finalized", "reason", reason, "finalized", finalized)
 	return finalized
 }
@@ -332,6 +344,16 @@ func (e *EngineController) resolveVerifiedAsFinalized(block eth.BlockID) eth.L2B
 		e.log.Warn("super authority finalized a block ahead of local finalized; using local finalized",
 			"super_authority_finalized", block, "local_finalized", e.localFinalizedHead)
 		return e.localFinalizedHead
+	}
+	if cached := e.superAuthorityFinalizedHead; cached != (eth.L2BlockRef{}) {
+		if block.Hash == cached.Hash && block.Number == cached.Number {
+			return cached
+		}
+		if block.Number < cached.Number {
+			e.log.Warn("super authority finalized behind cached; using cache",
+				"source", "verified", "super_authority_finalized", block, "cached_super_authority_finalized", cached)
+			return cached
+		}
 	}
 	br, err := e.engine.L2BlockRefByHash(e.ctx, block.Hash)
 	if err != nil {
@@ -395,6 +417,61 @@ func (e *EngineController) applyFinalizedHeadCacheChecks(br eth.L2BlockRef, sour
 		}
 	}
 	e.superAuthorityFinalizedHead = br
+	return br
+}
+
+// applySafeHeadCacheChecks validates a freshly resolved SuperAuthority safe head
+// against FinalizedHead and the cached cross-safe head. Cross-safe is monotonic
+// for the engine forkchoice labels: the SuperAuthority may hold safe back, but it
+// must not publish a safe label behind finalized or behind a previously published
+// cross-safe label.
+func (e *EngineController) applySafeHeadCacheChecks(br eth.L2BlockRef, source string) eth.L2BlockRef {
+	if finalized := e.FinalizedHead(); finalized != (eth.L2BlockRef{}) {
+		if br.ID() == finalized.ID() {
+			if e.deprecatedSafeHead == (eth.L2BlockRef{}) || e.deprecatedSafeHead.Number < finalized.Number {
+				e.SetDeprecatedSafeHead(finalized)
+			}
+			return finalized
+		}
+		if br.Number < finalized.Number {
+			e.log.Warn("super authority safe behind finalized; using finalized",
+				"source", source, "super_authority_safe", br, "finalized", finalized)
+			e.SetDeprecatedSafeHead(finalized)
+			return finalized
+		}
+		if br.Number == finalized.Number {
+			panic("superAuthority safe head conflicts with finalized head at same height")
+		}
+	}
+	// Explicit verified heads are the SuperAuthority's authoritative cross-safe
+	// signal and may be behind the local-safe value we seeded into
+	// deprecatedSafeHead during startup. Anchor and fallback sources are weaker
+	// startup/flooring signals, so they must not rewind an existing cross-safe
+	// cache.
+	if source != "verified" {
+		if cached := e.deprecatedSafeHead; cached != (eth.L2BlockRef{}) {
+			if br.ID() == cached.ID() {
+				return cached
+			}
+			if br.Number < cached.Number {
+				e.log.Warn("super authority safe behind cached; using cache",
+					"source", source, "super_authority_safe", br, "cached_super_authority_safe", cached)
+				return cached
+			}
+			if br.Number == cached.Number {
+				panic("superAuthority safe head conflicts with cached superAuthority safe head at same height")
+			}
+		}
+	}
+	if cached := e.deprecatedSafeHead; cached != (eth.L2BlockRef{}) && source == "verified" {
+		if br.ID() == cached.ID() {
+			return cached
+		}
+		if br.Number == cached.Number {
+			panic("superAuthority safe head conflicts with cached superAuthority safe head at same height")
+		}
+	}
+	e.SetDeprecatedSafeHead(br)
 	return br
 }
 

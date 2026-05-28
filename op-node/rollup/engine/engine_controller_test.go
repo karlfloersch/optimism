@@ -462,7 +462,7 @@ func TestEngineController_SuperAuthorityHoldPreviousPreservesEngineFinalizedOnSt
 	emitter.ExpectOnceType("ForkchoiceUpdateEvent")
 	expectedFC := eth.ForkchoiceState{
 		HeadBlockHash:      unsafeRef.Hash,
-		SafeBlockHash:      finalizedRef.Hash,
+		SafeBlockHash:      safeRef.Hash,
 		FinalizedBlockHash: finalizedRef.Hash,
 	}
 	mockEngine.ExpectForkchoiceUpdate(&expectedFC, nil, &eth.ForkchoiceUpdatedResult{
