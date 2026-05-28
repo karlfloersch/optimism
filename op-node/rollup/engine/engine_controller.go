@@ -616,6 +616,9 @@ func (e *EngineController) initializeUnknowns(ctx context.Context) error {
 			}
 		} else {
 			e.SetFinalizedHead(finalizedRef)
+			if e.superAuthority != nil && e.superAuthorityFinalizedHead == (eth.L2BlockRef{}) {
+				e.superAuthorityFinalizedHead = finalizedRef
+			}
 			e.log.Info("Loaded initial finalized block ref", "finalized", finalizedRef)
 		}
 	}

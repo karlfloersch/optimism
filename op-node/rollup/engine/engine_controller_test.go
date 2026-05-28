@@ -435,6 +435,46 @@ func TestEngineController_ForkchoiceUpdateUsesSuperAuthority(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestEngineController_SuperAuthorityHoldPreviousPreservesEngineFinalizedOnStartup(t *testing.T) {
+	cfg := &rollup.Config{
+		Genesis: rollup.Genesis{
+			L2Time: 1000,
+		},
+		BlockTime: 2,
+	}
+
+	unsafeRef := eth.L2BlockRef{Hash: common.Hash{0xaa}, Number: 300}
+	safeRef := eth.L2BlockRef{Hash: common.Hash{0xbb}, Number: 200}
+	finalizedRef := eth.L2BlockRef{Hash: common.Hash{0xcc}, Number: 150}
+
+	mockEngine := &testutils.MockEngine{}
+	emitter := &testutils.MockEmitter{}
+	mockSA := &mockSuperAuthority{
+		holdPreviousVerified:  true,
+		holdPreviousFinalized: true,
+	}
+	ec := NewEngineController(context.Background(), mockEngine, testlog.Logger(t, 0), metrics.NoopMetrics, cfg, &sync.Config{}, &testutils.MockL1Source{}, emitter, mockSA)
+
+	mockEngine.ExpectL2BlockRefByLabel(eth.Unsafe, unsafeRef, nil)
+	mockEngine.ExpectL2BlockRefByLabel(eth.Finalized, finalizedRef, nil)
+	mockEngine.ExpectL2BlockRefByLabel(eth.Safe, safeRef, nil)
+
+	emitter.ExpectOnceType("ForkchoiceUpdateEvent")
+	expectedFC := eth.ForkchoiceState{
+		HeadBlockHash:      unsafeRef.Hash,
+		SafeBlockHash:      finalizedRef.Hash,
+		FinalizedBlockHash: finalizedRef.Hash,
+	}
+	mockEngine.ExpectForkchoiceUpdate(&expectedFC, nil, &eth.ForkchoiceUpdatedResult{
+		PayloadStatus: eth.PayloadStatusV1{Status: eth.ExecutionValid},
+	}, nil)
+
+	err := ec.tryUpdateEngineInternal(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, safeRef, ec.deprecatedSafeHead)
+	require.Equal(t, finalizedRef, ec.superAuthorityFinalizedHead)
+}
+
 // TestInitializeUnknowns_SetsLocalSafeHead_Regression is a regression test for a bug
 // where initializeUnknowns would fail to properly initialize localSafeHead on restart.
 //
