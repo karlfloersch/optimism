@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the op-up interop smoke bridge test against a devnet with two L2 chains.
+# Run the interop-smoke bridge test against a devnet with two L2 chains.
 #
 # Usage:
 #   ./run.sh <devnet-dir> <private-key> [loops]
@@ -51,7 +51,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-go build -o "$BUILD_DIR/op-up" "$REPO_ROOT/op-up"
+go build -o "$BUILD_DIR/interop-smoke" "$REPO_ROOT/op-chain-ops/cmd/interop-smoke"
 
 for ((trip = 1; trip <= TRIPS; trip++)); do
   if (( trip % 2 == 1 )); then
@@ -63,7 +63,7 @@ for ((trip = 1; trip <= TRIPS; trip++)); do
   fi
 
   echo "Bridge trip $trip/$TRIPS"
-  "$BUILD_DIR/op-up" smoke-interop bridge \
+  "$BUILD_DIR/interop-smoke" bridge \
     --l2a-rpc "$L2A_RPC" \
     --l2b-rpc "$L2B_RPC" \
     --private-key "$PRIVATE_KEY"

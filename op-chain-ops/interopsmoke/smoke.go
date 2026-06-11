@@ -1,4 +1,10 @@
-package main
+// Package interopsmoke implements interop smoke tests that run against the
+// RPCs of two live interoperable L2 chains: chain identity, ETH transfers,
+// cross-chain ETH bridging, and valid/invalid executing-message checks.
+//
+// It is exposed both as the standalone op-chain-ops/cmd/interop-smoke tool and
+// as the `smoke-interop` subcommand of op-up.
+package interopsmoke
 
 import (
 	"context"
@@ -25,6 +31,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/cliapp"
 	opclient "github.com/ethereum-optimism/optimism/op-service/client"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
+	oplog "github.com/ethereum-optimism/optimism/op-service/log"
+	"github.com/ethereum-optimism/optimism/op-service/log/logfilter"
 	"github.com/ethereum-optimism/optimism/op-service/retry"
 	"github.com/ethereum-optimism/optimism/op-service/sources"
 	"github.com/ethereum-optimism/optimism/op-service/testutils"
@@ -36,27 +44,35 @@ import (
 
 const smokeWaitTimeout = 60 * time.Second
 
-var (
-	sendETHFn = w3.MustNewFunc("sendETH(address,uint256)", "bytes32")
-
-	smokeL2AURLFlag = &cli.StringFlag{
-		Name:    "l2a-rpc",
-		Usage:   "RPC URL for chain A.",
-		EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_L2A_RPC"),
-		Value:   "http://localhost:8545",
-	}
-	smokeL2BURLFlag = &cli.StringFlag{
-		Name:    "l2b-rpc",
-		Usage:   "RPC URL for chain B.",
-		EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_L2B_RPC"),
-		Value:   "http://localhost:8546",
-	}
-	smokePrivateKeyFlag = &cli.StringFlag{
-		Name:    "private-key",
-		Usage:   "Private key to fund smoke-test transactions. If empty, uses the default dev key.",
-		EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_PRIVATE_KEY"),
-	}
+const (
+	l2AURLFlagName     = "l2a-rpc"
+	l2BURLFlagName     = "l2b-rpc"
+	privateKeyFlagName = "private-key"
 )
+
+var sendETHFn = w3.MustNewFunc("sendETH(address,uint256)", "bytes32")
+
+func smokeFlags(envPrefix string) []cli.Flag {
+	return cliapp.ProtectFlags([]cli.Flag{
+		&cli.StringFlag{
+			Name:    l2AURLFlagName,
+			Usage:   "RPC URL for chain A.",
+			EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_L2A_RPC"),
+			Value:   "http://localhost:8545",
+		},
+		&cli.StringFlag{
+			Name:    l2BURLFlagName,
+			Usage:   "RPC URL for chain B.",
+			EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_L2B_RPC"),
+			Value:   "http://localhost:8546",
+		},
+		&cli.StringFlag{
+			Name:    privateKeyFlagName,
+			Usage:   "Private key to fund smoke-test transactions. If empty, uses the default dev key.",
+			EnvVars: opservice.PrefixEnvVar(envPrefix, "SMOKE_PRIVATE_KEY"),
+		},
+	})
+}
 
 type sendETHTrigger struct {
 	Recipient   common.Address
@@ -238,6 +254,17 @@ func (u *remoteUser) sendInvalidExecMessage(ctx context.Context, initMsg *initMe
 	}, nil
 }
 
+func newLogger(ctx context.Context, stderr io.Writer) log.Logger {
+	logHandler := oplog.NewLogHandler(stderr, oplog.DefaultCLIConfig())
+	logHandler = logfilter.WrapFilterHandler(logHandler)
+	logHandler.(logfilter.FilterHandler).Set(logfilter.DefaultMute())
+	logHandler = logfilter.WrapContextHandler(logHandler)
+	logger := log.NewLogger(logHandler)
+	oplog.SetGlobalLogHandler(logHandler)
+	logger.SetContext(ctx)
+	return logger
+}
+
 func newSmokeEnv(ctx context.Context, stderr io.Writer, l2AURL, l2BURL, privateKey string) (*smokeEnv, func(), error) {
 	logger := newLogger(ctx, stderr)
 
@@ -333,11 +360,10 @@ func resolveSmokeKey(privateKey string) (*ecdsa.PrivateKey, common.Address, erro
 func withSmokeEnv(cliCtx *cli.Context, name string, fn func(env *smokeEnv) error) error {
 	ctx := cliCtx.Context
 	stderr := cliCtx.App.ErrWriter
-	l2AURL := cliCtx.String(smokeL2AURLFlag.Name)
-	l2BURL := cliCtx.String(smokeL2BURLFlag.Name)
-	privateKey := cliCtx.String(smokePrivateKeyFlag.Name)
+	l2AURL := cliCtx.String(l2AURLFlagName)
+	l2BURL := cliCtx.String(l2BURLFlagName)
+	privateKey := cliCtx.String(privateKeyFlagName)
 
-	fmt.Fprintf(stderr, "%s\n", asciiArt)
 	fmt.Fprintf(stderr, "\nSmoke: %s\n\n", name)
 
 	env, cleanup, err := newSmokeEnv(ctx, stderr, l2AURL, l2BURL, privateKey)
@@ -358,60 +384,69 @@ func withSmokeEnv(cliCtx *cli.Context, name string, fn func(env *smokeEnv) error
 	return nil
 }
 
-func smokeCommand() *cli.Command {
-	smokeFlags := cliapp.ProtectFlags([]cli.Flag{smokeL2AURLFlag, smokeL2BURLFlag, smokePrivateKeyFlag})
-
+// Command returns the `smoke-interop` command tree for embedding in a host
+// CLI such as op-up. envPrefix scopes the flag environment variables
+// (e.g. "OP_UP" -> OP_UP_SMOKE_L2A_RPC).
+func Command(envPrefix string) *cli.Command {
 	return &cli.Command{
-		Name:  "smoke-interop",
-		Usage: "run interop smoke tests against remote chain RPCs",
-		Subcommands: []*cli.Command{
-			{
-				Name:  "all",
-				Usage: "run all smoke tests sequentially",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "All Tests", smokeAll)
-				},
+		Name:        "smoke-interop",
+		Usage:       "run interop smoke tests against remote chain RPCs",
+		Subcommands: Subcommands(envPrefix),
+	}
+}
+
+// Subcommands returns the individual smoke-test commands, for mounting at the
+// top level of a standalone CLI.
+func Subcommands(envPrefix string) []*cli.Command {
+	flags := smokeFlags(envPrefix)
+
+	return []*cli.Command{
+		{
+			Name:  "all",
+			Usage: "run all smoke tests sequentially",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "All Tests", smokeAll)
 			},
-			{
-				Name:  "identity",
-				Usage: "verify both chains have different chain IDs",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "Chain Identity", smokeIdentity)
-				},
+		},
+		{
+			Name:  "identity",
+			Usage: "verify both chains have different chain IDs",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "Chain Identity", smokeIdentity)
 			},
-			{
-				Name:  "transfer",
-				Usage: "send ETH transfers on both chains",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "ETH Transfers", smokeTransfer)
-				},
+		},
+		{
+			Name:  "transfer",
+			Usage: "send ETH transfers on both chains",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "ETH Transfers", smokeTransfer)
 			},
-			{
-				Name:  "bridge",
-				Usage: "bridge ETH from chain A to chain B via SuperchainETHBridge",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "Cross-Chain ETH Bridge", smokeBridge)
-				},
+		},
+		{
+			Name:  "bridge",
+			Usage: "bridge ETH from chain A to chain B via SuperchainETHBridge",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "Cross-Chain ETH Bridge", smokeBridge)
 			},
-			{
-				Name:  "valid-message",
-				Usage: "send a valid executing message and verify it stays in-chain",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "Valid Exec Message", smokeValidMessage)
-				},
+		},
+		{
+			Name:  "valid-message",
+			Usage: "send a valid executing message and verify it stays in-chain",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "Valid Exec Message", smokeValidMessage)
 			},
-			{
-				Name:  "invalid-message",
-				Usage: "send an invalid executing message and verify it is reorged out",
-				Flags: smokeFlags,
-				Action: func(cliCtx *cli.Context) error {
-					return withSmokeEnv(cliCtx, "Invalid Exec Message (reorg)", smokeInvalidMessage)
-				},
+		},
+		{
+			Name:  "invalid-message",
+			Usage: "send an invalid executing message and verify it is reorged out",
+			Flags: flags,
+			Action: func(cliCtx *cli.Context) error {
+				return withSmokeEnv(cliCtx, "Invalid Exec Message (reorg)", smokeInvalidMessage)
 			},
 		},
 	}
