@@ -8,10 +8,10 @@
 // convention or a prover's headers-only L1 walk fails here rather than in a proof six hours later.
 //
 // The output is the file the verifier, the sequencer's op-node and the prover all read, and its
-// sha256-of-canonical-JSON is the rollupConfigHash the wire binds. See the rotation runbook for how
-// that hash is computed (it is kona's serialization of the PARSED config, so it is computed on the
-// proving side, not here — a second implementation of a consensus-critical hash is exactly what we
-// do not want).
+// sha256-of-canonical-JSON is the rollupConfigHash the wire binds. Compute it, together with the
+// dependency-set commitment, with silhouette-bindings. That command parses both artifacts and calls
+// silhouette.ComputeBindings, so deployment tooling never needs a second implementation of either
+// consensus-critical hash.
 package main
 
 import (

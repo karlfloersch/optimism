@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-devstack/devtest"
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/intentbuilder"
 	opnodeconfig "github.com/ethereum-optimism/optimism/op-node/config"
+	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-node/rollup/driver"
 	nodeSync "github.com/ethereum-optimism/optimism/op-node/rollup/sync"
 	"github.com/ethereum-optimism/optimism/op-service/client"
@@ -289,23 +290,12 @@ func writeSilhouetteManifest(t devtest.T, dir string, l1Chain *params.ChainConfi
 	}}})
 }
 
-// silhouetteBindings computes the two wire commitments a verifier checks a batch against.
-//
-// Neither is derived from anything in the Go stack today — the real values come from what the prover
-// derived under — so they are configuration on both sides. Hashing the artifacts the chain actually
-// runs, rather than picking constants, buys the property that matters: change the chain and the
-// commitment changes, so a batch built for one chain cannot be accepted as another's history.
-func silhouetteBindings(t devtest.T, rollupCfg any, depSet *depset.StaticConfigDependencySet) (rollupConfigHash, depSetHash common.Hash) {
-	require := t.Require()
-	raw, err := json.Marshal(rollupCfg)
-	require.NoError(err, "encode the silhouette chain's rollup config for its commitment")
-	rollupConfigHash = crypto.Keccak256Hash([]byte("devstack-silhouette-rollup-config:"), raw)
-
-	require.NotNil(depSet, "a silhouette chain needs a dependency set: outside one, nobody can reference its messages")
-	raw, err = json.Marshal(depSet)
-	require.NoError(err, "encode the dependency set for its commitment")
-	depSetHash = crypto.Keccak256Hash([]byte("devstack-silhouette-depset:"), raw)
-	return rollupConfigHash, depSetHash
+// silhouetteBindings computes the two wire commitments a verifier checks a batch against through
+// the same canonical API exposed to production deployment tooling.
+func silhouetteBindings(t devtest.T, rollupCfg *rollup.Config, depSet *depset.StaticConfigDependencySet) (rollupConfigHash, depSetHash common.Hash) {
+	bindings, err := silhouette.ComputeBindings(rollupCfg, depSet)
+	t.Require().NoError(err, "compute canonical silhouette configuration bindings")
+	return bindings.RollupConfigHash, bindings.DepSetHash
 }
 
 // silhouetteInteropActivation is the first L2 timestamp the VERIFIER verifies, and it is one block

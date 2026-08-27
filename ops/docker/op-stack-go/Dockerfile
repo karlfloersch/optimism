@@ -176,7 +176,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 FROM --platform=$BUILDPLATFORM builder AS proofbatch-submitter-builder
 ARG PROOFBATCH_SUBMITTER_VERSION=v0.0.0
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-  cd op-supernode && GOOS=$TARGETOS GOARCH=$TARGETARCH GITCOMMIT=$GIT_COMMIT GITDATE=$GIT_DATE VERSION="$PROOFBATCH_SUBMITTER_VERSION" just proofbatch-submitter proofbatch-inspect
+  cd op-supernode && GOOS=$TARGETOS GOARCH=$TARGETARCH GITCOMMIT=$GIT_COMMIT GITDATE=$GIT_DATE VERSION="$PROOFBATCH_SUBMITTER_VERSION" just proofbatch-submitter proofbatch-inspect silhouette-config silhouette-bindings
 
 FROM --platform=$BUILDPLATFORM builder AS op-interop-filter-builder
 ARG OP_INTEROP_FILTER_VERSION=v0.0.0
@@ -368,6 +368,11 @@ COPY --from=proofbatch-submitter-builder /app/op-supernode/bin/proofbatch-submit
 # be here too or that step needs a second image pulled mid-incident. It reads
 # files, never L1, and adds 18MB to a 31MB image.
 COPY --from=proofbatch-submitter-builder /app/op-supernode/bin/proofbatch-inspect /usr/local/bin/
+# Deployment tooling rides in the producer image so orchestrators compute the
+# exact bindings consumed by this submitter and the verifier, without copying
+# consensus-critical hash logic into a separate image.
+COPY --from=proofbatch-submitter-builder /app/op-supernode/bin/silhouette-config /usr/local/bin/
+COPY --from=proofbatch-submitter-builder /app/op-supernode/bin/silhouette-bindings /usr/local/bin/
 CMD ["proofbatch-submitter"]
 
 FROM $TARGET_BASE_IMAGE AS op-interop-filter-target

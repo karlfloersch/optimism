@@ -10,6 +10,8 @@ _LDFLAGSSTRING := "'" + trim(
 BINARY := "./bin/op-supernode"
 SUBMITTER_BINARY := "./bin/proofbatch-submitter"
 INSPECT_BINARY := "./bin/proofbatch-inspect"
+CONFIG_BINARY := "./bin/silhouette-config"
+BINDINGS_BINARY := "./bin/silhouette-bindings"
 
 # Build op-supernode binary
 op-supernode: (go_build BINARY "./cmd" "-ldflags" _LDFLAGSSTRING)
@@ -24,9 +26,13 @@ proofbatch-submitter: (go_build SUBMITTER_BINARY "./cmd/proofbatch-submitter" "-
 # Build proofbatch-inspect binary
 proofbatch-inspect: (go_build INSPECT_BINARY "./cmd/proofbatch-inspect")
 
+# Build Silhouette deployment configuration tools
+silhouette-config: (go_build CONFIG_BINARY "./cmd/silhouette-config")
+silhouette-bindings: (go_build BINDINGS_BINARY "./cmd/silhouette-bindings")
+
 # Clean build artifacts
 clean:
-    rm -f {{BINARY}} {{SUBMITTER_BINARY}} {{INSPECT_BINARY}}
+    rm -f {{BINARY}} {{SUBMITTER_BINARY}} {{INSPECT_BINARY}} {{CONFIG_BINARY}} {{BINDINGS_BINARY}}
 
 # Run tests
 test: (go_test "./...")
