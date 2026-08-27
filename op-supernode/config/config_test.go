@@ -5,7 +5,27 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v2"
+
+	"github.com/ethereum-optimism/optimism/op-supernode/flags"
 )
+
+func TestNewConfigReadsSharedBeaconSlotDurationOverride(t *testing.T) {
+	var got *CLIConfig
+	app := cli.NewApp()
+	app.Flags = flags.Flags
+	app.Action = func(ctx *cli.Context) error {
+		got = NewConfig(ctx)
+		return nil
+	}
+	require.NoError(t, app.Run([]string{
+		"op-supernode",
+		"--l1", "http://anvil:8545",
+		"--l1.beacon.slot-duration-override", "2",
+	}))
+	require.NotNil(t, got)
+	require.Equal(t, uint64(2), got.L1BeaconSlotDurationOverride)
+}
 
 func TestCLIConfig_Check_interopLogBackfill(t *testing.T) {
 	ptr := func(u uint64) *uint64 { return &u }

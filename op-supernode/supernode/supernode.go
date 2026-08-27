@@ -545,15 +545,22 @@ func (s *Supernode) initBeaconClient(ctx context.Context, cfg *config.CLIConfig)
 
 	s.log.Info("initializing L1 Beacon client", "beacon_addr", cfg.L1BeaconAddr)
 
-	// Create beacon client
+	// Create beacon client. The slot-duration override belongs to the shared
+	// client: per-VN beacon flags cannot affect proof-batch blob retrieval.
+	var beaconOpts []sources.BeaconHTTPClientOption
+	if cfg.L1BeaconSlotDurationOverride != 0 {
+		beaconOpts = append(beaconOpts, sources.WithSlotDurationOverride(cfg.L1BeaconSlotDurationOverride))
+		s.log.Info("using shared L1 beacon slot-duration override", "seconds", cfg.L1BeaconSlotDurationOverride)
+	}
 	basicClient := client.NewBasicHTTPClient(cfg.L1BeaconAddr, s.log)
-	beaconHTTPClient := sources.NewBeaconHTTPClient(basicClient)
+	beaconHTTPClient := sources.NewBeaconHTTPClient(basicClient, beaconOpts...)
 
-	// Create fallback beacon clients (e.g. blob archiver)
+	// Create fallback beacon clients (e.g. blob archiver). They share the same
+	// chain's slot duration and therefore receive the same override.
 	var fallbacks []apis.BeaconClient
 	for _, addr := range cfg.L1BeaconFallbackAddrs {
 		fb := client.NewBasicHTTPClient(addr, s.log)
-		fallbacks = append(fallbacks, sources.NewBeaconHTTPClient(fb))
+		fallbacks = append(fallbacks, sources.NewBeaconHTTPClient(fb, beaconOpts...))
 	}
 
 	// Create L1 Beacon client with default config

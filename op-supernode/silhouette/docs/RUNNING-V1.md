@@ -52,12 +52,13 @@ Three things to notice, because they are the deliverable:
 
 ---
 
-## 1. Build (four Go binaries, no toolchain beyond Go)
+## 1. Build (five Go binaries, no toolchain beyond Go)
 
 ```
 go build -o op-supernode           ./op-supernode/cmd
 go build -o proofbatch-submitter   ./op-supernode/cmd/proofbatch-submitter
 go build -o silhouette-config      ./op-supernode/cmd/silhouette-config
+go build -o silhouette-bindings    ./op-supernode/cmd/silhouette-bindings
 go build -o proofbatch-inspect     ./op-supernode/cmd/proofbatch-inspect
 ```
 
@@ -65,10 +66,9 @@ There is no `cargo`, no prover, and no proving artefact of any kind anywhere in 
 the v1 pitch stated as a build. `TestAttestedChainIsRenderedWithoutAProvingToolchain` asserts the
 configuration half of the same claim.
 
-Size, for the record: the verifier core (`op-supernode/silhouette` + `op-supernode/proofbatch`,
-non-test) is **5,858 lines** of Go; **7,045** including the submitter, the config generator and the
-inspect tool; **8,020** lines of tests. Nothing in that build verifies a proof, so nothing in it
-needs a toolchain that could.
+The verifier core is `op-supernode/silhouette` + `op-supernode/proofbatch`; the remaining binaries
+are the submitter and deployment/inspection tools around that core. Nothing in that build verifies a
+proof, so nothing in it needs a toolchain that could.
 
 ---
 
@@ -89,8 +89,16 @@ hand-edited file loses silently: a **finite** sequencing window (the forced-exte
 depends on it), a `deposit_contract_address` pointing at the **gated** portal, and every fork active
 at genesis. The generator runs the invariant checks over its own output.
 
-Its `rollupConfigHash` is what the wire binds and what the verifier requires. Compute it the way the
-runbook describes — from the *parsed* config — never with a second implementation of the hash.
+Its `rollupConfigHash` is what the wire binds and what the verifier requires. Compute both canonical
+bindings from the *parsed* artifacts — never with a second implementation of either hash:
+
+```
+silhouette-bindings --rollup-config p-rollup.json --dependency-set depset.json \
+  --out bindings.json
+```
+
+The command calls the same `silhouette.ComputeBindings` library API used by the devstack harness.
+Use `bindings.json` for the verifier config and proofbatch-submitter flags.
 
 ### 2b. The verifier config — one file per silhouette chain
 
@@ -147,10 +155,16 @@ proven head — mandatory there, or a frozen P local-safe freezes A cluster-wide
 
 ```
 op-supernode --chains … --dependency-set depset.json --silhouette manifest.json \
+             --l1.beacon.slot-duration-override 2 \
              --vn.<P>.l2 http://127.0.0.1:1 --vn.<P>.interop.dependency-set depset.json …
 ```
 
-Two invocation details that are not obvious and cost time if guessed:
+Three invocation details that are not obvious and cost time if guessed:
+
+- **The beacon slot-duration override is a top-level flag.** The proof-batch blob source uses the
+  shared beacon client, so a per-VN override is ignored. Set
+  `--l1.beacon.slot-duration-override` for Anvil or another beacon-compatible devnet endpoint that
+  does not serve `/eth/v1/config/spec`; omit it against a real beacon node.
 
 - **`--vn.<P>.l2` must be present and is never dialled.** The assembly replaces the L2 endpoint with
   an in-process client to the shim before the container is built; op-node's config builder only
