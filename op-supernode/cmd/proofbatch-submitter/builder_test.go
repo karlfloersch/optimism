@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum-optimism/optimism/op-core/interop/messages"
+	"github.com/ethereum-optimism/optimism/op-core/predeploys"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-supernode/proofbatch"
 )
 
@@ -33,13 +36,17 @@ type fakeChain struct {
 	safeLag      uint64
 	l1Head       uint64
 	logsPer      map[uint64]int
+	receiptsPer  map[uint64][]map[string]any
 	safeOverride uint64
 	// badOutputAt makes the node publish an output root that its own roots do not derive.
 	badOutputAt uint64
 }
 
 func newFakeChain() *fakeChain {
-	return &fakeChain{head: 100, l1Head: 5000, logsPer: map[uint64]int{}}
+	return &fakeChain{
+		head: 100, l1Head: 5000,
+		logsPer: map[uint64]int{}, receiptsPer: map[uint64][]map[string]any{},
+	}
 }
 
 // safeOverride, when non-zero, is reported as the safe head verbatim — the only way to describe a
@@ -81,6 +88,9 @@ func (f *fakeChain) CallContext(_ context.Context, result any, method string, ar
 		})
 	case "eth_getBlockReceipts":
 		n := uint64(args[0].(hexutil.Uint64))
+		if receipts, ok := f.receiptsPer[n]; ok {
+			return assign(result, receipts)
+		}
 		return assign(result, f.receipts(n))
 	}
 	return fmt.Errorf("unexpected method %s", method)
@@ -117,6 +127,26 @@ func logAddress(block uint64, i int) common.Address {
 
 func logTopic(block uint64, i int) common.Hash {
 	return crypto.Keccak256Hash([]byte(fmt.Sprintf("topic-%d-%d", block, i)))
+}
+
+func executingMessageLog(id messages.Identifier, msgHash common.Hash, logIndex uint64) map[string]any {
+	data := make([]byte, 0, 5*32)
+	data = append(data, make([]byte, 12)...)
+	data = append(data, id.Origin.Bytes()...)
+	data = append(data, make([]byte, 24)...)
+	data = binary.BigEndian.AppendUint64(data, id.BlockNumber)
+	data = append(data, make([]byte, 28)...)
+	data = binary.BigEndian.AppendUint32(data, id.LogIndex)
+	data = append(data, make([]byte, 24)...)
+	data = binary.BigEndian.AppendUint64(data, id.Timestamp)
+	chainID := id.ChainID.Bytes32()
+	data = append(data, chainID[:]...)
+	return map[string]any{
+		"address":  predeploys.CrossL2InboxAddr,
+		"topics":   []common.Hash{messages.ExecutingMessageEventTopic, msgHash},
+		"data":     hexutil.Bytes(data),
+		"logIndex": hexutil.Uint64(logIndex),
+	}
 }
 
 func l2HashOf(n uint64) common.Hash {
@@ -232,6 +262,54 @@ func TestBuilderAnchorsThenBatches(t *testing.T) {
 	}), batch.Blocks[0].Logs[1].Hash)
 	// The default policy exports hashes only.
 	require.Empty(t, batch.Blocks[0].Logs[0].Preimage)
+}
+
+// TestBuilderCarriesWireV3Imports exercises the production builder through the v3 codec rather
+// than only asserting on its in-memory batch.
+func TestBuilderCarriesWireV3Imports(t *testing.T) {
+	chain := newFakeChain()
+	id := messages.Identifier{
+		Origin:      common.HexToAddress("0x1234"),
+		BlockNumber: 88,
+		LogIndex:    7,
+		Timestamp:   1_800_000_100,
+		ChainID:     eth.ChainIDFromUInt64(901),
+	}
+	msgHash := crypto.Keccak256Hash([]byte("imported message"))
+	chain.receiptsPer[101] = []map[string]any{{"logs": []map[string]any{
+		executingMessageLog(id, msgHash, 0),
+	}}}
+	b := newTestBuilder(t, chain)
+	anchor(t, b, chain)
+	chain.head = 101
+
+	batch, err := b.next(context.Background())
+	require.NoError(t, err)
+	require.Len(t, batch.Blocks[0].ExecMsgs, 1)
+	require.Equal(t, id, batch.Blocks[0].ExecMsgs[0].Identifier)
+	require.Equal(t, msgHash, batch.Blocks[0].ExecMsgs[0].PayloadHash)
+
+	payload, err := proofbatch.EncodeAs(batch, nil, proofbatch.Version)
+	require.NoError(t, err)
+	envelope, err := proofbatch.DecodeAs(payload, proofbatch.Version)
+	require.NoError(t, err)
+	require.Equal(t, batch.Blocks[0].ExecMsgs, envelope.Batch.Blocks[0].ExecMsgs)
+}
+
+func TestBuilderRejectsMalformedExecutingMessage(t *testing.T) {
+	chain := newFakeChain()
+	chain.receiptsPer[101] = []map[string]any{{"logs": []map[string]any{{
+		"address":  predeploys.CrossL2InboxAddr,
+		"topics":   []common.Hash{messages.ExecutingMessageEventTopic},
+		"data":     hexutil.Bytes{},
+		"logIndex": hexutil.Uint64(0),
+	}}}}
+	b := newTestBuilder(t, chain)
+	anchor(t, b, chain)
+	chain.head = 101
+
+	_, err := b.next(context.Background())
+	require.ErrorContains(t, err, "import list cannot be determined")
 }
 
 // TestBuilderUsesBlockLevelLogIndices: the node numbers logs across a whole block, not within a

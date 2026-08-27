@@ -322,20 +322,28 @@ func (b *builder) blockExport(ctx context.Context, number uint64) (*proofbatch.B
 		return nil, fmt.Errorf("block %d: derived output root %s but the node reports %s",
 			number, derived, out.OutputRoot)
 	}
+	var logs []*types.Log
 	for _, receipt := range receipts {
 		for _, l := range receipt.Logs {
+			log := &types.Log{
+				Address: l.Address,
+				Topics:  l.Topics,
+				Data:    l.Data,
+			}
+			logs = append(logs, log)
 			export.Logs = append(export.Logs, proofbatch.LogExport{
 				Index: uint32(l.LogIndex),
-				Hash: messages.LogToLogHash(&types.Log{
-					Address: l.Address,
-					Topics:  l.Topics,
-					Data:    l.Data,
-				}),
+				Hash:  messages.LogToLogHash(log),
 				// The v2 default policy exports hashes only; a preimage-bearing policy is a
 				// config change on both sides, not a change to this tool's wire.
 			})
 		}
 	}
+	imports, err := proofbatch.ExecMsgsFromLogs(logs)
+	if err != nil {
+		return nil, fmt.Errorf("extract the import list of L2 block %d: %w", number, err)
+	}
+	export.ExecMsgs = imports
 	return export, nil
 }
 
